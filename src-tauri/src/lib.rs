@@ -30,6 +30,7 @@ pub fn run() {
             let state = crate::state::AppState {
                 repos,
                 workspaces,
+                tasks: std::collections::HashMap::new(),
                 settings,
             };
 
