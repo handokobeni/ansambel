@@ -1,5 +1,6 @@
 pub mod error;
 pub mod ids;
+pub mod persistence;
 pub mod platform;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
