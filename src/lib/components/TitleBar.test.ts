@@ -1,6 +1,6 @@
 // src/lib/components/TitleBar.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import TitleBar from './TitleBar.svelte';
 
 // Mock @tauri-apps/plugin-dialog
@@ -14,17 +14,30 @@ vi.mock('$lib/stores/repos.svelte', () => ({
     selectedRepoId: null as string | null,
     repos: new Map(),
     add: vi.fn(),
+    select: vi.fn(),
     getSelected: vi.fn(() => null),
+  },
+}));
+
+// Mock the workspaces store (TitleBar calls workspaces.loadForRepo after add)
+vi.mock('$lib/stores/workspaces.svelte', () => ({
+  workspaces: {
+    loadForRepo: vi.fn(),
   },
 }));
 
 import { open } from '@tauri-apps/plugin-dialog';
 import { repos } from '$lib/stores/repos.svelte';
+import { workspaces } from '$lib/stores/workspaces.svelte';
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(repos.getSelected).mockReturnValue(null);
   (repos as { selectedRepoId: string | null }).selectedRepoId = null;
+  // Default loadForRepo to resolve immediately so the promise chain completes.
+  vi.mocked(workspaces.loadForRepo).mockResolvedValue(undefined);
+  // Silence alert() during error-path tests.
+  vi.stubGlobal('alert', vi.fn());
 });
 
 describe('TitleBar', () => {
@@ -47,7 +60,7 @@ describe('TitleBar', () => {
     expect(screen.getByText('my-project')).toBeInTheDocument();
   });
 
-  it('clicking "Add Repo" opens folder dialog and calls repos.add with returned path', async () => {
+  it('clicking "Add Repo" opens folder dialog, calls repos.add, selects, and loads workspaces', async () => {
     vi.mocked(open).mockResolvedValue('/home/user/new-project');
     vi.mocked(repos.add).mockResolvedValue({
       id: 'repo_new111',
@@ -59,10 +72,13 @@ describe('TitleBar', () => {
       updated_at: 1776000001,
     });
     render(TitleBar);
-    const addBtn = screen.getByRole('button', { name: /add repo/i });
-    await fireEvent.click(addBtn);
+    await fireEvent.click(screen.getByRole('button', { name: /add repo/i }));
     expect(open).toHaveBeenCalledWith({ directory: true, multiple: false });
     expect(repos.add).toHaveBeenCalledWith('/home/user/new-project');
+    await waitFor(() => {
+      expect(repos.select).toHaveBeenCalledWith('repo_new111');
+      expect(workspaces.loadForRepo).toHaveBeenCalledWith('repo_new111');
+    });
   });
 
   it('does nothing when dialog is cancelled (open returns null)', async () => {
@@ -70,6 +86,8 @@ describe('TitleBar', () => {
     render(TitleBar);
     await fireEvent.click(screen.getByRole('button', { name: /add repo/i }));
     expect(repos.add).not.toHaveBeenCalled();
+    expect(repos.select).not.toHaveBeenCalled();
+    expect(workspaces.loadForRepo).not.toHaveBeenCalled();
   });
 
   it('does nothing when dialog returns an empty string', async () => {
@@ -77,5 +95,18 @@ describe('TitleBar', () => {
     render(TitleBar);
     await fireEvent.click(screen.getByRole('button', { name: /add repo/i }));
     expect(repos.add).not.toHaveBeenCalled();
+  });
+
+  it('surfaces an alert when repos.add throws', async () => {
+    vi.mocked(open).mockResolvedValue('/home/user/bad-project');
+    vi.mocked(repos.add).mockRejectedValue(new Error('not a git repository'));
+    render(TitleBar);
+    await fireEvent.click(screen.getByRole('button', { name: /add repo/i }));
+    await waitFor(() => {
+      expect(globalThis.alert).toHaveBeenCalledWith(
+        expect.stringContaining('not a git repository')
+      );
+    });
+    expect(repos.select).not.toHaveBeenCalled();
   });
 });
