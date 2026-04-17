@@ -186,7 +186,11 @@ describe('KanbanBoard drag behavior', () => {
     expect(onMove).toHaveBeenCalledWith('tk_abc123', 'done', 0);
   });
 
-  it('uses order 0 when dropped task id is not found in items list (rawOrder fallback)', async () => {
+  it('does not fire onMove when finalize fires on a source zone (item absent from items)', async () => {
+    // svelte-dnd-action fires finalize on BOTH the source and destination zones
+    // when an item is dragged between zones. Only the destination should trigger
+    // onMove — the source zone finalize (where the dropped id is not in items)
+    // must be a no-op to avoid double-calling the backend.
     const onMove = vi.fn();
     const task = makeTask({ id: 'tk_abc123', column: 'todo' });
     render(KanbanBoard, {
@@ -198,13 +202,13 @@ describe('KanbanBoard drag behavior', () => {
         onRemoveTask: vi.fn(),
       },
     });
-    const reviewZone = document.querySelector('[data-column="review"]') as HTMLElement;
-    // items list does not contain the dropped task id — rawOrder will be -1
+    const todoZone = document.querySelector('[data-column="todo"]') as HTMLElement;
+    // Source-zone finalize: task has moved away, items[] no longer contains it.
     const event = new CustomEvent('finalize', {
       detail: { items: [], info: { id: 'tk_abc123' } },
     });
-    reviewZone.dispatchEvent(event);
-    expect(onMove).toHaveBeenCalledWith('tk_abc123', 'review', 0);
+    todoZone.dispatchEvent(event);
+    expect(onMove).not.toHaveBeenCalled();
   });
 
   it('does not show Add task button in non-todo columns', () => {

@@ -30,31 +30,65 @@
     { id: 'done', label: 'Done' },
   ];
 
-  let columnItems = $state<Record<KanbanColumn, Task[]>>({
-    todo: [],
-    in_progress: [],
-    review: [],
-    done: [],
-  });
+  // Per-column local state managed primarily by svelte-dnd-action's
+  // consider/finalize callbacks. The $effect below only re-hydrates from
+  // the parent `tasks` prop when the SET of task IDs changes (add/remove),
+  // so in-place column/order/workspace_id mutations (from tasks.move()) do
+  // NOT clobber dnd-action's internal tracking mid-drag.
+  let todoItems = $state<Task[]>([]);
+  let inProgressItems = $state<Task[]>([]);
+  let reviewItems = $state<Task[]>([]);
+  let doneItems = $state<Task[]>([]);
+
+  let lastIds = new Set<string>();
+
+  function filterSort(col: KanbanColumn, ts: Task[]): Task[] {
+    return ts.filter((t) => t.column === col).sort((a, b) => a.order - b.order);
+  }
 
   $effect(() => {
-    const next: Record<KanbanColumn, Task[]> = {
-      todo: [],
-      in_progress: [],
-      review: [],
-      done: [],
-    };
-    for (const t of tasks) {
-      next[t.column].push(t);
-    }
-    for (const col of COLUMNS) {
-      next[col.id].sort((a, b) => a.order - b.order);
-    }
-    columnItems = next;
+    const nextIds = new Set(tasks.map((t) => t.id));
+    const sameSet = nextIds.size === lastIds.size && [...nextIds].every((id) => lastIds.has(id));
+    if (sameSet) return;
+    lastIds = nextIds;
+    todoItems = filterSort('todo', tasks);
+    inProgressItems = filterSort('in_progress', tasks);
+    reviewItems = filterSort('review', tasks);
+    doneItems = filterSort('done', tasks);
   });
 
+  function itemsFor(col: KanbanColumn): Task[] {
+    switch (col) {
+      case 'todo':
+        return todoItems;
+      case 'in_progress':
+        return inProgressItems;
+      case 'review':
+        return reviewItems;
+      case 'done':
+        return doneItems;
+    }
+  }
+
+  function setItems(col: KanbanColumn, next: Task[]): void {
+    switch (col) {
+      case 'todo':
+        todoItems = next;
+        break;
+      case 'in_progress':
+        inProgressItems = next;
+        break;
+      case 'review':
+        reviewItems = next;
+        break;
+      case 'done':
+        doneItems = next;
+        break;
+    }
+  }
+
   function handleConsider(column: KanbanColumn, e: CustomEvent<{ items: Task[] }>) {
-    columnItems = { ...columnItems, [column]: e.detail.items };
+    setItems(column, e.detail.items);
   }
 
   function handleFinalize(
@@ -66,9 +100,13 @@
     const items = e.detail.items.filter(
       (t) => !(t as Task & Record<string, unknown>)[SHADOW_ITEM_MARKER_PROPERTY_NAME]
     );
-    columnItems = { ...columnItems, [column]: items };
-    const newOrder = rawOrder !== -1 ? rawOrder : 0;
-    onMove(droppedId, column, newOrder);
+    setItems(column, items);
+    // Only fire onMove when this column is actually the item's destination
+    // — svelte-dnd-action fires finalize on the source zone too (with the
+    // shadow item removed), which we must ignore so we don't double-call.
+    if (rawOrder !== -1) {
+      onMove(droppedId, column, rawOrder);
+    }
   }
 </script>
 
@@ -91,7 +129,7 @@
         <span
           class="ml-2 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 text-[10px] font-semibold rounded bg-[var(--bg-hover)] text-[var(--text-dim)]"
         >
-          {columnItems[col.id].length}
+          {itemsFor(col.id).length}
         </span>
       </div>
 
@@ -100,11 +138,11 @@
         data-column={col.id}
         role="list"
         aria-label="{col.label} tasks"
-        use:dndzone={{ items: columnItems[col.id], flipDurationMs: 150 }}
+        use:dndzone={{ items: itemsFor(col.id), flipDurationMs: 150 }}
         onconsider={(e) => handleConsider(col.id, e)}
         onfinalize={(e) => handleFinalize(col.id, e)}
       >
-        {#each columnItems[col.id] as task (task.id)}
+        {#each itemsFor(col.id) as task (task.id)}
           <TaskCard {task} onRemove={onRemoveTask} />
         {:else}
           <p class="text-xs text-[var(--text-muted)] text-center py-4 italic">No tasks</p>
