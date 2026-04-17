@@ -1,5 +1,6 @@
 pub mod error;
 pub mod ids;
+pub mod logging;
 pub mod persistence;
 pub mod platform;
 
