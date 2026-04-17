@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceStatus {
+    #[default]
     NotStarted,
     Running,
     Waiting,
@@ -10,25 +11,14 @@ pub enum WorkspaceStatus {
     Error,
 }
 
-impl Default for WorkspaceStatus {
-    fn default() -> Self {
-        Self::NotStarted
-    }
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum KanbanColumn {
+    #[default]
     Todo,
     InProgress,
     Review,
     Done,
-}
-
-impl Default for KanbanColumn {
-    fn default() -> Self {
-        Self::Todo
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
