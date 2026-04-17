@@ -5,7 +5,7 @@ description = "Orchestrate your AI ensemble"
 authors = ["Handoko Beni <benihandoko@student.upi.edu>"]
 edition = "2021"
 rust-version = "1.82"
-license-file = "LICENSE"
+license = "MIT"
 
 [lib]
 name = "ansambel_lib"

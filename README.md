@@ -41,4 +41,4 @@ cd src-tauri && cargo test --lib && cd ..
 
 ## License
 
-Private. See [LICENSE](./LICENSE).
+[MIT](./LICENSE) © 2026 Handoko Beni.
