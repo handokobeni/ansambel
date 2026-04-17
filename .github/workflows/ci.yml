@@ -33,7 +33,7 @@ jobs:
         working-directory: src-tauri
       - run: cargo check --all-targets
         working-directory: src-tauri
-      - run: cargo llvm-cov --lib --ignore-filename-regex 'lib\.rs$|main\.rs$|commands[/\\](repo|workspace)\.rs$' --fail-under-lines 95 --fail-under-functions 95
+      - run: cargo llvm-cov --lib --ignore-filename-regex 'lib\.rs$|main\.rs$|commands[/\\](repo|workspace|task)\.rs$' --fail-under-lines 95 --fail-under-functions 95
         working-directory: src-tauri
 
   frontend:

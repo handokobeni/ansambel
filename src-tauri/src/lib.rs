@@ -47,6 +47,11 @@ pub fn run() {
             crate::commands::workspace::create_workspace,
             crate::commands::workspace::list_workspaces,
             crate::commands::workspace::remove_workspace,
+            crate::commands::task::add_task,
+            crate::commands::task::list_tasks,
+            crate::commands::task::update_task,
+            crate::commands::task::move_task,
+            crate::commands::task::remove_task,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -66,5 +71,15 @@ mod tests {
             settings: AppSettings::default(),
         };
         assert!(state.tasks.is_empty());
+    }
+
+    #[test]
+    fn all_task_commands_exist_as_public_fns() {
+        // Verify all five command symbols are resolvable — catches accidental renames.
+        let _ = crate::commands::task::add_task as *const () as usize;
+        let _ = crate::commands::task::list_tasks as *const () as usize;
+        let _ = crate::commands::task::update_task as *const () as usize;
+        let _ = crate::commands::task::move_task as *const () as usize;
+        let _ = crate::commands::task::remove_task as *const () as usize;
     }
 }

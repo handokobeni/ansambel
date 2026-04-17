@@ -7,4 +7,4 @@
 #     those inner functions. To restore these to the gate, add integration
 #     tests that construct a Tauri mock builder and invoke the public
 #     commands end-to-end (follow-up issue for Phase 1a-frontend or Phase 2).
-cov = "llvm-cov --lib --ignore-filename-regex lib\\.rs$|main\\.rs$|commands[/\\\\](repo|workspace)\\.rs$ --fail-under-lines 95 --fail-under-functions 95"
+cov = "llvm-cov --lib --ignore-filename-regex lib\\.rs$|main\\.rs$|commands[/\\\\](repo|workspace|task)\\.rs$ --fail-under-lines 95 --fail-under-functions 95"
