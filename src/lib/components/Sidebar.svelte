@@ -71,13 +71,15 @@
       Workspaces
     </span>
     <button
-      class="text-xs font-semibold px-2 py-0.5 rounded bg-[var(--bg-card)] border border-[var(--border-light)] text-[var(--text-dim)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
+      class="flex items-center justify-center w-6 h-6 rounded text-base leading-none text-[var(--text-dim)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer disabled:opacity-50"
       onclick={() => {
         showForm = !showForm;
       }}
+      disabled={!selectedRepo}
       aria-label="New Workspace"
+      title={selectedRepo ? 'New workspace' : 'Select a repo first'}
     >
-      + New Workspace
+      +
     </button>
   </div>
 
