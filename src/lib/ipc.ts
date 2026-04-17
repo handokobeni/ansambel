@@ -42,7 +42,7 @@ export const api = {
     update: (taskId: string, patch: TaskPatch): Promise<void> =>
       invoke('update_task', { taskId, patch }),
 
-    move: (taskId: string, column: KanbanColumn, order: number): Promise<void> =>
+    move: (taskId: string, column: KanbanColumn, order: number): Promise<Task> =>
       invoke('move_task', { taskId, column, order }),
 
     remove: (taskId: string, force?: boolean): Promise<void> =>

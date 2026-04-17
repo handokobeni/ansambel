@@ -237,14 +237,26 @@ describe('api.task', () => {
     });
   });
 
-  it('move: invokes move_task with taskId, column, order', async () => {
-    vi.mocked(invoke).mockResolvedValue(undefined);
-    await api.task.move('tk_abc123', 'in_progress', 1);
+  it('move: invokes move_task with taskId, column, order and returns updated task', async () => {
+    const updated = {
+      id: 'tk_abc123',
+      repo_id: 'repo_abc',
+      workspace_id: 'ws_xyz',
+      title: 't',
+      description: '',
+      column: 'in_progress' as const,
+      order: 1,
+      created_at: 1,
+      updated_at: 2,
+    };
+    vi.mocked(invoke).mockResolvedValue(updated);
+    const result = await api.task.move('tk_abc123', 'in_progress', 1);
     expect(invoke).toHaveBeenCalledWith('move_task', {
       taskId: 'tk_abc123',
       column: 'in_progress',
       order: 1,
     });
+    expect(result.workspace_id).toBe('ws_xyz');
   });
 
   it('move: propagates rejection (e.g. task not found)', async () => {

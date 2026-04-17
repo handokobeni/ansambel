@@ -78,10 +78,15 @@ describe('TasksStore', () => {
     expect(store.tasks.get('repo_abc123')?.get('tk_abc123')?.title).toBe('Updated title');
   });
 
-  it('move: calls api.task.move and updates column + order in map', async () => {
+  it('move: calls api.task.move and replaces local task with backend response (incl workspace_id)', async () => {
     const task = makeTask();
     vi.mocked(api.task.list).mockResolvedValue([task]);
-    vi.mocked(api.task.move).mockResolvedValue(undefined);
+    vi.mocked(api.task.move).mockResolvedValue({
+      ...task,
+      column: 'in_progress',
+      order: 2,
+      workspace_id: 'ws_auto_created',
+    });
     const store = new TasksStore();
     await store.loadForRepo('repo_abc123');
     await store.move('tk_abc123', 'in_progress', 2);
@@ -89,6 +94,7 @@ describe('TasksStore', () => {
     const updated = store.tasks.get('repo_abc123')?.get('tk_abc123');
     expect(updated?.column).toBe('in_progress');
     expect(updated?.order).toBe(2);
+    expect(updated?.workspace_id).toBe('ws_auto_created');
   });
 
   it('remove: calls api.task.remove and deletes from nested map', async () => {
@@ -161,11 +167,13 @@ describe('TasksStore', () => {
     expect(api.task.update).toHaveBeenCalledWith('tk_missing', { title: 'Noop' });
   });
 
-  it('move: does nothing when task id is not found in any repo map', async () => {
-    vi.mocked(api.task.move).mockResolvedValue(undefined);
+  it('move: hydrates the task into the store from backend response even if absent locally', async () => {
+    const moved = makeTask({ id: 'tk_remote', column: 'review', order: 0 });
+    vi.mocked(api.task.move).mockResolvedValue(moved);
     const store = new TasksStore();
-    await store.move('tk_missing', 'review', 0);
-    expect(api.task.move).toHaveBeenCalledWith('tk_missing', 'review', 0);
+    await store.move('tk_remote', 'review', 0);
+    expect(api.task.move).toHaveBeenCalledWith('tk_remote', 'review', 0);
+    expect(store.tasks.get(moved.repo_id)?.get('tk_remote')?.column).toBe('review');
   });
 
   it('remove: clears selectedTaskId when removed task was selected', async () => {

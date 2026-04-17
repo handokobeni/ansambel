@@ -42,15 +42,12 @@ export class TasksStore {
     }
   }
 
-  async move(taskId: string, column: KanbanColumn, order: number): Promise<void> {
-    await api.task.move(taskId, column, order);
-    for (const [, map] of this.tasks) {
-      const existing = map.get(taskId);
-      if (existing) {
-        map.set(taskId, { ...existing, column, order });
-        return;
-      }
-    }
+  async move(taskId: string, column: KanbanColumn, order: number): Promise<Task> {
+    const updated = await api.task.move(taskId, column, order);
+    // Use the backend's returned Task so we pick up auto-set workspace_id
+    // when moving into InProgress.
+    this.getOrCreate(updated.repo_id).set(updated.id, updated);
+    return updated;
   }
 
   async remove(taskId: string, force?: boolean): Promise<void> {
