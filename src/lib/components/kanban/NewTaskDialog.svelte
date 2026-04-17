@@ -33,29 +33,66 @@
 {#if open}
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="dialog-backdrop" onclick={handleCancel}>
-    <dialog class="new-task-dialog" open onclick={(e) => e.stopPropagation()}>
-      <h2 class="new-task-dialog__title">New Task</h2>
+  <div
+    class="dialog-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+    onclick={handleCancel}
+  >
+    <dialog
+      class="new-task-dialog block w-[420px] max-w-[90vw] p-4 rounded-lg bg-[var(--bg-card)] border border-[var(--border-light)] shadow-2xl text-[var(--text-primary)]"
+      open
+      onclick={(e) => e.stopPropagation()}
+    >
+      <h2 class="text-sm font-semibold mb-3 text-[var(--text-primary)]">New Task</h2>
 
-      <form onsubmit={handleSubmit}>
-        <div class="form-field">
-          <label for="task-title">Title</label>
-          <input id="task-title" type="text" bind:value={title} placeholder="Task title" required />
+      <form class="flex flex-col gap-3" onsubmit={handleSubmit}>
+        <div class="flex flex-col gap-1">
+          <label
+            class="text-[11px] uppercase tracking-wider text-[var(--text-muted)]"
+            for="task-title"
+          >
+            Title
+          </label>
+          <input
+            id="task-title"
+            type="text"
+            bind:value={title}
+            placeholder="Task title"
+            required
+            class="px-2 py-1.5 text-xs rounded bg-[var(--bg-base)] border border-[var(--border-light)] text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
+          />
         </div>
 
-        <div class="form-field">
-          <label for="task-description">Description</label>
+        <div class="flex flex-col gap-1">
+          <label
+            class="text-[11px] uppercase tracking-wider text-[var(--text-muted)]"
+            for="task-description"
+          >
+            Description
+          </label>
           <textarea
             id="task-description"
             bind:value={description}
             placeholder="Optional description"
             rows={3}
+            class="px-2 py-1.5 text-xs rounded bg-[var(--bg-base)] border border-[var(--border-light)] text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] resize-none"
           ></textarea>
         </div>
 
-        <div class="new-task-dialog__actions">
-          <button type="button" class="btn-secondary" onclick={handleCancel}> Cancel </button>
-          <button type="submit" class="btn-primary" disabled={!canSubmit}> Add task </button>
+        <div class="flex justify-end gap-2 mt-1">
+          <button
+            type="button"
+            class="px-3 py-1.5 text-xs font-semibold rounded bg-[var(--bg-hover)] text-[var(--text-dim)] hover:text-[var(--text-primary)] transition-colors cursor-pointer"
+            onclick={handleCancel}
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            class="px-3 py-1.5 text-xs font-semibold rounded bg-[var(--accent)] text-[var(--bg-base)] hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+            disabled={!canSubmit}
+          >
+            Add task
+          </button>
         </div>
       </form>
     </dialog>

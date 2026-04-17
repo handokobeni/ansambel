@@ -30,7 +30,6 @@
     { id: 'done', label: 'Done' },
   ];
 
-  // Local mutable copies per column for dnd-action to manipulate during drag
   let columnItems = $state<Record<KanbanColumn, Task[]>>({
     todo: [],
     in_progress: [],
@@ -38,7 +37,6 @@
     done: [],
   });
 
-  // Sync columnItems whenever parent tasks prop changes
   $effect(() => {
     const next: Record<KanbanColumn, Task[]> = {
       todo: [],
@@ -64,7 +62,6 @@
     e: CustomEvent<{ items: Task[]; info: { id: string } }>
   ) {
     const droppedId = e.detail.info.id;
-    // Find new order from raw items (before filtering shadows) so position is accurate
     const rawOrder = e.detail.items.findIndex((t) => t.id === droppedId);
     const items = e.detail.items.filter(
       (t) => !(t as Task & Record<string, unknown>)[SHADOW_ITEM_MARKER_PROPERTY_NAME]
@@ -75,16 +72,31 @@
   }
 </script>
 
-<div class="kanban-board" data-repo={repoId}>
+<div
+  class="kanban-board grid grid-cols-4 gap-3 p-3 h-full overflow-x-auto min-w-0"
+  data-repo={repoId}
+>
   {#each COLUMNS as col (col.id)}
-    <div class="kanban-column">
-      <div class="kanban-column__header">
-        <span class="kanban-column__title">{col.label}</span>
-        <span class="kanban-column__count">{columnItems[col.id].length}</span>
+    <div
+      class="kanban-column flex flex-col rounded bg-[var(--bg-card)] border border-[var(--border)] min-w-[220px] max-h-full overflow-hidden"
+    >
+      <div
+        class="kanban-column__header flex items-center justify-between px-3 py-2 border-b border-[var(--border)]"
+      >
+        <span
+          class="text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)] truncate"
+        >
+          {col.label}
+        </span>
+        <span
+          class="ml-2 inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 text-[10px] font-semibold rounded bg-[var(--bg-hover)] text-[var(--text-dim)]"
+        >
+          {columnItems[col.id].length}
+        </span>
       </div>
 
       <div
-        class="kanban-column__body"
+        class="kanban-column__body flex-1 overflow-y-auto p-2 space-y-2 min-h-[80px]"
         data-column={col.id}
         role="list"
         aria-label="{col.label} tasks"
@@ -95,12 +107,17 @@
         {#each columnItems[col.id] as task (task.id)}
           <TaskCard {task} onRemove={onRemoveTask} />
         {:else}
-          <p class="kanban-column__empty">No tasks</p>
+          <p class="text-xs text-[var(--text-muted)] text-center py-4 italic">No tasks</p>
         {/each}
       </div>
 
       {#if col.id === 'todo'}
-        <button class="kanban-column__add-btn" onclick={onAddTask}> + Add task </button>
+        <button
+          class="m-2 mt-0 px-2 py-1.5 text-xs font-semibold rounded bg-[var(--bg-hover)] text-[var(--text-dim)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-active)] transition-colors cursor-pointer"
+          onclick={onAddTask}
+        >
+          + Add task
+        </button>
       {/if}
     </div>
   {/each}
