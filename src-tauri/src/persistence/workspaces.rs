@@ -119,4 +119,41 @@ mod tests {
         assert_eq!(reset["ws_w"].status, WorkspaceStatus::Waiting);
         assert_eq!(reset["ws_e"].status, WorkspaceStatus::Error);
     }
+
+    #[test]
+    fn load_and_reset_running_from_raw_json_fixture() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = r#"{
+            "schema_version": 1,
+            "workspaces": {
+                "ws_a": {
+                    "id": "ws_a", "repo_id": "repo_1",
+                    "branch": "ws/a", "base_branch": "main",
+                    "custom_branch": false, "title": "A", "description": "",
+                    "status": "not_started", "column": "todo",
+                    "created_at": 1000, "updated_at": 1001
+                },
+                "ws_b": {
+                    "id": "ws_b", "repo_id": "repo_1",
+                    "branch": "ws/b", "base_branch": "main",
+                    "custom_branch": false, "title": "B", "description": "",
+                    "status": "running", "column": "in_progress",
+                    "created_at": 1000, "updated_at": 1001
+                },
+                "ws_c": {
+                    "id": "ws_c", "repo_id": "repo_1",
+                    "branch": "ws/c", "base_branch": "main",
+                    "custom_branch": false, "title": "C", "description": "",
+                    "status": "done", "column": "done",
+                    "created_at": 1000, "updated_at": 1001
+                }
+            }
+        }"#;
+        std::fs::write(crate::platform::paths::workspaces_file(tmp.path()), fixture).unwrap();
+
+        let map = load_and_reset_running(tmp.path()).unwrap();
+        assert_eq!(map["ws_a"].status, WorkspaceStatus::NotStarted);
+        assert_eq!(map["ws_b"].status, WorkspaceStatus::Waiting); // was running
+        assert_eq!(map["ws_c"].status, WorkspaceStatus::Done);
+    }
 }
