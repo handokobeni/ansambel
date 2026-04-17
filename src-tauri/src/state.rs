@@ -38,11 +38,15 @@ pub struct AppState {
     pub workspaces: HashMap<String, WorkspaceInfo>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RepoInfo {
     pub id: String,
     pub name: String,
-    pub path: String,
+    pub path: std::path::PathBuf,
+    pub gh_profile: Option<String>,
+    pub default_branch: String,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -70,6 +74,39 @@ mod tests {
     #[test]
     fn app_version_matches_cargo_pkg_version() {
         assert_eq!(app_version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn repo_info_round_trips_json() {
+        let r = RepoInfo {
+            id: "repo_abc123".into(),
+            name: "my-repo".into(),
+            path: std::path::PathBuf::from("/home/user/my-repo"),
+            gh_profile: Some("handokoben".into()),
+            default_branch: "main".into(),
+            created_at: 1_776_000_000,
+            updated_at: 1_776_099_000,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: RepoInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn repo_info_gh_profile_nullable() {
+        let r = RepoInfo {
+            id: "repo_xyz".into(),
+            name: "other".into(),
+            path: std::path::PathBuf::from("/tmp/other"),
+            gh_profile: None,
+            default_branch: "main".into(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"gh_profile\":null"));
+        let back: RepoInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.gh_profile, None);
     }
 
     #[test]
