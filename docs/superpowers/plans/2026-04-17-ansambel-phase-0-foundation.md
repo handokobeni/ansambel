@@ -2576,9 +2576,9 @@ EOF
 **Files:**
 - Create: `README.md`, `docs/adr/0001-tech-stack.md`, `LICENSE`
 
-- [ ] **Step 16.1: Write `LICENSE`**
+- [x] **Step 16.1: Write `LICENSE`** _(completed in Phase 0 Task 1 follow-up commit)_
 
-Write `LICENSE` (private repo — not an open-source license):
+Already created with the content below (skip this step — file exists from earlier):
 
 ```text
 Ansambel — Copyright (c) 2026 Talentlytica / Handoko Beni
