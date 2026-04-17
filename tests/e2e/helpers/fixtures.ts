@@ -10,8 +10,10 @@ type Fixtures = {
  * worker and reuses it across specs. Because workers=1 (Tauri singleton),
  * this means exactly one dev server for the entire test run.
  */
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
 export const test = base.extend<{}, Fixtures>({
   harness: [
+    // eslint-disable-next-line no-empty-pattern
     async ({}, use) => {
       const harness = new TauriDevHarness();
       await harness.start();
@@ -21,8 +23,8 @@ export const test = base.extend<{}, Fixtures>({
         await harness.stop();
       }
     },
-    { scope: 'worker' }
-  ]
+    { scope: 'worker' },
+  ],
 });
 
 export { expect };

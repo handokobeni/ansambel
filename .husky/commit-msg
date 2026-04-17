@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+
+export PATH="$HOME/.bun/bin:$HOME/.cargo/bin:$PATH"
+
+bun x commitlint --edit "$1"

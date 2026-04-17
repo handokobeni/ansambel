@@ -2,8 +2,8 @@
 
 > Orchestrate your AI ensemble.
 
-Cross-platform (Windows + Linux + macOS) desktop app that orchestrates
-parallel Claude Code agents in isolated git worktrees. Modeled after
+Cross-platform (Windows + Linux + macOS) desktop app that orchestrates parallel
+Claude Code agents in isolated git worktrees. Modeled after
 [korlap](https://github.com/ariaghora/korlap) (macOS-only) and
 [Conductor](https://www.conductor.build).
 
@@ -24,13 +24,15 @@ Prerequisites:
 - Linux only: `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev`
 
 ```bash
-bun install
+bun install             # also installs git hooks via husky
 bun tauri dev           # launch in dev mode
 bun run check           # type check
+bun run lint            # ESLint + Prettier check
+bun run lint:fix        # auto-fix formatting and lint issues
 bun run test            # unit tests
 bun run test:coverage   # unit + coverage gate (95%)
 bun run e2e             # E2E smoke
-cd src-tauri && cargo test --lib && cd ..
+cd src-tauri && cargo fmt --all -- --check && cargo clippy --lib --all-targets -- -D warnings && cargo test --lib && cd ..
 ```
 
 ## Documentation

@@ -11,29 +11,30 @@ tags: [design, spec, ansambel, tauri, svelte, rust]
 
 > **Orchestrate your AI ensemble.**
 >
-> A cross-platform (Windows + Linux + macOS) desktop application that orchestrates
-> multiple Claude Code agents in isolated git worktrees. Modeled after [korlap]
-> (macOS-only) and [Conductor] — built from scratch with clean cross-platform
-> foundations and extended with Jira + Lark Bitable task providers.
+> A cross-platform (Windows + Linux + macOS) desktop application that
+> orchestrates multiple Claude Code agents in isolated git worktrees. Modeled
+> after [korlap] (macOS-only) and [Conductor] — built from scratch with clean
+> cross-platform foundations and extended with Jira + Lark Bitable task
+> providers.
 >
 > [korlap]: https://github.com/ariaghora/korlap
 > [Conductor]: https://www.conductor.build
 
 ## Executive summary
 
-| | |
-|---|---|
-| **Name** | Ansambel (Indonesian for "ensemble") |
-| **Bundle ID** | `com.talentlytica.ansambel` |
-| **Binary name** | `ansambel` |
-| **Stack** | Tauri v2 + Rust + Svelte 5 + Bun + Tailwind v4 |
-| **Platforms** | Windows (primary) + Linux (primary) + macOS (nice-to-have) |
-| **AI provider** | Claude Code CLI only |
-| **Git provider** | GitHub only (via `gh` CLI) |
-| **Task providers** | Jira Cloud + Lark Bitable (pluggable) |
-| **License** | Private (Talentlytica) |
-| **Target effort** | 33–36 weeks, 9 phases, solo engineer |
-| **Testing** | TDD mandatory, 95% unit + e2e coverage gate |
+|                    |                                                            |
+| ------------------ | ---------------------------------------------------------- |
+| **Name**           | Ansambel (Indonesian for "ensemble")                       |
+| **Bundle ID**      | `com.talentlytica.ansambel`                                |
+| **Binary name**    | `ansambel`                                                 |
+| **Stack**          | Tauri v2 + Rust + Svelte 5 + Bun + Tailwind v4             |
+| **Platforms**      | Windows (primary) + Linux (primary) + macOS (nice-to-have) |
+| **AI provider**    | Claude Code CLI only                                       |
+| **Git provider**   | GitHub only (via `gh` CLI)                                 |
+| **Task providers** | Jira Cloud + Lark Bitable (pluggable)                      |
+| **License**        | Private (Talentlytica)                                     |
+| **Target effort**  | 33–36 weeks, 9 phases, solo engineer                       |
+| **Testing**        | TDD mandatory, 95% unit + e2e coverage gate                |
 
 ---
 
@@ -41,23 +42,24 @@ tags: [design, spec, ansambel, tauri, svelte, rust]
 
 ## Product identity
 
-| Aspect | Value |
-|---|---|
-| Product name | Ansambel |
-| Bundle identifier | `com.talentlytica.ansambel` |
-| Window title | (empty — identity via aesthetic, per korlap convention) |
-| Tagline | "Orchestrate your AI ensemble" |
-| Binary name | `ansambel` (lowercase) |
+| Aspect            | Value                                                   |
+| ----------------- | ------------------------------------------------------- |
+| Product name      | Ansambel                                                |
+| Bundle identifier | `com.talentlytica.ansambel`                             |
+| Window title      | (empty — identity via aesthetic, per korlap convention) |
+| Tagline           | "Orchestrate your AI ensemble"                          |
+| Binary name       | `ansambel` (lowercase)                                  |
 
 ## Data directory per OS (multi-user aware)
 
-Resolved via Tauri `app.path().app_data_dir()` — automatically per-OS-user scoped:
+Resolved via Tauri `app.path().app_data_dir()` — automatically per-OS-user
+scoped:
 
-| OS | Path |
-|---|---|
+| OS          | Path                                                                                                  |
+| ----------- | ----------------------------------------------------------------------------------------------------- |
 | **Windows** | `%APPDATA%\com.talentlytica.ansambel\` → `C:\Users\<user>\AppData\Roaming\com.talentlytica.ansambel\` |
-| **Linux** | `$XDG_DATA_HOME/com.talentlytica.ansambel/` → `~/.local/share/com.talentlytica.ansambel/` |
-| **macOS** | `~/Library/Application Support/com.talentlytica.ansambel/` |
+| **Linux**   | `$XDG_DATA_HOME/com.talentlytica.ansambel/` → `~/.local/share/com.talentlytica.ansambel/`             |
+| **macOS**   | `~/Library/Application Support/com.talentlytica.ansambel/`                                            |
 
 ## Data layout
 
@@ -87,18 +89,18 @@ Resolved via Tauri `app.path().app_data_dir()` — automatically per-OS-user sco
     └── crashes/
 ```
 
-**Zero writes to user repos.** Worktrees live under `<app_data>/workspaces/`; the
-managed repo is only read from and occasionally fetched/pushed via `git`.
+**Zero writes to user repos.** Worktrees live under `<app_data>/workspaces/`;
+the managed repo is only read from and occasionally fetched/pushed via `git`.
 
 ## Credential storage
 
 Credentials (API tokens, app secrets, GH tokens) use the `keyring` crate:
 
-| OS | Backend |
-|---|---|
-| Windows | Credential Manager |
-| Linux | Secret Service (GNOME/KDE) with AES-GCM encrypted file fallback (for headless) |
-| macOS | Keychain |
+| OS      | Backend                                                                        |
+| ------- | ------------------------------------------------------------------------------ |
+| Windows | Credential Manager                                                             |
+| Linux   | Secret Service (GNOME/KDE) with AES-GCM encrypted file fallback (for headless) |
+| macOS   | Keychain                                                                       |
 
 Linux headless fallback uses passphrase from `ANSAMBEL_PASSPHRASE` env var or
 one-time-per-session prompt.
@@ -112,30 +114,33 @@ that, order is flexible.
 
 ## Overview
 
-| # | Phase | Effort | Shipping value |
-|---|---|---|---|
-| 0 | Foundation | 1 wk | Scaffold + CI build matrix across 3 OS |
-| 1 | MVP Orchestrator | 4–5 wk | One Claude agent in worktree, chat, minimal kanban — first usable product |
-| 2 | Work Mode Complete | 3 wk | Diff, terminal, file browser, editor, search, scripts |
-| 3 | Task Providers | 2 wk | Jira + Lark Bitable with pluggable abstraction |
-| 4 | AI Productivity | 4 wk | Review flow, commit gen, suggest replies, EditDiffBlock, TodoListBlock, AskUserQuestion |
-| 5 | Knowledge Base | 4 wk | Invariants/Facts/Context/Contradictions + file affinity + pre-check |
-| 6 | LSP + MCP | 4 wk | LSP server pool + built-in MCP + 3rd-party MCP config |
-| 7 | Autopilot & Staging | 4 wk | Autopilot orchestrator, staging workspace, multi-PR, polling |
-| 8 | Polish & Ship | 3 wk | Dependency graph, shortcuts, installers signed across 3 OS |
+| #   | Phase               | Effort | Shipping value                                                                          |
+| --- | ------------------- | ------ | --------------------------------------------------------------------------------------- |
+| 0   | Foundation          | 1 wk   | Scaffold + CI build matrix across 3 OS                                                  |
+| 1   | MVP Orchestrator    | 4–5 wk | One Claude agent in worktree, chat, minimal kanban — first usable product               |
+| 2   | Work Mode Complete  | 3 wk   | Diff, terminal, file browser, editor, search, scripts                                   |
+| 3   | Task Providers      | 2 wk   | Jira + Lark Bitable with pluggable abstraction                                          |
+| 4   | AI Productivity     | 4 wk   | Review flow, commit gen, suggest replies, EditDiffBlock, TodoListBlock, AskUserQuestion |
+| 5   | Knowledge Base      | 4 wk   | Invariants/Facts/Context/Contradictions + file affinity + pre-check                     |
+| 6   | LSP + MCP           | 4 wk   | LSP server pool + built-in MCP + 3rd-party MCP config                                   |
+| 7   | Autopilot & Staging | 4 wk   | Autopilot orchestrator, staging workspace, multi-PR, polling                            |
+| 8   | Polish & Ship       | 3 wk   | Dependency graph, shortcuts, installers signed across 3 OS                              |
 
-**Total:** ~33–36 weeks solo engineer (accounting for 95% test coverage overhead).
+**Total:** ~33–36 weeks solo engineer (accounting for 95% test coverage
+overhead).
 
 ## Phase details
 
 ### Phase 0 — Foundation (1 wk)
 
 **Scope.**
+
 - `bun create tauri-app` + Svelte 5 + Tailwind v4 + TypeScript strict
 - Tauri IPC typed wrappers (`ipc.ts`) + error handling convention
 - Cross-platform path utilities
 - Theme system (CSS vars + palette structure; no UI picker yet)
-- GitHub Actions CI build matrix: `.msi` / `.AppImage` / `.dmg` + tests in 3 OSes
+- GitHub Actions CI build matrix: `.msi` / `.AppImage` / `.dmg` + tests in 3
+  OSes
 - Logging setup (`tracing` Rust, console frontend)
 - Project-level `.claude/CLAUDE.md` with hard rules for the agent
 
@@ -144,6 +149,7 @@ that, order is flexible.
 ### Phase 1 — MVP Orchestrator (4–5 wk)
 
 **Scope.**
+
 - Repo management (add via folder picker, list, remove, bind gh profile)
 - Workspace creation: `git worktree add` → `<app_data>/workspaces/<id>/`
 - Workspace sidebar + status dot (running / waiting)
@@ -152,66 +158,96 @@ that, order is flexible.
 - NDJSON parser in Rust → Tauri Channel → Svelte render
 - `SvelteMap<wsId, SvelteMap<msgId, Message>>` (reactive performance)
 - Message input with basic send (no @-mentions yet)
-- Persistence: `repos.json`, `workspaces.json`, `messages/<wsId>.json` (500ms debounced)
+- Persistence: `repos.json`, `workspaces.json`, `messages/<wsId>.json` (500ms
+  debounced)
 - Titlebar with Plan/Work mode toggle (⌘1/⌘2)
 - 5 baseline shortcuts
 
 **Ship.** Single dev can use it for real orchestration work.
 
 **Known risks.**
+
 - PTY cross-platform (ConPTY on Windows)
 - Claude CLI binary location varies per OS (fallback detection logic)
 - gh CLI on Windows (PATH variations)
 
 ### Phase 2 — Work Mode Complete (3 wk)
 
-**Scope.** Diff viewer (syntax highlighted) · xterm.js terminal · File browser tree · CodeMirror 6 editor · Script runner (per-repo) · Search modal (files + content grep) · @-file mentions with autocomplete.
+**Scope.** Diff viewer (syntax highlighted) · xterm.js terminal · File browser
+tree · CodeMirror 6 editor · Script runner (per-repo) · Search modal (files +
+content grep) · @-file mentions with autocomplete.
 
 **Risks.** Font rendering on WebKitGTK (Linux) requires testing.
 
 ### Phase 3 — Task Providers (2 wk)
 
-**Scope.** `TaskProvider` trait + registry · `JiraProvider` (Cloud REST v3 + API token) · `LarkBitableProvider` (tenant token + Bitable API) · JSON-Schema driven config UI · Import popover · Field mapping per provider · Deep-links back to Jira/Lark.
+**Scope.** `TaskProvider` trait + registry · `JiraProvider` (Cloud REST v3 + API
+token) · `LarkBitableProvider` (tenant token + Bitable API) · JSON-Schema driven
+config UI · Import popover · Field mapping per provider · Deep-links back to
+Jira/Lark.
 
-**Risks.** Lark Bitable field type variance (single/multi select, user, formula) requires a normalizer.
+**Risks.** Lark Bitable field type variance (single/multi select, user, formula)
+requires a normalizer.
 
 ### Phase 4 — AI Productivity (4 wk)
 
-**Scope.** Review flow (Opus-powered diff review, clean/issues classification) · Commit message generator · Suggest replies · Prioritize todos · Determine dependencies · AskUserQuestion tool · EditDiffBlock inline accept/reject · TodoListBlock in-chat checklist synced to kanban.
+**Scope.** Review flow (Opus-powered diff review, clean/issues classification) ·
+Commit message generator · Suggest replies · Prioritize todos · Determine
+dependencies · AskUserQuestion tool · EditDiffBlock inline accept/reject ·
+TodoListBlock in-chat checklist synced to kanban.
 
-**Risks.** Cost management — many extra agent spawns. Add per-feature disable toggles.
+**Risks.** Cost management — many extra agent spawns. Add per-feature disable
+toggles.
 
 ### Phase 5 — Knowledge Base (4 wk)
 
-**Scope.** Builder agent with 3-phase prompt (recon / synthesize / cleanup) + size-aware constraints (SMALL <500 / MEDIUM 500–5000 / LARGE >5000 files) · 4 markdown outputs (invariants, facts, context, contradictions) + index + hot.md · UI 4-tab CRUD · File affinity extraction and injection · Invariant pre-check agent · Contradiction resolution workflow · Incremental update on PR merge.
+**Scope.** Builder agent with 3-phase prompt (recon / synthesize / cleanup) +
+size-aware constraints (SMALL <500 / MEDIUM 500–5000 / LARGE >5000 files) · 4
+markdown outputs (invariants, facts, context, contradictions) + index + hot.md ·
+UI 4-tab CRUD · File affinity extraction and injection · Invariant pre-check
+agent · Contradiction resolution workflow · Incremental update on PR merge.
 
-**Risks.** Prompt engineering is heavy — requires testing across repo sizes and styles.
+**Risks.** Prompt engineering is heavy — requires testing across repo sizes and
+styles.
 
 ### Phase 6 — LSP + MCP (4 wk)
 
-**Scope.** LSP server pool + auto-detect (TypeScript, Rust, Python, Go defaults) · 6 LSP commands (hover, goto-def, references, rename, symbols, diagnostics) · Built-in MCP server (random port, HTTP, token-auth) · MCP tools exposed: workspace info, todos CRUD, LSP queries, notify · 3rd-party MCP config (stdio + SSE transport) · MCP OAuth flow.
+**Scope.** LSP server pool + auto-detect (TypeScript, Rust, Python, Go defaults)
+· 6 LSP commands (hover, goto-def, references, rename, symbols, diagnostics) ·
+Built-in MCP server (random port, HTTP, token-auth) · MCP tools exposed:
+workspace info, todos CRUD, LSP queries, notify · 3rd-party MCP config (stdio +
+SSE transport) · MCP OAuth flow.
 
-**Risks.** LSP stdin/stdout on Windows needs careful PTY-like handling. OAuth from desktop needs loopback server pattern.
+**Risks.** LSP stdin/stdout on Windows needs careful PTY-like handling. OAuth
+from desktop needs loopback server pattern.
 
 ### Phase 7 — Autopilot & Staging (4 wk)
 
-**Scope.** Staging workspace (isolated test/build) · Autopilot orchestrator with 11-type event stream · PR status polling (5s) + base branch polling (60s) · Multi-PR workspace (source_prs) · Combo PR checkout popover · Auto-answer agent questions within safety bounds.
+**Scope.** Staging workspace (isolated test/build) · Autopilot orchestrator with
+11-type event stream · PR status polling (5s) + base branch polling (60s) ·
+Multi-PR workspace (source_prs) · Combo PR checkout popover · Auto-answer agent
+questions within safety bounds.
 
-**Risks.** Edge cases in autopilot are numerous. Provide semi-autopilot mode (pause on uncertainty).
+**Risks.** Edge cases in autopilot are numerous. Provide semi-autopilot mode
+(pause on uncertainty).
 
 ### Phase 8 — Polish & Ship (3 wk)
 
-**Scope.** Dependency graph visualization · Virtual scrolling optimization · System resource monitor · Complete keyboard shortcut set · Toast notifications · ≥3 theme palettes · Code signing (Windows signtool, macOS notarize, Linux GPG) · Auto-updater via tauri-plugin-updater.
+**Scope.** Dependency graph visualization · Virtual scrolling optimization ·
+System resource monitor · Complete keyboard shortcut set · Toast notifications ·
+≥3 theme palettes · Code signing (Windows signtool, macOS notarize, Linux GPG) ·
+Auto-updater via tauri-plugin-updater.
 
-**Risks.** Signing certificates require budget (Windows ~$300/yr, Apple Dev $99/yr).
+**Risks.** Signing certificates require budget (Windows ~$300/yr, Apple Dev
+$99/yr).
 
 ## Ship gates
 
-| Target version | Ship at | Status |
-|---|---|---|
-| v0.1 | End of Phase 1 | Internal testing |
-| v0.5 | End of Phase 4 | Competitive with korlap (no KB yet) |
-| v1.0 | End of Phase 8 | Full feature parity + cross-platform + Lark |
+| Target version | Ship at        | Status                                      |
+| -------------- | -------------- | ------------------------------------------- |
+| v0.1           | End of Phase 1 | Internal testing                            |
+| v0.5           | End of Phase 4 | Competitive with korlap (no KB yet)         |
+| v1.0           | End of Phase 8 | Full feature parity + cross-platform + Lark |
 
 ---
 
@@ -221,22 +257,23 @@ that, order is flexible.
 
 **Red → Green → Refactor.** No production code without a failing test first.
 
-**Coverage gate: 95%** on both unit test line coverage and e2e scenario coverage.
-CI blocks merge if either falls below threshold. The `superpowers:test-driven-development`
-skill will be invoked during every implementation phase and followed rigidly.
+**Coverage gate: 95%** on both unit test line coverage and e2e scenario
+coverage. CI blocks merge if either falls below threshold. The
+`superpowers:test-driven-development` skill will be invoked during every
+implementation phase and followed rigidly.
 
 ## Stack
 
-| Layer | Tool | Why |
-|---|---|---|
-| Rust unit | `cargo test` inline `#[cfg(test)]` | Standard, fast |
-| Rust async | `tokio::test` | Async handlers |
-| Rust mock | `mockall` | External APIs, providers |
-| Rust integration | `cargo test --test <name>` in `tests/` | Command handlers end-to-end |
-| Svelte unit | Vitest + `@testing-library/svelte` | Native Svelte 5 runes support |
-| IPC contract | Typed helpers via `ipc.ts` | Keep Rust↔Svelte signatures synced |
-| E2E | Playwright (with Tauri driver) | Cross-platform, already proven in korlap |
-| Coverage | `cargo llvm-cov` + Vitest v8 coverage | Branch + line metrics |
+| Layer            | Tool                                   | Why                                      |
+| ---------------- | -------------------------------------- | ---------------------------------------- |
+| Rust unit        | `cargo test` inline `#[cfg(test)]`     | Standard, fast                           |
+| Rust async       | `tokio::test`                          | Async handlers                           |
+| Rust mock        | `mockall`                              | External APIs, providers                 |
+| Rust integration | `cargo test --test <name>` in `tests/` | Command handlers end-to-end              |
+| Svelte unit      | Vitest + `@testing-library/svelte`     | Native Svelte 5 runes support            |
+| IPC contract     | Typed helpers via `ipc.ts`             | Keep Rust↔Svelte signatures synced       |
+| E2E              | Playwright (with Tauri driver)         | Cross-platform, already proven in korlap |
+| Coverage         | `cargo llvm-cov` + Vitest v8 coverage  | Branch + line metrics                    |
 
 ## File layout
 
@@ -271,8 +308,10 @@ tests/e2e/
 - Every `#[tauri::command]` has ≥1 unit test + ≥1 integration test
 - Every Svelte component has ≥1 test (happy path + ≥1 edge case)
 - Every phase ships with e2e tests covering its golden path
-- External services (Claude CLI, Jira, Lark) are mocked in unit/integration tests
-- E2E tests use real Tauri window via Playwright; CLI mocked via `ANSAMBEL_MOCK_CLAUDE=1`
+- External services (Claude CLI, Jira, Lark) are mocked in unit/integration
+  tests
+- E2E tests use real Tauri window via Playwright; CLI mocked via
+  `ANSAMBEL_MOCK_CLAUDE=1`
 - CI fails if coverage drops below 95% on changed files (ratchet)
 - Never use `#[ignore]` or `test.skip` without a linked GitHub issue
 
@@ -284,16 +323,16 @@ deterministic stream-json to stdout, exits 0. Tests point at it via
 
 ## E2E golden paths per phase
 
-| Phase | Scenario |
-|---|---|
-| 1 | Add repo → create workspace → send message → see agent reply |
-| 2 | Open diff tab → see highlighting → open terminal → run `ls` |
-| 3 | Configure Jira → import 3 issues → see kanban cards with deep-link |
-| 4 | Trigger review → see Opus verdict (clean/issues) |
-| 5 | Click Rebuild → build completes → invariants/facts tabs populated |
-| 6 | Hover symbol → LSP tooltip → agent calls MCP tool |
-| 7 | Enable autopilot → task cycles Todo→Progress→Review→Done |
-| 8 | Installer on fresh VM → app launches → creates repo |
+| Phase | Scenario                                                           |
+| ----- | ------------------------------------------------------------------ |
+| 1     | Add repo → create workspace → send message → see agent reply       |
+| 2     | Open diff tab → see highlighting → open terminal → run `ls`        |
+| 3     | Configure Jira → import 3 issues → see kanban cards with deep-link |
+| 4     | Trigger review → see Opus verdict (clean/issues)                   |
+| 5     | Click Rebuild → build completes → invariants/facts tabs populated  |
+| 6     | Hover symbol → LSP tooltip → agent calls MCP tool                  |
+| 7     | Enable autopilot → task cycles Todo→Progress→Review→Done           |
+| 8     | Installer on fresh VM → app launches → creates repo                |
 
 ## CI pipeline
 
@@ -303,7 +342,7 @@ deterministic stream-json to stdout, exits 0. Tests point at it via
 - cargo llvm-cov --fail-under-lines 95 --fail-under-branches 95
 - bun run check
 - vitest run --coverage.thresholds.lines=95 --coverage.thresholds.branches=95
-- tauri build --debug          # smoke
+- tauri build --debug # smoke
 - playwright install
 - playwright test --project=${{ matrix.os }}
 ```
@@ -461,7 +500,8 @@ export function terminalChannel(): Channel<Uint8Array> { ... }
 
 ## State management
 
-**Rust** — `AppState` behind `Arc<Mutex<_>>`, separate states when I/O isolation matters:
+**Rust** — `AppState` behind `Arc<Mutex<_>>`, separate states when I/O isolation
+matters:
 
 ```rust
 pub struct AppState {
@@ -480,11 +520,13 @@ pub struct SharedProviderRegistry { /* task providers */ }
 ```
 
 **Mutex discipline.**
-- Acquire lock → extract data → drop lock *before* any I/O or spawn.
+
+- Acquire lock → extract data → drop lock _before_ any I/O or spawn.
 - Never hold a lock across spawned processes.
 - Never `.unwrap()` in command handlers; always `map_err(|e| e.to_string())`.
 
-**Svelte** — runes-based, nested `SvelteMap` for collections that update frequently:
+**Svelte** — runes-based, nested `SvelteMap` for collections that update
+frequently:
 
 ```typescript
 class MessagesStore {
@@ -499,10 +541,10 @@ class MessagesStore {
 ## Event-flow patterns
 
 1. **Request/response** (`invoke`) — command-style sync calls.
-2. **High-frequency stream** (`Channel`) — zero-copy binary/struct stream
-   (PTY, Claude stream-json).
-3. **Broadcast event** (`emit`/`listen`) — low-frequency notifications
-   (agent status change, workspace created).
+2. **High-frequency stream** (`Channel`) — zero-copy binary/struct stream (PTY,
+   Claude stream-json).
+3. **Broadcast event** (`emit`/`listen`) — low-frequency notifications (agent
+   status change, workspace created).
 
 ---
 
@@ -510,7 +552,8 @@ class MessagesStore {
 
 ## 4.1 PTY
 
-`portable-pty` crate. Unix → `fork()` + `openpty`. Windows → ConPTY (Win 10 1809+).
+`portable-pty` crate. Unix → `fork()` + `openpty`. Windows → ConPTY (Win 10
+1809+).
 
 ```rust
 let pty_system = native_pty_system();
@@ -551,7 +594,8 @@ pub fn default_shell() -> (PathBuf, Vec<String>) {
 }
 ```
 
-Env injection via `Command::env()` per-process — never mutate global/ambient env.
+Env injection via `Command::env()` per-process — never mutate global/ambient
+env.
 
 ## 4.4 Binary detection
 
@@ -568,11 +612,11 @@ Env injection via `Command::env()` per-process — never mutate global/ambient e
 
 ## 4.6 WebView consistency
 
-| Feature | macOS (WKWebView) | Windows (WebView2) | Linux (WebKitGTK) |
-|---|---|---|---|
-| CSS `:has()` | 15.4+ | ✓ | 6–12 mo lag |
-| `backdrop-filter` | ✓ | ✓ | partial |
-| WebGL | ✓ | ✓ | GPU-driver dependent |
+| Feature           | macOS (WKWebView) | Windows (WebView2) | Linux (WebKitGTK)    |
+| ----------------- | ----------------- | ------------------ | -------------------- |
+| CSS `:has()`      | 15.4+             | ✓                  | 6–12 mo lag          |
+| `backdrop-filter` | ✓                 | ✓                  | partial              |
+| WebGL             | ✓                 | ✓                  | GPU-driver dependent |
 
 **Mitigations.** Use Baseline-widely-available CSS only. Bundle Space Grotesk
 WOFF2 in `static/fonts/`. Use Tauri clipboard plugin (bypasses webview quirks).
@@ -581,14 +625,14 @@ WOFF2 in `static/fonts/`. Use Tauri clipboard plugin (bypasses webview quirks).
 
 - Ubuntu 22.04 and Windows Server 2022 on every PR.
 - macOS 14 on nightly + release tag only (cost saving).
-- Playwright runs per OS with the WebKit engine on Linux/Mac, Chromium-equivalent
-  logic on Windows.
+- Playwright runs per OS with the WebKit engine on Linux/Mac,
+  Chromium-equivalent logic on Windows.
 
 ## 4.8 Platform-specific feature gating
 
 Via `#[cfg(target_os = "...")]` and UI feature detection. No single-OS-only
-features in core paths; any such features (macOS traffic-light positioning, Windows
-jumplist) are purely cosmetic additions.
+features in core paths; any such features (macOS traffic-light positioning,
+Windows jumplist) are purely cosmetic additions.
 
 ---
 
@@ -646,8 +690,8 @@ pub enum ProviderError {
 
 ## 5.3 Registry
 
-`SharedTaskRegistry = Arc<TaskProviderRegistry>` managed by Tauri. `new()` inserts
-`"jira"` and `"lark-bitable"` entries.
+`SharedTaskRegistry = Arc<TaskProviderRegistry>` managed by Tauri. `new()`
+inserts `"jira"` and `"lark-bitable"` entries.
 
 ## 5.4 Jira Cloud impl
 
@@ -674,10 +718,13 @@ pub enum ProviderError {
   - `GET /bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}`
   - `PUT .../records/{record_id}` (status update)
   - `GET .../fields` (for mapping UI)
-- Field value normalizer handles: Text, SingleSelect, MultiSelect, User, DateTime, Formula.
-- Deep link: `https://{region}.larksuite.com/base/{app_token}?table={table_id}&view={view_id}&record={record_id}`.
+- Field value normalizer handles: Text, SingleSelect, MultiSelect, User,
+  DateTime, Formula.
+- Deep link:
+  `https://{region}.larksuite.com/base/{app_token}?table={table_id}&view={view_id}&record={record_id}`.
 
 **Initial target data (user's real setup).**
+
 - Region: `larksuite-sg`
 - Base app token: `FNFlbS3jPa3Yq4sjm8Illj18gnb`
 - Table ID: `tblfA8LNgy6dq2tu`
@@ -685,8 +732,8 @@ pub enum ProviderError {
 ## 5.6 Dynamic config form
 
 `TaskProviderConfig.svelte` lists providers, shows selected provider's JSON
-schema via a custom `SchemaForm.svelte` renderer (text / password / enum / nested
-object). Test-connection and save buttons gate on validation.
+schema via a custom `SchemaForm.svelte` renderer (text / password / enum /
+nested object). Test-connection and save buttons gate on validation.
 
 ## 5.7 Import popover
 
@@ -699,7 +746,8 @@ converts selected to kanban cards in "Todo" column (mapped via
 
 - Card moves column → `update_status`.
 - PR merged via Ansambel → `update_status("Done")`.
-- Conflict resolution: timestamp comparison (provider > local = pull; local > provider = push; tie = ask user).
+- Conflict resolution: timestamp comparison (provider > local = pull; local >
+  provider = push; tie = ask user).
 - Toggle per repo: "Sync status changes back to Jira/Lark".
 
 ## 5.9 Security
@@ -764,14 +812,15 @@ converts selected to kanban cards in "Todo" column (mapped via
           "field_mapping": { "title_field": "Task", "status_field": "Status" }
         },
         "status_column_mapping": {
-          "Todo": "todo", "Doing": "in_progress", "Review": "review", "Done": "done"
+          "Todo": "todo",
+          "Doing": "in_progress",
+          "Review": "review",
+          "Done": "done"
         },
         "sync_enabled": false
       },
       "pr_template_cache": { "content": "...", "cached_at": 1776099000 },
-      "scripts": [
-        { "id": "sc_1", "name": "Run tests", "command": "bun test" }
-      ],
+      "scripts": [{ "id": "sc_1", "name": "Run tests", "command": "bun test" }],
       "default_provider": "claude"
     }
   }
@@ -844,8 +893,9 @@ config changes write immediately.
 
 ## 6.6 Schema migration
 
-Load path reads `schema_version`, backs up original as `.v{N}.bak`, runs migration
-chain, writes migrated state back atomically. Start at `schema_version: 1`.
+Load path reads `schema_version`, backs up original as `.v{N}.bak`, runs
+migration chain, writes migrated state back atomically. Start at
+`schema_version: 1`.
 
 ## 6.7 Backup & export
 
@@ -855,7 +905,8 @@ chain, writes migrated state back atomically. Start at `schema_version: 1`.
 ## 6.8 Concurrency
 
 - Single `DebouncedWriter` queue serializes writes per file.
-- Advisory lock `<data_dir>/.ansambel.lock` with PID + liveness check for multi-instance detection.
+- Advisory lock `<data_dir>/.ansambel.lock` with PID + liveness check for
+  multi-instance detection.
 - File-watcher refresh when external changes detected.
 
 ## 6.9 Log rotation
@@ -938,45 +989,46 @@ on next launch.
 
 ## 7.6 Performance targets
 
-| Metric | Target |
-|---|---|
-| App cold start | <2 s |
-| Workspace switch | <100 ms |
-| Agent spawn | <500 ms |
-| Message render | 60 fps |
-| Kanban drag | 60 fps |
-| KB build (SMALL repo) | <30 s |
-| Binary size | <30 MB |
-| Idle RAM | <150 MB |
-| RAM per 10 agents | <600 MB |
+| Metric                | Target  |
+| --------------------- | ------- |
+| App cold start        | <2 s    |
+| Workspace switch      | <100 ms |
+| Agent spawn           | <500 ms |
+| Message render        | 60 fps  |
+| Kanban drag           | 60 fps  |
+| KB build (SMALL repo) | <30 s   |
+| Binary size           | <30 MB  |
+| Idle RAM              | <150 MB |
+| RAM per 10 agents     | <600 MB |
 
 Perf regression tests via Playwright timing; CI fails on p95 regression >20%.
 
 ## 7.7 Security
 
-| Threat | Mitigation |
-|---|---|
-| Secret exfiltration via logs/errors | OS keyring + regex scrub |
-| Command injection | No `sh -c`; always args array |
-| Path traversal | Canonicalize + `starts_with(worktree)` |
-| Malicious repo hooks | Default trust (user adds); `GIT_NO_HOOKS=1` optional |
-| MCP server hijack | 127.0.0.1 only, random port, token auth; 3rd-party with scoped disclosure |
-| Vulnerable deps | `cargo audit` + `bun audit` in CI, Dependabot/Renovate |
+| Threat                              | Mitigation                                                                |
+| ----------------------------------- | ------------------------------------------------------------------------- |
+| Secret exfiltration via logs/errors | OS keyring + regex scrub                                                  |
+| Command injection                   | No `sh -c`; always args array                                             |
+| Path traversal                      | Canonicalize + `starts_with(worktree)`                                    |
+| Malicious repo hooks                | Default trust (user adds); `GIT_NO_HOOKS=1` optional                      |
+| MCP server hijack                   | 127.0.0.1 only, random port, token auth; 3rd-party with scoped disclosure |
+| Vulnerable deps                     | `cargo audit` + `bun audit` in CI, Dependabot/Renovate                    |
 
 ## 7.8 Build targets
 
-| OS | Bundles | Signing |
-|---|---|---|
-| Windows | `.msi` + `.exe` (NSIS) | Code-sign cert (~$300/yr) |
-| Linux | `.AppImage` + `.deb` + `.rpm` | GPG sign |
-| macOS | `.dmg` + `.app` | Apple Developer ID + notarize ($99/yr) |
+| OS      | Bundles                       | Signing                                |
+| ------- | ----------------------------- | -------------------------------------- |
+| Windows | `.msi` + `.exe` (NSIS)        | Code-sign cert (~$300/yr)              |
+| Linux   | `.AppImage` + `.deb` + `.rpm` | GPG sign                               |
+| macOS   | `.dmg` + `.app`               | Apple Developer ID + notarize ($99/yr) |
 
-Tauri bundle config in `src-tauri/tauri.conf.json`. Release pipeline triggered by
-`v*` tags.
+Tauri bundle config in `src-tauri/tauri.conf.json`. Release pipeline triggered
+by `v*` tags.
 
 ## 7.9 Auto-updater (Phase 8)
 
 `tauri-plugin-updater` with:
+
 - Self-hosted manifest endpoint (private license).
 - Ed25519 signed updates; public key embedded in binary.
 - User consent prompt.
@@ -985,6 +1037,7 @@ Tauri bundle config in `src-tauri/tauri.conf.json`. Release pipeline triggered b
 ## 7.10 Versioning
 
 Semver `MAJOR.MINOR.PATCH`. Phase milestones:
+
 - v0.1.0 — End of Phase 1
 - v0.X.0 — End of Phase X
 - v1.0.0 — End of Phase 8
@@ -1026,16 +1079,16 @@ translation deferred to post-Phase 1 as time permits.
 - Agent processes use `--permission-mode bypassPermissions` with
   `--disallowedTools EnterWorktree,ExitWorktree` — never
   `--dangerously-skip-permissions`.
-- Detect default branch from remote tracking refs only (origin/HEAD, origin/main,
-  origin/master). Never fall back to local refs.
-- Never call `gh auth switch` globally — use `gh auth token --user <profile>` and
-  inject per-process.
+- Detect default branch from remote tracking refs only (origin/HEAD,
+  origin/main, origin/master). Never fall back to local refs.
+- Never call `gh auth switch` globally — use `gh auth token --user <profile>`
+  and inject per-process.
 
 ## Frontend
 
 - PTY output never touches Svelte state — xterm.js owns its buffer.
-- Messages use `SvelteMap<id, Message>`, mutated in place — never replace
-  entire arrays.
+- Messages use `SvelteMap<id, Message>`, mutated in place — never replace entire
+  arrays.
 - xterm instances use `display: none/block` on workspace switch — never
   mount/unmount.
 - Tauri Channel API for binary streams — never `listen()` + JSON for
@@ -1109,4 +1162,4 @@ Parked for later:
 
 ---
 
-*End of design spec.*
+_End of design spec._

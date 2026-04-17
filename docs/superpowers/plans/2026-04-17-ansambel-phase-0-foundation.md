@@ -1,17 +1,34 @@
 # Ansambel — Phase 0 Foundation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use
+> superpowers:subagent-driven-development (recommended) or
+> superpowers:executing-plans to implement this plan task-by-task. Steps use
+> checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Scaffold the Ansambel project — empty window that launches on Windows + Linux + macOS, with Rust + Svelte foundation, cross-platform path/binary detection, typed IPC, logging, error handling, theme skeleton, CI matrix, and TDD tooling enforcing 95% coverage — so that Phase 1 features can build on solid infrastructure.
+**Goal:** Scaffold the Ansambel project — empty window that launches on
+Windows + Linux + macOS, with Rust + Svelte foundation, cross-platform
+path/binary detection, typed IPC, logging, error handling, theme skeleton, CI
+matrix, and TDD tooling enforcing 95% coverage — so that Phase 1 features can
+build on solid infrastructure.
 
-**Architecture:** Tauri v2 shell with Rust backend (Tokio async, `tracing` logging, `thiserror` errors, `keyring`/`which`/`portable-pty` platform crates) and Svelte 5 + TypeScript frontend (Tailwind v4 utility styling + CSS-var theme tokens, Vitest unit tests, Playwright E2E). IPC flows via typed wrappers in `ipc.ts`. Storage under OS-resolved app-data dir with atomic+debounced JSON writes.
+**Architecture:** Tauri v2 shell with Rust backend (Tokio async, `tracing`
+logging, `thiserror` errors, `keyring`/`which`/`portable-pty` platform crates)
+and Svelte 5 + TypeScript frontend (Tailwind v4 utility styling + CSS-var theme
+tokens, Vitest unit tests, Playwright E2E). IPC flows via typed wrappers in
+`ipc.ts`. Storage under OS-resolved app-data dir with atomic+debounced JSON
+writes.
 
 **Tech Stack:**
+
 - Runtime: Rust stable (1.82+), Bun latest, Node 20+ for Playwright only
-- Frameworks: Tauri v2 (2.5+), Svelte 5 (5.25+), Tailwind v4 (4.0+), TypeScript 5.6+, Vite 6
-- Rust deps: `tauri`, `tokio`, `tracing`, `tracing-subscriber`, `tracing-appender`, `thiserror`, `serde`, `serde_json`, `nanoid`, `which`, `dunce`, `keyring`, `directories`, `anyhow`
+- Frameworks: Tauri v2 (2.5+), Svelte 5 (5.25+), Tailwind v4 (4.0+), TypeScript
+  5.6+, Vite 6
+- Rust deps: `tauri`, `tokio`, `tracing`, `tracing-subscriber`,
+  `tracing-appender`, `thiserror`, `serde`, `serde_json`, `nanoid`, `which`,
+  `dunce`, `keyring`, `directories`, `anyhow`
 - Frontend test: Vitest 2.1 + `@testing-library/svelte` + `jsdom`
-- E2E: Playwright 1.49 + `webdriver.io` tauri driver alternative (we use direct Playwright + tauri `--webdriver` option)
+- E2E: Playwright 1.49 + `webdriver.io` tauri driver alternative (we use direct
+  Playwright + tauri `--webdriver` option)
 - Coverage: `cargo-llvm-cov` (Rust) + Vitest v8 coverage (frontend)
 
 ---
@@ -19,7 +36,12 @@
 ## Task 1: Scaffold Tauri + Svelte + Bun project
 
 **Files:**
-- Create: `package.json`, `bun.lock`, `tsconfig.json`, `svelte.config.js`, `vite.config.ts`, `index.html`, `src/main.ts`, `src/App.svelte`, `src/app.d.ts`, `src-tauri/Cargo.toml`, `src-tauri/build.rs`, `src-tauri/tauri.conf.json`, `src-tauri/src/main.rs`, `src-tauri/src/lib.rs`, `src-tauri/capabilities/default.json`, `src-tauri/icons/*`
+
+- Create: `package.json`, `bun.lock`, `tsconfig.json`, `svelte.config.js`,
+  `vite.config.ts`, `index.html`, `src/main.ts`, `src/App.svelte`,
+  `src/app.d.ts`, `src-tauri/Cargo.toml`, `src-tauri/build.rs`,
+  `src-tauri/tauri.conf.json`, `src-tauri/src/main.rs`, `src-tauri/src/lib.rs`,
+  `src-tauri/capabilities/default.json`, `src-tauri/icons/*`
 
 - [ ] **Step 1.1: Scaffold via `bun create tauri-app`**
 
@@ -39,9 +61,11 @@ bun x create-tauri-app@latest \
 
 Accept the interactive defaults (y/y) if prompted.
 
-Expected: creates `package.json`, `src-tauri/`, `src/`, etc. Directory is no longer empty.
+Expected: creates `package.json`, `src-tauri/`, `src/`, etc. Directory is no
+longer empty.
 
-- [ ] **Step 1.2: Replace SvelteKit scaffold with Vite-Svelte (simpler, no SSR needed)**
+- [ ] **Step 1.2: Replace SvelteKit scaffold with Vite-Svelte (simpler, no SSR
+      needed)**
 
 Ansambel is a desktop app — we don't need SvelteKit routing/SSR. Replace:
 
@@ -128,8 +152,8 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 export default {
   preprocess: vitePreprocess(),
   compilerOptions: {
-    runes: true
-  }
+    runes: true,
+  },
 };
 ```
 
@@ -152,8 +176,8 @@ export default defineConfig({
     strictPort: true,
     host: host || false,
     hmr: host ? { protocol: 'ws', host, port: 1421 } : undefined,
-    watch: { ignored: ['**/src-tauri/**'] }
-  }
+    watch: { ignored: ['**/src-tauri/**'] },
+  },
 });
 ```
 
@@ -165,7 +189,10 @@ Write `index.html`:
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost;" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost;"
+    />
     <title></title>
   </head>
   <body>
@@ -214,28 +241,34 @@ Write `src/app.css`:
   --bg-base: oklch(0.16 0.01 60);
   --bg-sidebar: oklch(0.13 0.01 60);
   --bg-titlebar: oklch(0.14 0.01 60);
-  --bg-card: oklch(0.20 0.01 60);
+  --bg-card: oklch(0.2 0.01 60);
   --bg-hover: oklch(0.24 0.01 60);
   --bg-active: oklch(0.28 0.01 60);
   --border: oklch(0.24 0.01 60);
-  --border-light: oklch(0.30 0.01 60);
+  --border-light: oklch(0.3 0.01 60);
   --text-muted: oklch(0.55 0.01 60);
   --text-dim: oklch(0.65 0.01 60);
   --text-secondary: oklch(0.75 0.01 60);
   --text-primary: oklch(0.88 0.005 60);
   --text-bright: oklch(0.96 0.005 60);
   --accent: oklch(0.78 0.14 70);
-  --status-ok: oklch(0.70 0.15 140);
+  --status-ok: oklch(0.7 0.15 140);
   --diff-add: oklch(0.72 0.13 140);
   --diff-add-bg: oklch(0.22 0.05 140);
-  --diff-del: oklch(0.70 0.18 25);
+  --diff-del: oklch(0.7 0.18 25);
   --diff-del-bg: oklch(0.22 0.06 25);
-  --error: oklch(0.70 0.18 25);
+  --error: oklch(0.7 0.18 25);
   --error-bg: oklch(0.25 0.08 25);
 }
 
-html, body { height: 100%; margin: 0; }
-body { font-family: 'Space Grotesk', system-ui, sans-serif; }
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+body {
+  font-family: 'Space Grotesk', system-ui, sans-serif;
+}
 ```
 
 - [ ] **Step 1.3: Install dependencies**
@@ -382,7 +415,8 @@ pub fn run() {
 }
 ```
 
-Copy placeholder icons (32x32, 128x128, 128x128@2x png + ico + icns) from Tauri scaffold or generate:
+Copy placeholder icons (32x32, 128x128, 128x128@2x png + ico + icns) from Tauri
+scaffold or generate:
 
 ```bash
 mkdir -p src-tauri/icons
@@ -420,7 +454,8 @@ Expected: `dist/` created, no TypeScript errors.
 bun tauri dev
 ```
 
-Expected: Ansambel window opens, shows "Ansambel loading…" heading. Close the window with Ctrl+C in terminal or window close button.
+Expected: Ansambel window opens, shows "Ansambel loading…" heading. Close the
+window with Ctrl+C in terminal or window close button.
 
 **Note:** If webview packages missing on Linux, install:
 
@@ -450,7 +485,9 @@ EOF
 ## Task 2: Add test tooling (Vitest + Playwright configs)
 
 **Files:**
-- Create: `vitest.config.ts`, `playwright.config.ts`, `tests/e2e/helpers/tauri-driver.ts`, `tests/e2e/smoke.spec.ts`
+
+- Create: `vitest.config.ts`, `playwright.config.ts`,
+  `tests/e2e/helpers/tauri-driver.ts`, `tests/e2e/smoke.spec.ts`
 
 - [ ] **Step 2.1: Write `vitest.config.ts`**
 
@@ -476,10 +513,10 @@ export default defineConfig({
         'src/main.ts',
         'src/app.d.ts',
         'src/**/*.test.ts',
-        'src/**/*.d.ts'
-      ]
-    }
-  }
+        'src/**/*.d.ts',
+      ],
+    },
+  },
 });
 ```
 
@@ -496,7 +533,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests/e2e',
-  fullyParallel: false,       // Tauri app is singleton
+  fullyParallel: false, // Tauri app is singleton
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
   workers: 1,
@@ -505,14 +542,14 @@ export default defineConfig({
     baseURL: 'http://localhost:1420',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
-    video: 'retain-on-failure'
+    video: 'retain-on-failure',
   },
   projects: [
     {
       name: 'linux',
-      use: { ...devices['Desktop Chrome'] }
-    }
-  ]
+      use: { ...devices['Desktop Chrome'] },
+    },
+  ],
 });
 ```
 
@@ -529,7 +566,7 @@ export class TauriDevHarness {
   async start(): Promise<void> {
     this.proc = spawn('bun', ['run', 'dev'], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, ANSAMBEL_MOCK_CLAUDE: '1' }
+      env: { ...process.env, ANSAMBEL_MOCK_CLAUDE: '1' },
     });
     await this.waitForPort('http://localhost:1420', 30_000);
   }
@@ -581,15 +618,18 @@ test('app shell renders with Ansambel heading', async ({ page }) => {
 });
 ```
 
-- [ ] **Step 2.5: Run E2E to verify it fails (app version is "loading…" — still passes heading check, but let's confirm framework works)**
+- [ ] **Step 2.5: Run E2E to verify it fails (app version is "loading…" — still
+      passes heading check, but let's confirm framework works)**
 
 ```bash
 bun run e2e -- --reporter=list
 ```
 
-Expected: smoke test **passes** (heading "Ansambel loading…" contains "Ansambel"). Confirms Playwright wiring works.
+Expected: smoke test **passes** (heading "Ansambel loading…" contains
+"Ansambel"). Confirms Playwright wiring works.
 
-If Playwright browsers not installed, first run: `bun x playwright install chromium`.
+If Playwright browsers not installed, first run:
+`bun x playwright install chromium`.
 
 - [ ] **Step 2.6: Run Vitest (should exit 0 since no tests yet)**
 
@@ -620,6 +660,7 @@ EOF
 ## Task 3: Rust error type (`AppError`, `Result<T>`)
 
 **Files:**
+
 - Create: `src-tauri/src/error.rs`
 - Modify: `src-tauri/src/lib.rs`
 
@@ -734,7 +775,11 @@ cd src-tauri && cargo test --lib error:: 2>&1 | tail -10 && cd ..
 
 Expected: 6 tests pass.
 
-Note: we write code+tests together in this task because `thiserror` macros mean there's no meaningful "empty impl" to make tests fail against. The test is proving correctness of macro derivation, not driving design. This is the only task in Phase 0 that bundles test+impl — all later tasks follow strict red→green.
+Note: we write code+tests together in this task because `thiserror` macros mean
+there's no meaningful "empty impl" to make tests fail against. The test is
+proving correctness of macro derivation, not driving design. This is the only
+task in Phase 0 that bundles test+impl — all later tasks follow strict
+red→green.
 
 - [ ] **Step 3.3: Commit**
 
@@ -757,6 +802,7 @@ EOF
 ## Task 4: Cross-platform path utility (`platform::paths`)
 
 **Files:**
+
 - Create: `src-tauri/src/platform/mod.rs`, `src-tauri/src/platform/paths.rs`
 - Modify: `src-tauri/src/lib.rs`
 
@@ -827,7 +873,9 @@ Add to `src-tauri/src/lib.rs`:
 pub mod platform;
 ```
 
-Leave the `src-tauri/src/platform/paths.rs` file with ONLY the `#[cfg(test)]` module for now (no production code above it). Compilation will fail with "cannot find function `worktree_dir`" etc.
+Leave the `src-tauri/src/platform/paths.rs` file with ONLY the `#[cfg(test)]`
+module for now (no production code above it). Compilation will fail with "cannot
+find function `worktree_dir`" etc.
 
 - [ ] **Step 4.2: Run tests to verify they fail**
 
@@ -835,7 +883,8 @@ Leave the `src-tauri/src/platform/paths.rs` file with ONLY the `#[cfg(test)]` mo
 cd src-tauri && cargo test --lib platform::paths 2>&1 | tail -15 && cd ..
 ```
 
-Expected: compile error listing unresolved names (`worktree_dir`, `messages_file`, `context_dir`, `repos_file`, `ensure_data_dirs`).
+Expected: compile error listing unresolved names (`worktree_dir`,
+`messages_file`, `context_dir`, `repos_file`, `ensure_data_dirs`).
 
 - [ ] **Step 4.3: Write minimal implementation**
 
@@ -925,6 +974,7 @@ EOF
 ## Task 5: Binary detection utility (`platform::binary`)
 
 **Files:**
+
 - Create: `src-tauri/src/platform/binary.rs`
 - Modify: `src-tauri/src/platform/mod.rs`
 
@@ -1139,6 +1189,7 @@ EOF
 ## Task 6: `nanoid`-based ID generator (`ids`)
 
 **Files:**
+
 - Create: `src-tauri/src/ids.rs`
 - Modify: `src-tauri/src/lib.rs`
 
@@ -1265,7 +1316,9 @@ EOF
 ## Task 7: Atomic JSON writer (`persistence::atomic`)
 
 **Files:**
-- Create: `src-tauri/src/persistence/mod.rs`, `src-tauri/src/persistence/atomic.rs`
+
+- Create: `src-tauri/src/persistence/mod.rs`,
+  `src-tauri/src/persistence/atomic.rs`
 - Modify: `src-tauri/src/lib.rs`
 
 - [ ] **Step 7.1: Write failing tests**
@@ -1432,6 +1485,7 @@ EOF
 ## Task 8: Debounced writer (`persistence::debounce`)
 
 **Files:**
+
 - Create: `src-tauri/src/persistence/debounce.rs`
 - Modify: `src-tauri/src/persistence/mod.rs`
 
@@ -1650,6 +1704,7 @@ EOF
 ## Task 9: Tracing-based logging (`logging`)
 
 **Files:**
+
 - Create: `src-tauri/src/logging.rs`
 - Modify: `src-tauri/src/lib.rs`
 
@@ -1766,6 +1821,7 @@ EOF
 ## Task 10: Panic handler (`panic`)
 
 **Files:**
+
 - Create: `src-tauri/src/panic.rs`
 - Modify: `src-tauri/src/lib.rs`
 
@@ -1875,7 +1931,9 @@ EOF
 ## Task 11: AppState skeleton + first command (`get_app_version`)
 
 **Files:**
-- Create: `src-tauri/src/state.rs`, `src-tauri/src/commands/mod.rs`, `src-tauri/src/commands/system.rs`
+
+- Create: `src-tauri/src/state.rs`, `src-tauri/src/commands/mod.rs`,
+  `src-tauri/src/commands/system.rs`
 - Modify: `src-tauri/src/lib.rs`
 
 - [ ] **Step 11.1: Write failing unit tests for AppState defaults + command**
@@ -2053,6 +2111,7 @@ EOF
 ## Task 12: Typed IPC wrapper (`src/lib/ipc.ts`)
 
 **Files:**
+
 - Create: `src/lib/ipc.ts`, `src/lib/ipc.test.ts`, `src/lib/types.ts`
 
 - [ ] **Step 12.1: Write failing tests**
@@ -2186,6 +2245,7 @@ EOF
 ## Task 13: Theme palette (`src/lib/themes.ts`)
 
 **Files:**
+
 - Create: `src/lib/themes.ts`, `src/lib/themes.test.ts`
 
 - [ ] **Step 13.1: Write failing tests**
@@ -2200,10 +2260,27 @@ describe('themes', () => {
   it('exports a warm-dark theme with required tokens', () => {
     const t = tokensForTheme('warm-dark');
     const required = [
-      'bg-base', 'bg-sidebar', 'bg-titlebar', 'bg-card', 'bg-hover', 'bg-active',
-      'border', 'border-light', 'text-muted', 'text-dim', 'text-secondary',
-      'text-primary', 'text-bright', 'accent', 'status-ok', 'diff-add',
-      'diff-add-bg', 'diff-del', 'diff-del-bg', 'error', 'error-bg',
+      'bg-base',
+      'bg-sidebar',
+      'bg-titlebar',
+      'bg-card',
+      'bg-hover',
+      'bg-active',
+      'border',
+      'border-light',
+      'text-muted',
+      'text-dim',
+      'text-secondary',
+      'text-primary',
+      'text-bright',
+      'accent',
+      'status-ok',
+      'diff-add',
+      'diff-add-bg',
+      'diff-del',
+      'diff-del-bg',
+      'error',
+      'error-bg',
     ] as const;
     for (const token of required) expect(t).toHaveProperty(token);
   });
@@ -2242,39 +2319,53 @@ Write `src/lib/themes.ts`:
 
 ```ts
 export type TokenName =
-  | 'bg-base' | 'bg-sidebar' | 'bg-titlebar' | 'bg-card' | 'bg-hover' | 'bg-active'
-  | 'border' | 'border-light'
-  | 'text-muted' | 'text-dim' | 'text-secondary' | 'text-primary' | 'text-bright'
+  | 'bg-base'
+  | 'bg-sidebar'
+  | 'bg-titlebar'
+  | 'bg-card'
+  | 'bg-hover'
+  | 'bg-active'
+  | 'border'
+  | 'border-light'
+  | 'text-muted'
+  | 'text-dim'
+  | 'text-secondary'
+  | 'text-primary'
+  | 'text-bright'
   | 'accent'
   | 'status-ok'
-  | 'diff-add' | 'diff-add-bg' | 'diff-del' | 'diff-del-bg'
-  | 'error' | 'error-bg';
+  | 'diff-add'
+  | 'diff-add-bg'
+  | 'diff-del'
+  | 'diff-del-bg'
+  | 'error'
+  | 'error-bg';
 
 export type ThemeTokens = Record<TokenName, string>;
 
 export const THEMES = {
   'warm-dark': {
-    'bg-base':       'oklch(0.16 0.01 60)',
-    'bg-sidebar':    'oklch(0.13 0.01 60)',
-    'bg-titlebar':   'oklch(0.14 0.01 60)',
-    'bg-card':       'oklch(0.20 0.01 60)',
-    'bg-hover':      'oklch(0.24 0.01 60)',
-    'bg-active':     'oklch(0.28 0.01 60)',
-    'border':        'oklch(0.24 0.01 60)',
-    'border-light':  'oklch(0.30 0.01 60)',
-    'text-muted':    'oklch(0.55 0.01 60)',
-    'text-dim':      'oklch(0.65 0.01 60)',
-    'text-secondary':'oklch(0.75 0.01 60)',
-    'text-primary':  'oklch(0.88 0.005 60)',
-    'text-bright':   'oklch(0.96 0.005 60)',
-    'accent':        'oklch(0.78 0.14 70)',
-    'status-ok':     'oklch(0.70 0.15 140)',
-    'diff-add':      'oklch(0.72 0.13 140)',
-    'diff-add-bg':   'oklch(0.22 0.05 140)',
-    'diff-del':      'oklch(0.70 0.18 25)',
-    'diff-del-bg':   'oklch(0.22 0.06 25)',
-    'error':         'oklch(0.70 0.18 25)',
-    'error-bg':      'oklch(0.25 0.08 25)',
+    'bg-base': 'oklch(0.16 0.01 60)',
+    'bg-sidebar': 'oklch(0.13 0.01 60)',
+    'bg-titlebar': 'oklch(0.14 0.01 60)',
+    'bg-card': 'oklch(0.20 0.01 60)',
+    'bg-hover': 'oklch(0.24 0.01 60)',
+    'bg-active': 'oklch(0.28 0.01 60)',
+    border: 'oklch(0.24 0.01 60)',
+    'border-light': 'oklch(0.30 0.01 60)',
+    'text-muted': 'oklch(0.55 0.01 60)',
+    'text-dim': 'oklch(0.65 0.01 60)',
+    'text-secondary': 'oklch(0.75 0.01 60)',
+    'text-primary': 'oklch(0.88 0.005 60)',
+    'text-bright': 'oklch(0.96 0.005 60)',
+    accent: 'oklch(0.78 0.14 70)',
+    'status-ok': 'oklch(0.70 0.15 140)',
+    'diff-add': 'oklch(0.72 0.13 140)',
+    'diff-add-bg': 'oklch(0.22 0.05 140)',
+    'diff-del': 'oklch(0.70 0.18 25)',
+    'diff-del-bg': 'oklch(0.22 0.06 25)',
+    error: 'oklch(0.70 0.18 25)',
+    'error-bg': 'oklch(0.25 0.08 25)',
   },
 } as const satisfies Record<string, ThemeTokens>;
 
@@ -2320,6 +2411,7 @@ EOF
 ## Task 14: GitHub Actions CI workflow
 
 **Files:**
+
 - Create: `.github/workflows/ci.yml`
 
 - [ ] **Step 14.1: Write CI workflow**
@@ -2362,7 +2454,9 @@ jobs:
         working-directory: src-tauri
       - run: cargo check --all-targets
         working-directory: src-tauri
-      - run: cargo llvm-cov --lib --fail-under-lines 95 --fail-under-branches 95 --fail-under-functions 95
+      - run:
+          cargo llvm-cov --lib --fail-under-lines 95 --fail-under-branches 95
+          --fail-under-functions 95
         working-directory: src-tauri
 
   frontend:
@@ -2421,6 +2515,7 @@ EOF
 ## Task 15: Project CLAUDE.md (hard rules)
 
 **Files:**
+
 - Create: `.claude/CLAUDE.md`
 
 - [ ] **Step 15.1: Write `CLAUDE.md`**
@@ -2431,27 +2526,29 @@ Write `.claude/CLAUDE.md`:
 # Ansambel — Claude Code Instructions
 
 Tauri v2 + Svelte 5 + Bun desktop app that orchestrates parallel Claude Code
-agents across git worktrees. Cross-platform (Windows + Linux, macOS nice-to-have).
-Full design spec in `docs/superpowers/specs/2026-04-17-ansambel-design.md`.
+agents across git worktrees. Cross-platform (Windows + Linux, macOS
+nice-to-have). Full design spec in
+`docs/superpowers/specs/2026-04-17-ansambel-design.md`.
 
 ---
 
 ## Hard rules
 
 ### Rust
+
 - Every `#[tauri::command]` returns `Result<T, String>` — never panic, never
   unwrap in command handlers.
 - No `.unwrap()` or `.expect()` outside tests.
 - All shared state through `Arc<Mutex<_>>` in Tauri managed state — separate
-  state types may be registered when isolation from AppState locking is
-  required (LspServerPool, etc). No globals, no `lazy_static`.
-- Mutex discipline: acquire lock, extract data, drop lock before any blocking
-  / async / spawn work.
-- PTY reader threads handle EOF/errors gracefully, emit `agent-status` event
-  on exit.
+  state types may be registered when isolation from AppState locking is required
+  (LspServerPool, etc). No globals, no `lazy_static`.
+- Mutex discipline: acquire lock, extract data, drop lock before any blocking /
+  async / spawn work.
+- PTY reader threads handle EOF/errors gracefully, emit `agent-status` event on
+  exit.
 - `portable-pty`: always close the slave end in parent after spawning child.
-- Spawn `claude` with explicit env — inject `GH_TOKEN` per-process, never
-  rely on ambient shell state.
+- Spawn `claude` with explicit env — inject `GH_TOKEN` per-process, never rely
+  on ambient shell state.
 - Agent processes use `--permission-mode bypassPermissions` with
   `--disallowedTools EnterWorktree,ExitWorktree` — never
   `--dangerously-skip-permissions`.
@@ -2463,9 +2560,10 @@ Full design spec in `docs/superpowers/specs/2026-04-17-ansambel-design.md`.
 - Git operations return descriptive errors, not generic ones.
 
 ### Frontend
+
 - PTY output never touches Svelte state — xterm.js owns its buffer.
-- Messages use `SvelteMap<id, Message>`, mutated in place — never replace
-  entire arrays.
+- Messages use `SvelteMap<id, Message>`, mutated in place — never replace entire
+  arrays.
 - xterm instances use `display: none / block` on workspace switch — never
   mount/unmount.
 - Tauri Channel API for binary streams — never `listen()` + JSON for
@@ -2479,36 +2577,41 @@ Full design spec in `docs/superpowers/specs/2026-04-17-ansambel-design.md`.
   `input_tokens` alone.
 
 ### Data
-- All app data under the OS-resolved app-data dir (`Tauri app.path().app_data_dir()`)
-  — zero writes to managed repos.
+
+- All app data under the OS-resolved app-data dir
+  (`Tauri app.path().app_data_dir()`) — zero writes to managed repos.
 - Worktrees: `<data_dir>/workspaces/<workspace-id>/`
 - Messages: `<data_dir>/messages/<workspace-id>.json`
 - Metadata: `<data_dir>/workspaces.json`, `<data_dir>/sessions.json`,
   `<data_dir>/repos.json`
 - Atomic writes via `.tmp` + rename. Debounced writes for messages/workspaces/
   sessions at 500ms; immediate for app_settings and repo/provider config.
-- Workspace status resets from `Running` to `Waiting` on app restart
-  (agent process is dead after restart).
+- Workspace status resets from `Running` to `Waiting` on app restart (agent
+  process is dead after restart).
 
 ### Testing (hard rule — per project feedback)
+
 - No production code without a failing test first. TDD: red → green → refactor.
 - Every `#[tauri::command]` has ≥1 unit test + ≥1 integration test.
 - Every Svelte component has ≥1 test (happy path + ≥1 edge case).
 - Every phase ships with E2E tests covering its golden path.
-- External services (Claude CLI, Jira, Lark) are mocked in unit/integration tests.
+- External services (Claude CLI, Jira, Lark) are mocked in unit/integration
+  tests.
 - E2E tests use real Tauri window via Playwright; Claude CLI mocked via
   `ANSAMBEL_MOCK_CLAUDE=1`.
 - CI fails if coverage drops below **95%** on changed files (both unit-test
-  line+branch+function coverage and E2E scenario coverage of documented
-  golden paths).
+  line+branch+function coverage and E2E scenario coverage of documented golden
+  paths).
 - Never use `#[ignore]` or `test.skip` without a linked GitHub issue.
 
 ### Commands
+
 - Use `bun`, not `npm`, `npx`, or `yarn`.
 - Type check: `bun run check`.
 - Rust check: `cargo check` (never `cargo build` or `tauri build` in checks).
 
 ### General
+
 - No `console.log` in production paths — use `tracing` in Rust and the
   `src/lib/logging.ts` wrapper in Svelte (added in Phase 1).
 - No hardcoded paths — derive from repo root or Tauri app data dir via
@@ -2522,8 +2625,8 @@ Full design spec in `docs/superpowers/specs/2026-04-17-ansambel-design.md`.
 See `docs/superpowers/specs/2026-04-17-ansambel-design.md` for the full
 architecture. Key modules:
 
-- `src-tauri/src/platform/` — cross-platform abstractions (paths, binary,
-  PTY, keyring, shell).
+- `src-tauri/src/platform/` — cross-platform abstractions (paths, binary, PTY,
+  keyring, shell).
 - `src-tauri/src/commands/` — Tauri IPC handlers, one file per subsystem.
 - `src-tauri/src/task_provider/` — Jira and Lark Bitable plugins (Phase 3).
 - `src-tauri/src/persistence/` — atomic and debounced JSON writers.
@@ -2549,9 +2652,9 @@ architecture. Key modules:
 
 ## Build strategy
 
-9 phases, each with its own implementation plan under
-`docs/superpowers/plans/`. Work on one phase at a time. Phase 0 establishes
-this foundation; Phase 1 is the MVP orchestrator.
+9 phases, each with its own implementation plan under `docs/superpowers/plans/`.
+Work on one phase at a time. Phase 0 establishes this foundation; Phase 1 is the
+MVP orchestrator.
 ```
 
 - [ ] **Step 15.2: Commit**
@@ -2575,11 +2678,14 @@ EOF
 ## Task 16: README.md and first ADR
 
 **Files:**
+
 - Create: `README.md`, `docs/adr/0001-tech-stack.md`, `LICENSE`
 
-- [x] **Step 16.1: Write `LICENSE`** _(completed in Phase 0 Task 1 follow-up commit)_
+- [x] **Step 16.1: Write `LICENSE`** _(completed in Phase 0 Task 1 follow-up
+      commit)_
 
-Already created with the content below (skip this step — file exists from earlier):
+Already created with the content below (skip this step — file exists from
+earlier):
 
 ```text
 Ansambel — Copyright (c) 2026 Talentlytica / Handoko Beni
@@ -2592,13 +2698,13 @@ Unauthorized copying, distribution, or use is strictly prohibited.
 
 Write `README.md`:
 
-```markdown
+````markdown
 # Ansambel
 
 > Orchestrate your AI ensemble.
 
-Cross-platform (Windows + Linux + macOS) desktop app that orchestrates
-parallel Claude Code agents in isolated git worktrees. Modeled after
+Cross-platform (Windows + Linux + macOS) desktop app that orchestrates parallel
+Claude Code agents in isolated git worktrees. Modeled after
 [korlap](https://github.com/ariaghora/korlap) (macOS-only) and
 [Conductor](https://www.conductor.build).
 
@@ -2627,6 +2733,7 @@ bun run test:coverage   # unit + coverage gate (95%)
 bun run e2e             # E2E smoke
 cd src-tauri && cargo test --lib && cd ..
 ```
+````
 
 ## Documentation
 
@@ -2637,7 +2744,8 @@ cd src-tauri && cargo test --lib && cd ..
 ## License
 
 Private. See [LICENSE](./LICENSE).
-```
+
+````
 
 - [ ] **Step 16.3: Write first ADR**
 
@@ -2700,7 +2808,7 @@ we build from scratch.
   explicitly in CI.
 - Svelte 5 runes are new; the team must get comfortable with $state / $derived
   semantics.
-```
+````
 
 - [ ] **Step 16.4: Commit**
 
@@ -2739,10 +2847,11 @@ cd src-tauri && cargo test --lib 2>&1 | tail -10 && cd ..
 ```
 
 Expected: All tests pass. Approximate count: 6 (error) + 5 (paths) + 5 (binary)
-+ 7 (ids) + 6 (atomic) + 4 (debounce) + 1 (logging) + 1 (panic) + 2 (state)
-+ 1 (system command) = 38 tests.
 
-- [ ] **Step 17.3: Run Rust coverage and verify gate**
+- 7 (ids) + 6 (atomic) + 4 (debounce) + 1 (logging) + 1 (panic) + 2 (state)
+- 1 (system command) = 38 tests.
+
+* [ ] **Step 17.3: Run Rust coverage and verify gate**
 
 ```bash
 cd src-tauri && cargo llvm-cov --lib --fail-under-lines 95 --fail-under-branches 95 --fail-under-functions 95 2>&1 | tail -10 && cd ..
@@ -2767,8 +2876,8 @@ bun run check 2>&1 | tail -5
 bun run test:coverage 2>&1 | tail -10
 ```
 
-Expected: `0 errors` from svelte-check; Vitest reports coverage ≥95% on
-changed files.
+Expected: `0 errors` from svelte-check; Vitest reports coverage ≥95% on changed
+files.
 
 - [ ] **Step 17.5: Launch app (manual smoke)**
 
@@ -2776,8 +2885,8 @@ changed files.
 bun tauri dev
 ```
 
-Expected: Ansambel window opens. After ~1 second, the heading reads
-"Ansambel 0.1.0-pre" (not "loading…" — backend responded). Close with Ctrl+C.
+Expected: Ansambel window opens. After ~1 second, the heading reads "Ansambel
+0.1.0-pre" (not "loading…" — backend responded). Close with Ctrl+C.
 
 - [ ] **Step 17.6: Run E2E against dev server**
 
@@ -2825,12 +2934,12 @@ Before moving to Phase 1, verify:
 - [ ] `bun run check` reports 0 errors.
 - [ ] `bun run e2e` smoke test passes.
 - [ ] GitHub Actions CI matrix is green on Ubuntu + Windows.
-- [ ] `README.md`, `LICENSE`, `.claude/CLAUDE.md`, and `docs/adr/0001-tech-stack.md`
-  exist and are committed.
+- [ ] `README.md`, `LICENSE`, `.claude/CLAUDE.md`, and
+      `docs/adr/0001-tech-stack.md` exist and are committed.
 - [ ] Git tag `v0.1.0-phase0` marks the end of this phase.
 
 Phase 1 (MVP Orchestrator) begins after all items above are checked.
 
 ---
 
-*End of Phase 0 plan.*
+_End of Phase 0 plan._

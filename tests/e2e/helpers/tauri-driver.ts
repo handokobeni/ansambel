@@ -16,7 +16,7 @@ export class TauriDevHarness {
     this.proc = spawn('bun', ['run', 'dev'], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, ANSAMBEL_MOCK_CLAUDE: '1' },
-      detached: process.platform !== 'win32'
+      detached: process.platform !== 'win32',
     });
 
     this.drain(this.proc.stdout, this.stdoutBuffer);
@@ -48,7 +48,11 @@ export class TauriDevHarness {
         if (process.platform === 'win32') {
           spawn('taskkill', ['/pid', String(proc.pid), '/t', '/f'], { stdio: 'ignore' });
         } else {
-          try { process.kill(-proc.pid!, 'SIGKILL'); } catch { proc.kill('SIGKILL'); }
+          try {
+            process.kill(-proc.pid!, 'SIGKILL');
+          } catch {
+            proc.kill('SIGKILL');
+          }
         }
       }
     }, SHUTDOWN_TIMEOUT_MS);

@@ -46,6 +46,42 @@ jobs:
       - run: bun run check
       - run: bun run test:coverage
 
+  lint:
+    name: Lint (ESLint + Prettier + Rustfmt + Clippy)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: src-tauri }
+      - run: bun install --frozen-lockfile
+      - run: bun run lint
+      - name: Rust fmt
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+      - name: Rust clippy
+        working-directory: src-tauri
+        run: cargo clippy --lib --all-targets -- -D warnings
+
+  commitlint:
+    name: Commitlint (PR commits)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun x commitlint --from=${{ github.event.pull_request.base.sha }} --to=${{ github.event.pull_request.head.sha }} --verbose
+
   e2e:
     name: E2E smoke (${{ matrix.os }})
     strategy:
@@ -53,7 +89,7 @@ jobs:
       matrix:
         os: [ubuntu-22.04, windows-2022]
     runs-on: ${{ matrix.os }}
-    needs: [rust, frontend]
+    needs: [rust, frontend, lint]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
