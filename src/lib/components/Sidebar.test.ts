@@ -272,6 +272,42 @@ describe('Sidebar', () => {
     expect(dots[0]).toHaveAttribute('data-status', 'not_started');
   });
 
+  it('status dot for done/not_started/error uses muted bg (fallthrough branch)', () => {
+    const fallthroughList = [
+      {
+        id: 'ws_done1',
+        repo_id: 'repo_abc123',
+        branch: 'feat/done',
+        base_branch: 'main',
+        custom_branch: false,
+        title: 'Finished task',
+        description: '',
+        status: 'done' as const,
+        column: 'done' as const,
+        created_at: 1776000003,
+        updated_at: 1776000003,
+      },
+    ];
+    vi.mocked(workspaces.listForRepo).mockReturnValue(fallthroughList);
+    const { container } = render(Sidebar);
+    const dot = container.querySelector('[data-status-dot]');
+    expect(dot).toHaveAttribute('data-status', 'done');
+    expect(dot?.className).toContain('bg-[var(--text-muted)]');
+  });
+
+  it('submitting form with whitespace-only title does not call workspaces.create', async () => {
+    render(Sidebar);
+    await fireEvent.click(screen.getByRole('button', { name: /new workspace/i }));
+    await fireEvent.input(screen.getByPlaceholderText(/workspace title/i), {
+      target: { value: '   ' },
+    });
+    // Create button stays disabled because formTitle.trim() is empty, but submit via form
+    // to exercise the handleCreateSubmit early-return guard (covers line 38 branch).
+    const form = screen.getByPlaceholderText(/workspace title/i).closest('form');
+    if (form) await fireEvent.submit(form);
+    expect(workspaces.create).not.toHaveBeenCalled();
+  });
+
   it('create form shows error-resilience when workspaces.create rejects', async () => {
     vi.mocked(workspaces.create).mockRejectedValue(new Error('backend error'));
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
