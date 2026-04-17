@@ -1,5 +1,6 @@
 // src/lib/components/kanban/KanbanBoard.test.ts
 import { describe, it, expect, vi } from 'vitest';
+import { SHADOW_ITEM_MARKER_PROPERTY_NAME } from 'svelte-dnd-action';
 import { render, screen } from '@testing-library/svelte';
 import KanbanBoard from './KanbanBoard.svelte';
 import type { Task } from '$lib/types';
@@ -100,5 +101,88 @@ describe('KanbanBoard', () => {
     });
     const emptyMessages = screen.getAllByText(/no tasks/i);
     expect(emptyMessages.length).toBeGreaterThan(0);
+  });
+});
+
+describe('KanbanBoard drag behavior', () => {
+  it('dnd zones are rendered for each column', () => {
+    render(KanbanBoard, {
+      props: {
+        repoId: 'repo_abc123',
+        tasks: [],
+        onMove: vi.fn(),
+        onAddTask: vi.fn(),
+        onRemoveTask: vi.fn(),
+      },
+    });
+    const zones = document.querySelectorAll('[data-column]');
+    expect(zones.length).toBe(4);
+  });
+
+  it('calls onMove when a finalize event fires with new column', async () => {
+    const onMove = vi.fn();
+    const task = makeTask({ id: 'tk_abc123', column: 'todo' });
+    render(KanbanBoard, {
+      props: {
+        repoId: 'repo_abc123',
+        tasks: [task],
+        onMove,
+        onAddTask: vi.fn(),
+        onRemoveTask: vi.fn(),
+      },
+    });
+    const inProgressZone = document.querySelector('[data-column="in_progress"]') as HTMLElement;
+    const movedTask = { ...task, column: 'in_progress' as const };
+    const event = new CustomEvent('finalize', {
+      detail: { items: [movedTask], info: { id: 'tk_abc123' } },
+    });
+    inProgressZone.dispatchEvent(event);
+    expect(onMove).toHaveBeenCalledWith('tk_abc123', 'in_progress', 0);
+  });
+
+  it('does not call onMove for consider events (intermediate hover)', async () => {
+    const onMove = vi.fn();
+    const task = makeTask();
+    render(KanbanBoard, {
+      props: {
+        repoId: 'repo_abc123',
+        tasks: [task],
+        onMove,
+        onAddTask: vi.fn(),
+        onRemoveTask: vi.fn(),
+      },
+    });
+    const todoZone = document.querySelector('[data-column="todo"]') as HTMLElement;
+    const event = new CustomEvent('consider', {
+      detail: { items: [task], info: { id: 'tk_abc123' } },
+    });
+    todoZone.dispatchEvent(event);
+    expect(onMove).not.toHaveBeenCalled();
+  });
+
+  it('shadow item (in-flight drag placeholder) is filtered from final list', async () => {
+    const onMove = vi.fn();
+    const task = makeTask({ id: 'tk_abc123', column: 'todo' });
+    render(KanbanBoard, {
+      props: {
+        repoId: 'repo_abc123',
+        tasks: [task],
+        onMove,
+        onAddTask: vi.fn(),
+        onRemoveTask: vi.fn(),
+      },
+    });
+    const doneZone = document.querySelector('[data-column="done"]') as HTMLElement;
+    const shadowTask = {
+      ...task,
+      column: 'done' as const,
+      [SHADOW_ITEM_MARKER_PROPERTY_NAME]: true,
+    };
+    const event = new CustomEvent('finalize', {
+      detail: { items: [shadowTask], info: { id: 'tk_abc123' } },
+    });
+    doneZone.dispatchEvent(event);
+    // shadow item has marker — onMove should be called with the real id
+    expect(onMove).toHaveBeenCalledWith('tk_abc123', 'done', 0);
   });
 });
