@@ -15,7 +15,7 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["vite/client", "@testing-library/jest-dom"],
+    "types": ["vite/client", "@testing-library/jest-dom", "node"],
     "paths": { "$lib/*": ["./src/lib/*"], "$lib": ["./src/lib"] }
   },
   "include": ["src/**/*.ts", "src/**/*.svelte", "tests/**/*.ts"],
