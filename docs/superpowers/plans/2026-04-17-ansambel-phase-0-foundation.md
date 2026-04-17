@@ -628,8 +628,8 @@ EOF
 Write `src-tauri/src/error.rs` with tests only (no impl):
 
 ```rust
-use thiserror::Error;
 use std::path::PathBuf;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -687,6 +687,7 @@ mod tests {
         let err = bad.unwrap_err();
         let app: AppError = err.into();
         assert!(matches!(app, AppError::Serde(_)));
+        assert!(app.to_string().contains("Serialization"));
     }
 
     #[test]
