@@ -25,12 +25,13 @@ pub fn run() {
             // Hydrate AppState from disk
             let repos = crate::persistence::repos::load_repos(&data_dir)?;
             let workspaces = crate::persistence::workspaces::load_and_reset_running(&data_dir)?;
+            let tasks = crate::persistence::tasks::load_tasks(&data_dir)?;
             let settings = crate::persistence::settings::load_settings(&data_dir)?;
 
             let state = crate::state::AppState {
                 repos,
                 workspaces,
-                tasks: std::collections::HashMap::new(),
+                tasks,
                 settings,
             };
 
@@ -49,4 +50,21 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn app_state_construction_includes_tasks_field() {
+        use crate::state::{AppSettings, AppState};
+        use std::collections::HashMap;
+        // Verify the struct literal compiles with all three entity maps.
+        let state = AppState {
+            repos: HashMap::new(),
+            workspaces: HashMap::new(),
+            tasks: HashMap::new(),
+            settings: AppSettings::default(),
+        };
+        assert!(state.tasks.is_empty());
+    }
 }
