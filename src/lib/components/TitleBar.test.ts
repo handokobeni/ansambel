@@ -64,4 +64,18 @@ describe('TitleBar', () => {
     expect(open).toHaveBeenCalledWith({ directory: true, multiple: false });
     expect(repos.add).toHaveBeenCalledWith('/home/user/new-project');
   });
+
+  it('does nothing when dialog is cancelled (open returns null)', async () => {
+    vi.mocked(open).mockResolvedValue(null);
+    render(TitleBar);
+    await fireEvent.click(screen.getByRole('button', { name: /add repo/i }));
+    expect(repos.add).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when dialog returns an empty string', async () => {
+    vi.mocked(open).mockResolvedValue('');
+    render(TitleBar);
+    await fireEvent.click(screen.getByRole('button', { name: /add repo/i }));
+    expect(repos.add).not.toHaveBeenCalled();
+  });
 });

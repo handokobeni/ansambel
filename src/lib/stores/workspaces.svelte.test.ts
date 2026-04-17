@@ -110,4 +110,35 @@ describe('WorkspacesStore', () => {
     store.select('ws_abc123');
     expect(store.getSelected()).toEqual(ws);
   });
+
+  it('getSelected: returns null when selectedWorkspaceId is set but no matching workspace exists', async () => {
+    vi.mocked(api.workspace.list).mockResolvedValue([makeWorkspace()]);
+    const store = new WorkspacesStore();
+    await store.loadForRepo('repo_abc123');
+    store.select('ws_nonexistent');
+    expect(store.getSelected()).toBeNull();
+  });
+
+  it('remove: clears selectedWorkspaceId when the selected workspace is removed', async () => {
+    const ws = makeWorkspace();
+    vi.mocked(api.workspace.list).mockResolvedValue([ws]);
+    vi.mocked(api.workspace.remove).mockResolvedValue(undefined);
+    const store = new WorkspacesStore();
+    await store.loadForRepo('repo_abc123');
+    store.select('ws_abc123');
+    await store.remove('ws_abc123', 'repo_abc123');
+    expect(store.selectedWorkspaceId).toBeNull();
+  });
+
+  it('create: reuses existing inner map when repo already has workspaces', async () => {
+    const ws1 = makeWorkspace({ id: 'ws_first' });
+    const ws2 = makeWorkspace({ id: 'ws_second', title: 'Second task' });
+    vi.mocked(api.workspace.list).mockResolvedValue([ws1]);
+    vi.mocked(api.workspace.create).mockResolvedValue(ws2);
+    const store = new WorkspacesStore();
+    await store.loadForRepo('repo_abc123');
+    await store.create({ repoId: 'repo_abc123', title: 'Second task', description: '' });
+    // Both workspaces should be in the same inner map
+    expect(store.byRepo.get('repo_abc123')?.size).toBe(2);
+  });
 });

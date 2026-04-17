@@ -91,6 +91,23 @@ describe('ReposStore', () => {
     expect(store.selectedRepoId).toBeNull();
   });
 
+  it('getSelected: returns null when selectedRepoId is set but repo not in map', () => {
+    const store = new ReposStore();
+    store.select('repo_nonexistent');
+    expect(store.getSelected()).toBeNull();
+  });
+
+  it('remove: clears selectedRepoId when the selected repo is removed', async () => {
+    const repo = makeRepo();
+    vi.mocked(api.repo.list).mockResolvedValue([repo]);
+    vi.mocked(api.repo.remove).mockResolvedValue(undefined);
+    const store = new ReposStore();
+    await store.load();
+    store.select('repo_abc123');
+    await store.remove('repo_abc123');
+    expect(store.selectedRepoId).toBeNull();
+  });
+
   it('getSelected: returns null when nothing selected', () => {
     const store = new ReposStore();
     expect(store.getSelected()).toBeNull();
