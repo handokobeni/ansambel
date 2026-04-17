@@ -49,11 +49,19 @@ pub struct RepoInfo {
     pub updated_at: i64,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct WorkspaceInfo {
     pub id: String,
     pub repo_id: String,
     pub branch: String,
+    pub base_branch: String,
+    pub custom_branch: bool,
+    pub title: String,
+    pub description: String,
+    pub status: WorkspaceStatus,
+    pub column: KanbanColumn,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 pub fn app_version() -> &'static str {
@@ -74,6 +82,34 @@ mod tests {
     #[test]
     fn app_version_matches_cargo_pkg_version() {
         assert_eq!(app_version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn workspace_info_round_trips_json() {
+        let ws = WorkspaceInfo {
+            id: "ws_abc123".into(),
+            repo_id: "repo_xyz".into(),
+            branch: "ws/abc123".into(),
+            base_branch: "main".into(),
+            custom_branch: false,
+            title: "Fix login bug".into(),
+            description: "Broken on mobile".into(),
+            status: WorkspaceStatus::Waiting,
+            column: KanbanColumn::InProgress,
+            created_at: 1_776_000_000,
+            updated_at: 1_776_099_500,
+        };
+        let json = serde_json::to_string(&ws).unwrap();
+        let back: WorkspaceInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ws);
+    }
+
+    #[test]
+    fn workspace_info_status_is_not_started_by_default() {
+        // Verify Default derive would give NotStarted / Todo if we could use it
+        // (WorkspaceInfo doesn't derive Default, but status field default is)
+        assert_eq!(WorkspaceStatus::default(), WorkspaceStatus::NotStarted);
+        assert_eq!(KanbanColumn::default(), KanbanColumn::Todo);
     }
 
     #[test]
