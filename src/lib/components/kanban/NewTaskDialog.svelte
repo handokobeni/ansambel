@@ -37,12 +37,17 @@
     class="dialog-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
     onclick={handleCancel}
   >
-    <dialog
-      class="new-task-dialog block w-[420px] max-w-[90vw] p-4 rounded-lg bg-[var(--bg-card)] border border-[var(--border-light)] shadow-2xl text-[var(--text-primary)]"
-      open
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="new-task-title"
+      tabindex="-1"
+      class="new-task-dialog relative w-[420px] max-w-[90vw] p-4 rounded-lg bg-[var(--bg-card)] border border-[var(--border-light)] shadow-2xl text-[var(--text-primary)]"
       onclick={(e) => e.stopPropagation()}
     >
-      <h2 class="text-sm font-semibold mb-3 text-[var(--text-primary)]">New Task</h2>
+      <h2 id="new-task-title" class="text-sm font-semibold mb-3 text-[var(--text-primary)]">
+        New Task
+      </h2>
 
       <form class="flex flex-col gap-3" onsubmit={handleSubmit}>
         <div class="flex flex-col gap-1">
@@ -95,6 +100,6 @@
           </button>
         </div>
       </form>
-    </dialog>
+    </div>
   </div>
 {/if}
