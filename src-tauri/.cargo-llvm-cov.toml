@@ -1,2 +1,2 @@
 [coverage]
-ignore-filename-regex = "^src/main\\.rs$|^src/lib\\.rs$"
+ignore-filename-regex = "lib\\.rs$|main\\.rs$"
