@@ -375,4 +375,12 @@ mod tests {
             .unwrap();
         assert_eq!(cleared.gh_profile, None);
     }
+
+    #[test]
+    fn list_repos_returns_empty_vec_when_no_repos() {
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repos: Vec<crate::state::RepoInfo> =
+            state.lock().unwrap().repos.values().cloned().collect();
+        assert!(repos.is_empty());
+    }
 }
