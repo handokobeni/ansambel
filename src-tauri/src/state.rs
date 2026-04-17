@@ -48,10 +48,24 @@ impl Default for AppSettings {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Task {
+    pub id: String,                   // prefix `tk_`
+    pub repo_id: String,              // owning repo
+    pub workspace_id: Option<String>, // populated when moved to InProgress
+    pub title: String,
+    pub description: String,
+    pub column: KanbanColumn, // reuses Phase 1a enum
+    pub order: i32,           // within-column sort order (higher = top)
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 #[derive(Default, Debug)]
 pub struct AppState {
     pub repos: std::collections::HashMap<String, RepoInfo>,
     pub workspaces: std::collections::HashMap<String, WorkspaceInfo>,
+    pub tasks: std::collections::HashMap<String, Task>, // NEW
     pub settings: AppSettings,
 }
 
@@ -230,5 +244,76 @@ mod tests {
             let back: KanbanColumn = serde_json::from_str(&json).unwrap();
             assert_eq!(back, variant);
         }
+    }
+
+    #[test]
+    fn task_round_trips_json() {
+        let t = Task {
+            id: "tk_abc123".into(),
+            repo_id: "repo_xyz".into(),
+            workspace_id: None,
+            title: "Fix login bug".into(),
+            description: "Auth fails on mobile".into(),
+            column: KanbanColumn::Todo,
+            order: 1024,
+            created_at: 1_776_000_000,
+            updated_at: 1_776_099_000,
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        let back: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn task_workspace_id_nullable() {
+        let t = Task {
+            id: "tk_aaa111".into(),
+            repo_id: "repo_r1".into(),
+            workspace_id: Some("ws_xyz".into()),
+            title: "With workspace".into(),
+            description: String::new(),
+            column: KanbanColumn::InProgress,
+            order: 2048,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains("\"workspace_id\":\"ws_xyz\""));
+        let none_task = Task {
+            workspace_id: None,
+            id: "tk_bbb222".into(),
+            repo_id: "repo_r2".into(),
+            title: String::new(),
+            description: String::new(),
+            column: KanbanColumn::Todo,
+            order: 0,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let none_json = serde_json::to_string(&none_task).unwrap();
+        assert!(none_json.contains("\"workspace_id\":null"));
+    }
+
+    #[test]
+    fn app_state_has_tasks_field() {
+        let state = AppState::default();
+        assert!(state.tasks.is_empty());
+    }
+
+    #[test]
+    fn task_column_uses_kanban_column_enum() {
+        let t = Task {
+            id: "tk_c1".into(),
+            repo_id: "repo_r1".into(),
+            workspace_id: None,
+            title: "Review task".into(),
+            description: String::new(),
+            column: KanbanColumn::Review,
+            order: 3072,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains("\"column\":\"review\""));
     }
 }

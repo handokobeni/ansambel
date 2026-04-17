@@ -37,6 +37,9 @@ pub fn repos_file(data_dir: &Path) -> PathBuf {
 pub fn workspaces_file(data_dir: &Path) -> PathBuf {
     data_dir.join("workspaces.json")
 }
+pub fn tasks_file(data_dir: &Path) -> PathBuf {
+    data_dir.join("tasks.json")
+}
 pub fn sessions_file(data_dir: &Path) -> PathBuf {
     data_dir.join("sessions.json")
 }
@@ -150,6 +153,13 @@ mod tests {
         let data = PathBuf::from("/tmp/ansambel");
         let p = workspaces_file(&data);
         assert_eq!(p, PathBuf::from("/tmp/ansambel/workspaces.json"));
+    }
+
+    #[test]
+    fn tasks_file_is_at_data_dir_root() {
+        let data = PathBuf::from("/tmp/ansambel");
+        let p = tasks_file(&data);
+        assert_eq!(p, PathBuf::from("/tmp/ansambel/tasks.json"));
     }
 
     #[test]

@@ -24,6 +24,9 @@ pub fn todo_id() -> String {
 pub fn script_id() -> String {
     format!("sc_{}", id_body())
 }
+pub fn task_id() -> String {
+    format!("tk_{}", id_body())
+}
 
 #[cfg(test)]
 mod tests {
@@ -82,5 +85,32 @@ mod tests {
                 id
             );
         }
+    }
+
+    #[test]
+    fn task_id_has_prefix_and_length() {
+        let id = task_id();
+        assert!(id.starts_with("tk_"), "expected tk_ prefix, got {id}");
+        assert_eq!(id.len(), "tk_".len() + 6);
+    }
+
+    #[test]
+    fn task_id_uses_only_allowed_alphabet() {
+        let id = task_id();
+        let body = id.strip_prefix("tk_").unwrap();
+        for c in body.chars() {
+            assert!(
+                c.is_ascii_alphanumeric() && c.is_ascii_lowercase() || c.is_ascii_digit(),
+                "Unexpected char {:?} in id {}",
+                c,
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn task_id_no_collisions() {
+        let set: std::collections::HashSet<String> = (0..1_000).map(|_| task_id()).collect();
+        assert_eq!(set.len(), 1_000);
     }
 }
