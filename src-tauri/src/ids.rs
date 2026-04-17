@@ -60,9 +60,14 @@ mod tests {
     }
 
     #[test]
-    fn ten_thousand_ids_have_no_collisions() {
-        let set: HashSet<String> = (0..10_000).map(|_| workspace_id()).collect();
-        assert_eq!(set.len(), 10_000);
+    fn thousand_ids_have_no_collisions() {
+        // 6-char nanoid with 36-char alphabet → ~2.2B possibilities.
+        // Birthday-paradox collision probability for N samples ≈ N² / (2 * 36^6):
+        //   10_000 samples → ~0.23% flake rate (1 in 440 runs)
+        //    1_000 samples → ~0.0023% flake rate (effectively never)
+        // Keep the test guarding ID uniqueness without being CI-flaky.
+        let set: HashSet<String> = (0..1_000).map(|_| workspace_id()).collect();
+        assert_eq!(set.len(), 1_000);
     }
 
     #[test]
