@@ -1,0 +1,45 @@
+# Build outputs
+/target/
+/dist/
+/build/
+/src-tauri/target/
+/src-tauri/gen/
+
+# Node / Bun
+node_modules/
+bun.lock.log
+.pnpm-store/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/*
+!.vscode/settings.json.example
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+
+# Test artifacts
+/coverage/
+/test-results/
+/playwright-report/
+/playwright/.cache/
+
+# Logs
+*.log
+/logs/
+
+# Tauri
+/src-tauri/WixTools/
+
+# Local settings
+.claude/settings.local.json
