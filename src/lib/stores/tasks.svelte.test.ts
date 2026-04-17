@@ -152,4 +152,44 @@ describe('TasksStore', () => {
     store.selectTask(null);
     expect(store.selectedTaskId).toBeNull();
   });
+
+  it('update: does nothing when task id is not found in any repo map', async () => {
+    vi.mocked(api.task.update).mockResolvedValue(undefined);
+    const store = new TasksStore();
+    // No tasks loaded — update should not throw
+    await store.update('tk_missing', { title: 'Noop' });
+    expect(api.task.update).toHaveBeenCalledWith('tk_missing', { title: 'Noop' });
+  });
+
+  it('move: does nothing when task id is not found in any repo map', async () => {
+    vi.mocked(api.task.move).mockResolvedValue(undefined);
+    const store = new TasksStore();
+    await store.move('tk_missing', 'review', 0);
+    expect(api.task.move).toHaveBeenCalledWith('tk_missing', 'review', 0);
+  });
+
+  it('remove: clears selectedTaskId when removed task was selected', async () => {
+    const task = makeTask();
+    vi.mocked(api.task.list).mockResolvedValue([task]);
+    vi.mocked(api.task.remove).mockResolvedValue(undefined);
+    const store = new TasksStore();
+    await store.loadForRepo('repo_abc123');
+    store.selectTask('tk_abc123');
+    expect(store.selectedTaskId).toBe('tk_abc123');
+    await store.remove('tk_abc123');
+    expect(store.selectedTaskId).toBeNull();
+  });
+
+  it('remove: does nothing when task id is not found in any repo map', async () => {
+    vi.mocked(api.task.remove).mockResolvedValue(undefined);
+    const store = new TasksStore();
+    await store.remove('tk_missing');
+    expect(api.task.remove).toHaveBeenCalledWith('tk_missing', undefined);
+  });
+
+  it('listForRepo: returns empty array when repo has no tasks loaded', () => {
+    const store = new TasksStore();
+    const result = store.listForRepo('repo_unknown');
+    expect(result).toEqual([]);
+  });
 });

@@ -46,4 +46,32 @@ describe('NewTaskDialog', () => {
     await fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
     expect(onCancel).toHaveBeenCalled();
   });
+
+  it('does not call onSubmit when form submitted with empty title (canSubmit guard)', async () => {
+    const onSubmit = vi.fn();
+    render(NewTaskDialog, {
+      props: { open: true, onSubmit, onCancel: vi.fn() },
+    });
+    // Submit form directly without filling in title — hits the !canSubmit return branch
+    const form = document.querySelector('form') as HTMLFormElement;
+    await fireEvent.submit(form);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('does not render dialog content when open is false', () => {
+    render(NewTaskDialog, {
+      props: { open: false, onSubmit: vi.fn(), onCancel: vi.fn() },
+    });
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('calls onCancel when backdrop is clicked', async () => {
+    const onCancel = vi.fn();
+    render(NewTaskDialog, {
+      props: { open: true, onSubmit: vi.fn(), onCancel },
+    });
+    const backdrop = document.querySelector('.dialog-backdrop') as HTMLElement;
+    await fireEvent.click(backdrop);
+    expect(onCancel).toHaveBeenCalled();
+  });
 });

@@ -185,4 +185,40 @@ describe('KanbanBoard drag behavior', () => {
     // shadow item has marker — onMove should be called with the real id
     expect(onMove).toHaveBeenCalledWith('tk_abc123', 'done', 0);
   });
+
+  it('uses order 0 when dropped task id is not found in items list (rawOrder fallback)', async () => {
+    const onMove = vi.fn();
+    const task = makeTask({ id: 'tk_abc123', column: 'todo' });
+    render(KanbanBoard, {
+      props: {
+        repoId: 'repo_abc123',
+        tasks: [task],
+        onMove,
+        onAddTask: vi.fn(),
+        onRemoveTask: vi.fn(),
+      },
+    });
+    const reviewZone = document.querySelector('[data-column="review"]') as HTMLElement;
+    // items list does not contain the dropped task id — rawOrder will be -1
+    const event = new CustomEvent('finalize', {
+      detail: { items: [], info: { id: 'tk_abc123' } },
+    });
+    reviewZone.dispatchEvent(event);
+    expect(onMove).toHaveBeenCalledWith('tk_abc123', 'review', 0);
+  });
+
+  it('does not show Add task button in non-todo columns', () => {
+    render(KanbanBoard, {
+      props: {
+        repoId: 'repo_abc123',
+        tasks: [],
+        onMove: vi.fn(),
+        onAddTask: vi.fn(),
+        onRemoveTask: vi.fn(),
+      },
+    });
+    // Only 1 Add task button should exist (Todo column only)
+    const addBtns = screen.getAllByRole('button', { name: /add task/i });
+    expect(addBtns.length).toBe(1);
+  });
 });

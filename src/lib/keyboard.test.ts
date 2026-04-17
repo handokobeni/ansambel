@@ -73,4 +73,24 @@ describe('ShortcutRegistry', () => {
     fire('2', { ctrlKey: true });
     expect(h2).toHaveBeenCalledTimes(1);
   });
+
+  it('throws on invalid combo (no plus separator)', () => {
+    expect(() => registry.register('ctrl', vi.fn())).toThrow(/invalid shortcut combo/i);
+  });
+
+  it('registers shortcut using cmd prefix (covers cmd modifier branch)', () => {
+    const handler = vi.fn();
+    registry.register('cmd+n', handler);
+    // cmd shortcut should fire on Meta key (cmd normalised to ctrl internally)
+    fire('n', { metaKey: true });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it('destroy removes listener and no handlers fire afterwards', () => {
+    const handler = vi.fn();
+    registry.register('ctrl+z', handler);
+    registry.destroy();
+    fire('z', { ctrlKey: true });
+    expect(handler).not.toHaveBeenCalled();
+  });
 });

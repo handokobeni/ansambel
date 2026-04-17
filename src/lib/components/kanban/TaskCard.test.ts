@@ -48,4 +48,32 @@ describe('TaskCard', () => {
     await fireEvent.click(screen.getByRole('button', { name: /remove/i }));
     expect(onRemove).toHaveBeenCalledWith('tk_abc123');
   });
+
+  it('does not truncate description when it is ≤80 chars', () => {
+    const short = makeTask({ description: 'Short description.' });
+    render(TaskCard, { props: { task: short, onRemove: vi.fn() } });
+    const descEl = screen.getByTestId('task-description');
+    expect(descEl.textContent).toBe('Short description.');
+    expect(descEl.textContent).not.toMatch(/\.\.\.$/);
+  });
+
+  it('does not render description element when description is empty', () => {
+    const noDesc = makeTask({ description: '' });
+    render(TaskCard, { props: { task: noDesc, onRemove: vi.fn() } });
+    expect(screen.queryByTestId('task-description')).toBeNull();
+  });
+
+  it('shows relative date in hours when task is 2 hours old', () => {
+    const twoHoursAgo = Math.floor(Date.now() / 1000) - 7200;
+    const task = makeTask({ created_at: twoHoursAgo });
+    render(TaskCard, { props: { task, onRemove: vi.fn() } });
+    expect(document.body.textContent).toMatch(/\d+h ago/);
+  });
+
+  it('shows relative date in days when task is more than 24 hours old', () => {
+    const twoDaysAgo = Math.floor(Date.now() / 1000) - 172800;
+    const task = makeTask({ created_at: twoDaysAgo });
+    render(TaskCard, { props: { task, onRemove: vi.fn() } });
+    expect(document.body.textContent).toMatch(/\d+d ago/);
+  });
 });
