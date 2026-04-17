@@ -1,0 +1,13 @@
+#!/usr/bin/env sh
+
+export PATH="$HOME/.bun/bin:$HOME/.cargo/bin:$PATH"
+
+# Rust clippy with -D warnings
+cd src-tauri
+cargo clippy --lib --all-targets -- -D warnings
+cargo test --lib
+cd ..
+
+# Frontend: full lint + type check
+bun run lint
+bun run check

@@ -1,0 +1,12 @@
+node_modules
+dist
+build
+coverage
+playwright-report
+test-results
+src-tauri/target
+src-tauri/gen
+bun.lock
+package-lock.json
+Cargo.lock
+*.min.js

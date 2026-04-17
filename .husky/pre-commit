@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+
+export PATH="$HOME/.bun/bin:$HOME/.cargo/bin:$PATH"
+
+# Frontend: lint-staged handles TS/Svelte/JSON/YAML/MD
+bun x lint-staged
+
+# Rust: fmt check across the whole crate (fast; only src-tauri/)
+cd src-tauri
+cargo fmt --all -- --check
+cd ..

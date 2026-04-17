@@ -5,10 +5,27 @@ describe('themes', () => {
   it('exports a warm-dark theme with required tokens', () => {
     const t = tokensForTheme('warm-dark');
     const required = [
-      'bg-base', 'bg-sidebar', 'bg-titlebar', 'bg-card', 'bg-hover', 'bg-active',
-      'border', 'border-light', 'text-muted', 'text-dim', 'text-secondary',
-      'text-primary', 'text-bright', 'accent', 'status-ok', 'diff-add',
-      'diff-add-bg', 'diff-del', 'diff-del-bg', 'error', 'error-bg',
+      'bg-base',
+      'bg-sidebar',
+      'bg-titlebar',
+      'bg-card',
+      'bg-hover',
+      'bg-active',
+      'border',
+      'border-light',
+      'text-muted',
+      'text-dim',
+      'text-secondary',
+      'text-primary',
+      'text-bright',
+      'accent',
+      'status-ok',
+      'diff-add',
+      'diff-add-bg',
+      'diff-del',
+      'diff-del-bg',
+      'error',
+      'error-bg',
     ] as const;
     for (const token of required) expect(t).toHaveProperty(token);
   });

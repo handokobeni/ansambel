@@ -22,8 +22,8 @@ export default defineConfig({
         'src/lib/types.ts',
         'src/**/*.{test,spec}.ts',
         'src/**/*.d.ts',
-        'src/**/__mocks__/**'
-      ]
-    }
-  }
+        'src/**/__mocks__/**',
+      ],
+    },
+  },
 });
