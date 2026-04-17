@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -32,10 +31,38 @@ impl Default for KanbanColumn {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct AppSettings {
+    pub schema_version: u32,
+    pub theme: String,
+    pub selected_repo_id: Option<String>,
+    pub selected_workspace_id: Option<String>,
+    pub recent_repos: Vec<String>,
+    pub window_width: u32,
+    pub window_height: u32,
+    pub onboarding_completed: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            theme: "warm-dark".into(),
+            selected_repo_id: None,
+            selected_workspace_id: None,
+            recent_repos: Vec::new(),
+            window_width: 1400,
+            window_height: 900,
+            onboarding_completed: false,
+        }
+    }
+}
+
 #[derive(Default, Debug)]
 pub struct AppState {
-    pub repos: HashMap<String, RepoInfo>,
-    pub workspaces: HashMap<String, WorkspaceInfo>,
+    pub repos: std::collections::HashMap<String, RepoInfo>,
+    pub workspaces: std::collections::HashMap<String, WorkspaceInfo>,
+    pub settings: AppSettings,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -82,6 +109,33 @@ mod tests {
     #[test]
     fn app_version_matches_cargo_pkg_version() {
         assert_eq!(app_version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn app_settings_default_values() {
+        let s = AppSettings::default();
+        assert_eq!(s.schema_version, 1);
+        assert_eq!(s.theme, "warm-dark");
+        assert_eq!(s.selected_repo_id, None);
+        assert_eq!(s.selected_workspace_id, None);
+        assert!(s.recent_repos.is_empty());
+        assert_eq!(s.window_width, 1400);
+        assert_eq!(s.window_height, 900);
+        assert!(!s.onboarding_completed);
+    }
+
+    #[test]
+    fn app_settings_round_trips_json() {
+        let s = AppSettings::default();
+        let json = serde_json::to_string(&s).unwrap();
+        let back: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn app_state_has_settings_field() {
+        let state = AppState::default();
+        assert_eq!(state.settings.schema_version, 1);
     }
 
     #[test]
