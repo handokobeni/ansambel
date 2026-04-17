@@ -5,11 +5,7 @@ import type { Repo } from '$lib/types';
 
 export class ReposStore {
   readonly repos = new SvelteMap<string, Repo>();
-  #selectedRepoId = $state<string | null>(null);
-
-  get selectedRepoId(): string | null {
-    return this.#selectedRepoId;
-  }
+  selectedRepoId = $state<string | null>(null);
 
   async load(): Promise<void> {
     const list = await api.repo.list();
@@ -28,8 +24,8 @@ export class ReposStore {
   async remove(id: string): Promise<void> {
     await api.repo.remove(id);
     this.repos.delete(id);
-    if (this.#selectedRepoId === id) {
-      this.#selectedRepoId = null;
+    if (this.selectedRepoId === id) {
+      this.selectedRepoId = null;
     }
   }
 
@@ -42,12 +38,12 @@ export class ReposStore {
   }
 
   select(id: string | null): void {
-    this.#selectedRepoId = id;
+    this.selectedRepoId = id;
   }
 
   getSelected(): Repo | null {
-    if (this.#selectedRepoId === null) return null;
-    return this.repos.get(this.#selectedRepoId) ?? null;
+    if (this.selectedRepoId === null) return null;
+    return this.repos.get(this.selectedRepoId) ?? null;
   }
 }
 

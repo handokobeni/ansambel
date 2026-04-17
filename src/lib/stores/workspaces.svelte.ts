@@ -5,11 +5,7 @@ import type { Workspace, CreateWorkspaceArgs } from '$lib/types';
 
 export class WorkspacesStore {
   readonly byRepo = new SvelteMap<string, SvelteMap<string, Workspace>>();
-  #selectedWorkspaceId = $state<string | null>(null);
-
-  get selectedWorkspaceId(): string | null {
-    return this.#selectedWorkspaceId;
-  }
+  selectedWorkspaceId = $state<string | null>(null);
 
   private getOrCreateInner(repoId: string): SvelteMap<string, Workspace> {
     let inner = this.byRepo.get(repoId);
@@ -39,8 +35,8 @@ export class WorkspacesStore {
   async remove(id: string, repoId: string): Promise<void> {
     await api.workspace.remove(id);
     this.byRepo.get(repoId)?.delete(id);
-    if (this.#selectedWorkspaceId === id) {
-      this.#selectedWorkspaceId = null;
+    if (this.selectedWorkspaceId === id) {
+      this.selectedWorkspaceId = null;
     }
   }
 
@@ -51,13 +47,13 @@ export class WorkspacesStore {
   }
 
   select(id: string | null): void {
-    this.#selectedWorkspaceId = id;
+    this.selectedWorkspaceId = id;
   }
 
   getSelected(): Workspace | null {
-    if (this.#selectedWorkspaceId === null) return null;
+    if (this.selectedWorkspaceId === null) return null;
     for (const inner of this.byRepo.values()) {
-      const ws = inner.get(this.#selectedWorkspaceId);
+      const ws = inner.get(this.selectedWorkspaceId);
       if (ws) return ws;
     }
     return null;

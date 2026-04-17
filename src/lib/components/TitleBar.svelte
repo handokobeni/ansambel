@@ -2,6 +2,7 @@
 <script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
   import { repos } from '$lib/stores/repos.svelte';
+  import { workspaces } from '$lib/stores/workspaces.svelte';
 
   let adding = $state(false);
 
@@ -15,8 +16,10 @@
     try {
       const repo = await repos.add(selected);
       repos.select(repo.id);
+      await workspaces.loadForRepo(repo.id);
     } catch (err) {
       console.error('Failed to add repo:', err);
+      alert(`Failed to add repo: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       adding = false;
     }
