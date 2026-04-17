@@ -30,7 +30,7 @@ pub fn list_repos(
 ) -> std::result::Result<Vec<RepoInfo>, String> {
     let st = state.lock().map_err(|e| e.to_string())?;
     let mut repos: Vec<RepoInfo> = st.repos.values().cloned().collect();
-    repos.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    repos.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
     Ok(repos)
 }
 
@@ -296,7 +296,7 @@ mod tests {
 
         let st = state.lock().unwrap();
         let mut repos: Vec<crate::state::RepoInfo> = st.repos.values().cloned().collect();
-        repos.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        repos.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
         // Verify first is greatest updated_at
         if repos.len() > 1 {
             assert!(repos[0].updated_at >= repos[1].updated_at);
