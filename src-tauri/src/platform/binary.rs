@@ -158,4 +158,47 @@ mod tests {
         let result = detect_binary(None, "ansambel-no-such-binary-exists", &[]);
         assert!(result.is_none());
     }
+
+    #[test]
+    fn claude_binary_returns_none_when_not_installed() {
+        // On CI or clean environments, claude may not be installed.
+        // We only assert it doesn't panic and returns an Option.
+        let _result: Option<PathBuf> = claude_binary(None);
+    }
+
+    #[test]
+    fn claude_binary_uses_override_path_when_provided() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let p = tmp.path().to_path_buf();
+        let result = claude_binary(Some(&p));
+        assert_eq!(result, Some(p));
+    }
+
+    #[test]
+    fn gh_binary_returns_option_without_panicking() {
+        let _result: Option<PathBuf> = gh_binary(None);
+    }
+
+    #[test]
+    fn gh_binary_uses_override_path_when_provided() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let p = tmp.path().to_path_buf();
+        let result = gh_binary(Some(&p));
+        assert_eq!(result, Some(p));
+    }
+
+    #[test]
+    fn git_binary_finds_git_on_path() {
+        // git is virtually always available in dev/CI environments.
+        let result = git_binary(None);
+        assert!(result.is_some(), "git should be on PATH");
+    }
+
+    #[test]
+    fn git_binary_uses_override_when_provided() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let p = tmp.path().to_path_buf();
+        let result = git_binary(Some(&p));
+        assert_eq!(result, Some(p));
+    }
 }

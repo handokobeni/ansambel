@@ -120,4 +120,77 @@ mod tests {
         assert!(tmp.path().join("logs").is_dir());
         assert!(tmp.path().join("logs/crashes").is_dir());
     }
+
+    #[test]
+    fn todos_file_path_uses_workspace_id() {
+        let data = PathBuf::from("/tmp/ansambel");
+        let p = todos_file(&data, "ws_abc123");
+        assert_eq!(p, PathBuf::from("/tmp/ansambel/todos/ws_abc123.json"));
+    }
+
+    #[test]
+    fn autopilot_log_file_path_uses_workspace_id() {
+        let data = PathBuf::from("/tmp/ansambel");
+        let p = autopilot_log_file(&data, "ws_abc123");
+        assert_eq!(
+            p,
+            PathBuf::from("/tmp/ansambel/autopilot_log/ws_abc123.json")
+        );
+    }
+
+    #[test]
+    fn images_dir_is_under_images() {
+        let data = PathBuf::from("/tmp/ansambel");
+        let p = images_dir(&data, "ws_abc123");
+        assert_eq!(p, PathBuf::from("/tmp/ansambel/images/ws_abc123"));
+    }
+
+    #[test]
+    fn workspaces_file_is_at_data_dir_root() {
+        let data = PathBuf::from("/tmp/ansambel");
+        let p = workspaces_file(&data);
+        assert_eq!(p, PathBuf::from("/tmp/ansambel/workspaces.json"));
+    }
+
+    #[test]
+    fn sessions_file_is_at_data_dir_root() {
+        let data = PathBuf::from("/tmp/ansambel");
+        let p = sessions_file(&data);
+        assert_eq!(p, PathBuf::from("/tmp/ansambel/sessions.json"));
+    }
+
+    #[test]
+    fn app_settings_file_is_at_data_dir_root() {
+        let data = PathBuf::from("/tmp/ansambel");
+        let p = app_settings_file(&data);
+        assert_eq!(p, PathBuf::from("/tmp/ansambel/app_settings.json"));
+    }
+
+    #[test]
+    fn context_meta_file_is_at_data_dir_root() {
+        let data = PathBuf::from("/tmp/ansambel");
+        let p = context_meta_file(&data);
+        assert_eq!(p, PathBuf::from("/tmp/ansambel/context_meta.json"));
+    }
+
+    #[test]
+    fn lock_file_is_at_data_dir_root() {
+        let data = PathBuf::from("/tmp/ansambel");
+        let p = lock_file(&data);
+        assert_eq!(p, PathBuf::from("/tmp/ansambel/.ansambel.lock"));
+    }
+
+    #[test]
+    fn logs_dir_is_under_data_dir() {
+        let data = PathBuf::from("/tmp/ansambel");
+        let p = logs_dir(&data);
+        assert_eq!(p, PathBuf::from("/tmp/ansambel/logs"));
+    }
+
+    #[test]
+    fn crash_dir_is_under_logs() {
+        let data = PathBuf::from("/tmp/ansambel");
+        let p = crash_dir(&data);
+        assert_eq!(p, PathBuf::from("/tmp/ansambel/logs/crashes"));
+    }
 }

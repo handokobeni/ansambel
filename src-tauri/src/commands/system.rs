@@ -16,4 +16,11 @@ mod tests {
         let v = get_app_version_impl();
         assert_eq!(v, env!("CARGO_PKG_VERSION"));
     }
+
+    #[tokio::test]
+    async fn get_app_version_async_command_returns_ok() {
+        let result = get_app_version().await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), env!("CARGO_PKG_VERSION"));
+    }
 }

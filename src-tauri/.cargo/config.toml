@@ -1,0 +1,6 @@
+[alias]
+# Run coverage for library code, excluding bootstrap files that have no testable logic.
+# lib.rs and main.rs are thin Tauri entry-points; their behaviour is exercised by integration
+# tests at a higher level. Excluding them keeps the 95% gate focused on modules with real
+# behaviour.
+cov = "llvm-cov --lib --ignore-filename-regex ^src/main\\.rs$|^src/lib\\.rs$ --fail-under-lines 95 --fail-under-functions 95"
