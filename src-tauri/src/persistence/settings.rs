@@ -19,9 +19,11 @@ mod tests {
     #[test]
     fn save_and_load_settings_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut s = crate::state::AppSettings::default();
-        s.theme = "cool-light".into();
-        s.onboarding_completed = true;
+        let s = crate::state::AppSettings {
+            theme: "cool-light".into(),
+            onboarding_completed: true,
+            ..Default::default()
+        };
         save_settings(tmp.path(), &s).unwrap();
 
         let loaded = load_settings(tmp.path()).unwrap();
@@ -40,9 +42,11 @@ mod tests {
     #[test]
     fn save_settings_serializes_all_fields() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut s = crate::state::AppSettings::default();
-        s.selected_repo_id = Some("repo_abc".into());
-        s.recent_repos = vec!["repo_abc".into()];
+        let s = crate::state::AppSettings {
+            selected_repo_id: Some("repo_abc".into()),
+            recent_repos: vec!["repo_abc".into()],
+            ..Default::default()
+        };
         save_settings(tmp.path(), &s).unwrap();
 
         let content =
