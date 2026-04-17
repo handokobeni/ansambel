@@ -8,7 +8,7 @@
  */
 
 import type { Page } from '@playwright/test';
-import type { Repo, Workspace } from '../../../src/lib/types';
+import type { Repo, Workspace, Task } from '../../../src/lib/types';
 
 export interface ShimConfig {
   /** Override fixture path returned by plugin:dialog|open */
@@ -17,6 +17,8 @@ export interface ShimConfig {
   initialRepos?: Repo[];
   /** Initial workspaces returned by list_workspaces */
   initialWorkspaces?: Workspace[];
+  /** Initial tasks returned by list_tasks */
+  initialTasks?: Task[];
 }
 
 /**
@@ -29,10 +31,12 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
       dialogOpenPath,
       initialRepos,
       initialWorkspaces,
+      initialTasks,
     }: {
       dialogOpenPath?: string;
       initialRepos?: unknown[];
       initialWorkspaces?: unknown[];
+      initialTasks?: unknown[];
     }) => {
       // In-memory state shared across invoke calls
       const state = {
@@ -58,8 +62,20 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
           created_at: number;
           updated_at: number;
         }>,
+        tasks: (initialTasks ?? []) as Array<{
+          id: string;
+          repo_id: string;
+          workspace_id: string | null;
+          title: string;
+          description: string;
+          column: string;
+          order: number;
+          created_at: number;
+          updated_at: number;
+        }>,
         nextRepoSeq: 1,
         nextWsSeq: 1,
+        nextTaskSeq: 1,
       };
 
       function makeRepoId() {
@@ -67,6 +83,9 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
       }
       function makeWsId() {
         return `ws_e2e${String(state.nextWsSeq++).padStart(4, '0')}`;
+      }
+      function makeTaskId() {
+        return `tk_e2e${String(state.nextTaskSeq++).padStart(4, '0')}`;
       }
 
       const now = () => Math.floor(Date.now() / 1000);
@@ -150,6 +169,79 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
             return undefined;
           }
 
+          case 'list_tasks': {
+            const repoId = args.repoId as string | undefined;
+            if (repoId) return state.tasks.filter((t) => t.repo_id === repoId);
+            return [...state.tasks];
+          }
+
+          case 'add_task': {
+            const id = makeTaskId();
+            const task = {
+              id,
+              repo_id: args.repoId as string,
+              workspace_id: null,
+              title: args.title as string,
+              description: (args.description as string | undefined) ?? '',
+              column: (args.column as string | undefined) ?? 'todo',
+              order: state.tasks.filter((t) => t.repo_id === (args.repoId as string)).length,
+              created_at: now(),
+              updated_at: now(),
+            };
+            state.tasks.push(task);
+            return task;
+          }
+
+          case 'update_task': {
+            const taskId = args.taskId as string;
+            const patch = (args.patch ?? {}) as Record<string, unknown>;
+            const task = state.tasks.find((t) => t.id === taskId);
+            if (task) Object.assign(task, patch, { updated_at: now() });
+            return undefined;
+          }
+
+          case 'move_task': {
+            const taskId = args.taskId as string;
+            const column = args.column as string;
+            const order = args.order as number;
+            const task = state.tasks.find((t) => t.id === taskId);
+            if (task) {
+              task.column = column;
+              task.order = order;
+              task.updated_at = now();
+              // Auto-create workspace when moved to in_progress (mirrors backend side effect)
+              if (column === 'in_progress' && !task.workspace_id) {
+                const wsId = makeWsId();
+                const branchName = `ws/${wsId}`;
+                const repo = state.repos.find((r) => r.id === task.repo_id);
+                const baseBranch = repo?.default_branch ?? 'main';
+                const ws = {
+                  id: wsId,
+                  repo_id: task.repo_id,
+                  branch: branchName,
+                  base_branch: baseBranch,
+                  custom_branch: false,
+                  title: task.title,
+                  description: task.description,
+                  status: 'not_started',
+                  column: 'in_progress',
+                  created_at: now(),
+                  updated_at: now(),
+                };
+                state.workspaces.push(ws);
+                task.workspace_id = wsId;
+              }
+            }
+            return undefined;
+          }
+
+          case 'remove_task': {
+            const taskId = args.taskId as string;
+            const idx = state.tasks.findIndex((t) => t.id === taskId);
+            if (idx !== -1) state.tasks.splice(idx, 1);
+            return undefined;
+          }
+
           case 'plugin:dialog|open':
             return dialogOpenPath ?? null;
 
@@ -178,6 +270,7 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
       dialogOpenPath: config.dialogOpenPath,
       initialRepos: config.initialRepos,
       initialWorkspaces: config.initialWorkspaces,
+      initialTasks: config.initialTasks,
     }
   );
 }
