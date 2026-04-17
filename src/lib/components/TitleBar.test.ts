@@ -110,3 +110,30 @@ describe('TitleBar', () => {
     expect(repos.select).not.toHaveBeenCalled();
   });
 });
+
+describe('TitleBar mode toggle', () => {
+  it('renders Plan and Work buttons', () => {
+    render(TitleBar, {
+      props: { mode: 'plan', onModeChange: vi.fn() },
+    });
+    expect(screen.getByRole('button', { name: /^plan$/i })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^work$/i })).toBeTruthy();
+  });
+
+  it('Plan button has active class when mode is plan', () => {
+    render(TitleBar, {
+      props: { mode: 'plan', onModeChange: vi.fn() },
+    });
+    const planBtn = screen.getByRole('button', { name: /^plan$/i });
+    expect(planBtn.classList.contains('active')).toBe(true);
+  });
+
+  it('clicking Work button calls onModeChange with work', async () => {
+    const onModeChange = vi.fn();
+    render(TitleBar, {
+      props: { mode: 'plan', onModeChange },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /^work$/i }));
+    expect(onModeChange).toHaveBeenCalledWith('work');
+  });
+});

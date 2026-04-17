@@ -3,6 +3,15 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { repos } from '$lib/stores/repos.svelte';
   import { workspaces } from '$lib/stores/workspaces.svelte';
+  import type { Mode } from '$lib/types';
+
+  const {
+    mode = undefined,
+    onModeChange = undefined,
+  }: {
+    mode?: Mode;
+    onModeChange?: (next: Mode) => void;
+  } = $props();
 
   let adding = $state(false);
 
@@ -27,7 +36,7 @@
 </script>
 
 <header
-  class="flex items-center justify-between h-10 px-3 bg-[var(--bg-titlebar)] border-b border-[var(--border)] flex-shrink-0 select-none"
+  class="titlebar flex items-center justify-between h-10 px-3 bg-[var(--bg-titlebar)] border-b border-[var(--border)] flex-shrink-0 select-none"
 >
   <div class="flex items-center gap-2">
     <span
@@ -40,6 +49,37 @@
       {/if}
     </span>
   </div>
+
+  {#if mode !== undefined && onModeChange !== undefined}
+    <div
+      class="flex overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-card)]"
+      role="group"
+      aria-label="View mode"
+    >
+      <button
+        class="mode-btn px-3.5 py-1 text-[0.8125rem] font-medium cursor-pointer border-none transition-colors"
+        class:active={mode === 'plan'}
+        style={mode === 'plan'
+          ? 'background: var(--accent, #6366f1); color: #fff;'
+          : 'background: none; color: var(--text-muted);'}
+        onclick={() => onModeChange('plan')}
+        aria-pressed={mode === 'plan'}
+      >
+        Plan
+      </button>
+      <button
+        class="mode-btn px-3.5 py-1 text-[0.8125rem] font-medium cursor-pointer border-none transition-colors"
+        class:active={mode === 'work'}
+        style={mode === 'work'
+          ? 'background: var(--accent, #6366f1); color: #fff;'
+          : 'background: none; color: var(--text-muted);'}
+        onclick={() => onModeChange('work')}
+        aria-pressed={mode === 'work'}
+      >
+        Work
+      </button>
+    </div>
+  {/if}
 
   <div class="flex items-center gap-2">
     <button

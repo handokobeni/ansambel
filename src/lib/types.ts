@@ -45,3 +45,32 @@ export type CreateWorkspaceArgs = {
   description: string;
   branchName?: string;
 };
+
+// --- Task types (Phase 1b) ---
+
+export type Task = {
+  id: string; // tk_xxxxxx
+  repo_id: string;
+  workspace_id: string | null;
+  title: string;
+  description: string;
+  column: KanbanColumn;
+  order: number;
+  created_at: number;
+  updated_at: number;
+};
+
+export type CreateTaskArgs = {
+  repoId: string;
+  title: string;
+  description: string;
+  column?: KanbanColumn;
+};
+
+export type TaskPatch = {
+  title?: string;
+  description?: string;
+  order?: number;
+};
+
+export type Mode = 'plan' | 'work';
