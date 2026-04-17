@@ -46,15 +46,44 @@
     return ts.filter((t) => t.column === col).sort((a, b) => a.order - b.order);
   }
 
+  function syncInPlace(arr: Task[], byId: Map<string, Task>): void {
+    // Update each existing array element in place when the task in `tasks`
+    // has newer display fields (workspace_id, title, description, updated_at).
+    // Preserves the array reference so svelte-dnd-action doesn't lose
+    // its internal drag state.
+    for (let i = 0; i < arr.length; i++) {
+      const incoming = byId.get(arr[i].id);
+      if (!incoming) continue;
+      const existing = arr[i];
+      if (
+        existing.workspace_id !== incoming.workspace_id ||
+        existing.title !== incoming.title ||
+        existing.description !== incoming.description ||
+        existing.updated_at !== incoming.updated_at
+      ) {
+        arr[i] = { ...incoming, column: existing.column, order: existing.order };
+      }
+    }
+  }
+
   $effect(() => {
     const nextIds = new Set(tasks.map((t) => t.id));
     const sameSet = nextIds.size === lastIds.size && [...nextIds].every((id) => lastIds.has(id));
-    if (sameSet) return;
-    lastIds = nextIds;
-    todoItems = filterSort('todo', tasks);
-    inProgressItems = filterSort('in_progress', tasks);
-    reviewItems = filterSort('review', tasks);
-    doneItems = filterSort('done', tasks);
+    if (!sameSet) {
+      lastIds = nextIds;
+      todoItems = filterSort('todo', tasks);
+      inProgressItems = filterSort('in_progress', tasks);
+      reviewItems = filterSort('review', tasks);
+      doneItems = filterSort('done', tasks);
+      return;
+    }
+    // Same ID set — propagate in-place field updates (e.g., workspace_id
+    // populated by backend after a move) without replacing array refs.
+    const byId = new Map(tasks.map((t) => [t.id, t]));
+    syncInPlace(todoItems, byId);
+    syncInPlace(inProgressItems, byId);
+    syncInPlace(reviewItems, byId);
+    syncInPlace(doneItems, byId);
   });
 
   function itemsFor(col: KanbanColumn): Task[] {
