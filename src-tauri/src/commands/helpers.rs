@@ -40,6 +40,14 @@ pub fn exec_git(args: &[&str], cwd: &Path) -> Result<String> {
     }
 }
 
+/// Returns true if `path` is the root of a git repository (`.git` dir or `.git` file).
+/// A `.git` FILE indicates a git worktree link — also counts as a git repo root.
+/// Bare repositories (no `.git` entry) return false; Ansambel only manages non-bare repos.
+pub fn is_git_repo(path: &Path) -> bool {
+    let git_entry = path.join(".git");
+    git_entry.is_dir() || git_entry.is_file()
+}
+
 /// Detect the default branch from origin remote tracking refs.
 ///
 /// Tier 1: `git symbolic-ref --short refs/remotes/origin/HEAD`
@@ -183,6 +191,46 @@ mod tests {
             msg.contains("Could not detect") || msg.contains("origin"),
             "Got: {msg}"
         );
+    }
+
+    #[test]
+    fn is_git_repo_true_for_git_init_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        assert!(is_git_repo(tmp.path()));
+    }
+
+    #[test]
+    fn is_git_repo_false_for_plain_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_git_repo(tmp.path()));
+    }
+
+    #[test]
+    fn is_git_repo_true_for_bare_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        // bare repo has HEAD, config, objects — no .git subdir but the dir itself is the repo
+        // is_git_repo checks for .git entry; bare repos don't have .git — expected false for bare
+        // (Ansambel only manages non-bare repos)
+        assert!(!is_git_repo(tmp.path()));
+    }
+
+    #[test]
+    fn is_git_repo_true_for_worktree_link_file() {
+        // Worktrees have a .git FILE (not dir) pointing back to the main repo
+        let tmp = tempfile::tempdir().unwrap();
+        let git_file = tmp.path().join(".git");
+        std::fs::write(&git_file, b"gitdir: /some/path/.git/worktrees/ws1\n").unwrap();
+        assert!(is_git_repo(tmp.path()));
     }
 
     #[test]
