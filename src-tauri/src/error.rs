@@ -29,6 +29,9 @@ pub enum AppError {
 
     #[error("Other: {0}")]
     Other(String),
+
+    #[error("parse {what} failed: {msg}")]
+    ParseFailed { what: String, msg: String },
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
