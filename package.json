@@ -22,7 +22,8 @@
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-dialog": "^2.7.0",
-    "@tauri-apps/plugin-opener": "^2.2.2"
+    "@tauri-apps/plugin-opener": "^2.2.2",
+    "svelte-dnd-action": "^0.9.69"
   },
   "devDependencies": {
     "@commitlint/cli": "^19",
