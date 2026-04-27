@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -31,6 +32,9 @@ pub struct AppSettings {
     pub window_width: u32,
     pub window_height: u32,
     pub onboarding_completed: bool,
+    /// User-configured path to the Claude CLI binary; overrides PATH lookup when set.
+    #[serde(default)]
+    pub claude_binary_override: Option<PathBuf>,
 }
 
 impl Default for AppSettings {
@@ -44,6 +48,7 @@ impl Default for AppSettings {
             window_width: 1400,
             window_height: 900,
             onboarding_completed: false,
+            claude_binary_override: None,
         }
     }
 }
@@ -103,6 +108,10 @@ pub struct WorkspaceInfo {
     pub column: KanbanColumn,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Absolute path to the git worktree checkout directory for this workspace.
+    /// Defaults to empty path for backward compatibility with existing persisted data.
+    #[serde(default)]
+    pub worktree_dir: PathBuf,
 }
 
 #[derive(Default, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -243,6 +252,7 @@ mod tests {
             column: KanbanColumn::InProgress,
             created_at: 1_776_000_000,
             updated_at: 1_776_099_500,
+            worktree_dir: PathBuf::from("/data/workspaces/ws_abc123"),
         };
         let json = serde_json::to_string(&ws).unwrap();
         let back: WorkspaceInfo = serde_json::from_str(&json).unwrap();

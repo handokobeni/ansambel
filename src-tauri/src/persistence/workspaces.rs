@@ -55,6 +55,7 @@ mod tests {
             column: KanbanColumn::Todo,
             created_at: 1_000_000,
             updated_at: 1_000_001,
+            worktree_dir: std::path::PathBuf::new(),
         }
     }
 

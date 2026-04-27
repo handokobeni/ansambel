@@ -35,6 +35,7 @@ pub enum AppError {
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
+pub type AppResult<T> = std::result::Result<T, AppError>;
 
 impl From<AppError> for String {
     fn from(e: AppError) -> Self {

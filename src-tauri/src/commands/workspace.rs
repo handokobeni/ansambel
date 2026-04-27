@@ -148,6 +148,7 @@ pub(crate) async fn create_workspace_inner(
         column: KanbanColumn::Todo,
         created_at: now,
         updated_at: now,
+        worktree_dir: worktree_path.clone(),
     };
 
     let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
