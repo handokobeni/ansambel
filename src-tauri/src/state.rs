@@ -61,11 +61,21 @@ pub struct Task {
     pub updated_at: i64,
 }
 
+/// Runtime-only handle to a spawned Claude agent process. Not persisted —
+/// dies on app restart, so workspace status resets Running → Waiting.
+#[derive(Debug)]
+pub struct AgentHandle {
+    pub workspace_id: String,
+    pub stdin_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    pub session_id: Option<String>,
+}
+
 #[derive(Default, Debug)]
 pub struct AppState {
     pub repos: std::collections::HashMap<String, RepoInfo>,
     pub workspaces: std::collections::HashMap<String, WorkspaceInfo>,
-    pub tasks: std::collections::HashMap<String, Task>, // NEW
+    pub tasks: std::collections::HashMap<String, Task>,
+    pub agents: std::collections::HashMap<String, AgentHandle>, // runtime-only
     pub settings: AppSettings,
 }
 
@@ -574,5 +584,35 @@ mod tests {
         let j = serde_json::to_string(&ev).unwrap();
         assert!(j.contains("\"type\":\"init\""));
         assert!(j.contains("\"session_id\":\"ses_xyz\""));
+    }
+
+    #[test]
+    fn app_state_has_agents_field() {
+        let state = AppState::default();
+        assert!(state.agents.is_empty());
+    }
+
+    #[test]
+    fn app_state_construction_with_agents_compiles() {
+        let _state = AppState {
+            repos: std::collections::HashMap::new(),
+            workspaces: std::collections::HashMap::new(),
+            tasks: std::collections::HashMap::new(),
+            agents: std::collections::HashMap::new(),
+            settings: AppSettings::default(),
+        };
+    }
+
+    #[test]
+    fn agent_handle_has_required_fields() {
+        use tokio::sync::mpsc;
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+        let h = AgentHandle {
+            workspace_id: "ws_xyz".into(),
+            stdin_tx: tx,
+            session_id: None,
+        };
+        assert_eq!(h.workspace_id, "ws_xyz");
+        assert!(h.session_id.is_none());
     }
 }

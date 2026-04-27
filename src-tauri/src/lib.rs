@@ -32,6 +32,7 @@ pub fn run() {
                 repos,
                 workspaces,
                 tasks,
+                agents: std::collections::HashMap::new(),
                 settings,
             };
 
@@ -68,6 +69,7 @@ mod tests {
             repos: HashMap::new(),
             workspaces: HashMap::new(),
             tasks: HashMap::new(),
+            agents: HashMap::new(),
             settings: AppSettings::default(),
         };
         assert!(state.tasks.is_empty());
