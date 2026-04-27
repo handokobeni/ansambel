@@ -100,6 +100,13 @@ pub fn spawn_agent_inner(
 
     {
         let mut s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        // Double-check after spawn to close the race window.
+        if s.agents.contains_key(workspace_id) {
+            return Err(AppError::Command {
+                cmd: "spawn_agent".into(),
+                msg: format!("agent already running for {workspace_id}"),
+            });
+        }
         if let Some(ws) = s.workspaces.get_mut(workspace_id) {
             ws.status = WorkspaceStatus::Running;
         }
