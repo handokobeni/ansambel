@@ -49,12 +49,20 @@ impl PtySession {
         self.pid
     }
 
-    pub fn reader(&self) -> Box<dyn Read + Send> {
-        self.master.try_clone_reader().expect("clone reader")
+    pub fn reader(&self) -> Result<Box<dyn Read + Send>> {
+        self.master
+            .try_clone_reader()
+            .map_err(|e| AppError::Command {
+                cmd: "pty.reader".into(),
+                msg: e.to_string(),
+            })
     }
 
-    pub fn writer(&self) -> Box<dyn Write + Send> {
-        self.master.take_writer().expect("take writer")
+    pub fn writer(&self) -> Result<Box<dyn Write + Send>> {
+        self.master.take_writer().map_err(|e| AppError::Command {
+            cmd: "pty.writer".into(),
+            msg: e.to_string(),
+        })
     }
 
     pub fn kill(&mut self) -> Result<()> {
@@ -117,7 +125,7 @@ mod tests {
     #[test]
     fn spawn_pty_reads_stdout() {
         let session = spawn(echo_command()).expect("spawn echo");
-        let reader = session.reader();
+        let reader = session.reader().expect("clone reader");
         let mut buf = String::new();
         let mut br = BufReader::new(reader);
         br.read_line(&mut buf).expect("read line");
@@ -137,10 +145,10 @@ mod tests {
         };
         cmd.cwd(std::env::temp_dir());
         let session = spawn(cmd).expect("spawn read");
-        let mut writer = session.writer();
+        let mut writer = session.writer().expect("take writer");
         writeln!(writer, "world").expect("write line");
         drop(writer);
-        let reader = session.reader();
+        let reader = session.reader().expect("clone reader");
         let mut br = BufReader::new(reader);
         let mut out = String::new();
         for _ in 0..10 {
