@@ -79,7 +79,9 @@ scoped:
 │   ├── context.md
 │   ├── contradictions.md
 │   ├── index.md
-│   └── hot.md
+│   ├── hot.md
+│   └── skills/
+│       └── <timestamp>-<slug>.md      # auto-captured after PR merge
 ├── messages/<workspace-id>.json
 ├── todos/<workspace-id>.json
 ├── autopilot_log/<workspace-id>.json
@@ -155,6 +157,8 @@ overhead).
 - Workspace sidebar + status dot (running / waiting)
 - Simple kanban (Todo / In Progress / Review / Done) with drag-drop
 - Chat panel spawning `claude -p --output-format stream-json --verbose`
+- Context injection on spawn: if `contexts/<repo-id>/context.md` or `hot.md`
+  exist, prepend as system prompt prefix (plain text, no UI yet)
 - NDJSON parser in Rust → Tauri Channel → Svelte render
 - `SvelteMap<wsId, SvelteMap<msgId, Message>>` (reactive performance)
 - Message input with basic send (no @-mentions yet)
@@ -207,8 +211,17 @@ markdown outputs (invariants, facts, context, contradictions) + index + hot.md �
 UI 4-tab CRUD · File affinity extraction and injection · Invariant pre-check
 agent · Contradiction resolution workflow · Incremental update on PR merge.
 
+**Skills (Hermes-inspired).** After a workspace PR is merged, a lightweight LLM
+call (Haiku) auto-captures the approach into
+`contexts/<repo-id>/skills/<ts>-<slug>.md` (problem summary · solution approach
+· files touched · gotchas). On agent spawn, the top-k skills by file-affinity
+overlap are appended to the system prompt prefix alongside `context.md` /
+`hot.md`. Skills are surfaced read-only in a 5th KB tab; user can pin, edit, or
+delete them.
+
 **Risks.** Prompt engineering is heavy — requires testing across repo sizes and
-styles.
+styles. Skills injection adds tokens to every spawn — gate behind a per-repo
+toggle, default on.
 
 ### Phase 6 — LSP + MCP (4 wk)
 
