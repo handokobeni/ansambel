@@ -95,6 +95,42 @@ pub struct WorkspaceInfo {
     pub updated_at: i64,
 }
 
+#[derive(Default, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MessageRole {
+    #[default]
+    User,
+    Assistant,
+    System,
+    Tool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ToolUse {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ToolResult {
+    pub tool_use_id: String,
+    pub content: String,
+    pub is_error: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Message {
+    pub id: String,
+    pub workspace_id: String,
+    pub role: MessageRole,
+    pub text: String,
+    pub is_partial: bool,
+    pub tool_use: Option<ToolUse>,
+    pub tool_result: Option<ToolResult>,
+    pub created_at: i64,
+}
+
 pub fn app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -315,5 +351,130 @@ mod tests {
         };
         let json = serde_json::to_string(&t).unwrap();
         assert!(json.contains("\"column\":\"review\""));
+    }
+
+    #[test]
+    fn message_role_round_trips_json() {
+        for (role, want) in [
+            (MessageRole::User, "\"user\""),
+            (MessageRole::Assistant, "\"assistant\""),
+            (MessageRole::System, "\"system\""),
+            (MessageRole::Tool, "\"tool\""),
+        ] {
+            let s = serde_json::to_string(&role).unwrap();
+            assert_eq!(s, want, "role {role:?}");
+        }
+    }
+
+    #[test]
+    fn message_role_default_is_user() {
+        assert_eq!(MessageRole::default(), MessageRole::User);
+    }
+
+    #[test]
+    fn message_round_trips_json() {
+        let m = Message {
+            id: "msg_abc123".into(),
+            workspace_id: "ws_xyz".into(),
+            role: MessageRole::Assistant,
+            text: "Hello world".into(),
+            is_partial: false,
+            tool_use: None,
+            tool_result: None,
+            created_at: 1_776_000_000,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn message_partial_flag_serializes() {
+        let m = Message {
+            id: "msg_p1".into(),
+            workspace_id: "ws_a".into(),
+            role: MessageRole::Assistant,
+            text: "streaming...".into(),
+            is_partial: true,
+            tool_use: None,
+            tool_result: None,
+            created_at: 0,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"is_partial\":true"));
+    }
+
+    #[test]
+    fn message_tool_use_optional() {
+        let plain = Message {
+            id: "msg_x".into(),
+            workspace_id: "ws_a".into(),
+            role: MessageRole::Assistant,
+            text: "no tools".into(),
+            is_partial: false,
+            tool_use: None,
+            tool_result: None,
+            created_at: 0,
+        };
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(json.contains("\"tool_use\":null"));
+    }
+
+    #[test]
+    fn message_tool_use_round_trip() {
+        let m = Message {
+            id: "msg_t".into(),
+            workspace_id: "ws_a".into(),
+            role: MessageRole::Assistant,
+            text: String::new(),
+            is_partial: false,
+            tool_use: Some(ToolUse {
+                id: "toolu_01".into(),
+                name: "Read".into(),
+                input: serde_json::json!({"path": "/etc/hosts"}),
+            }),
+            tool_result: None,
+            created_at: 0,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn message_tool_result_round_trip() {
+        let m = Message {
+            id: "msg_r".into(),
+            workspace_id: "ws_a".into(),
+            role: MessageRole::Tool,
+            text: String::new(),
+            is_partial: false,
+            tool_use: None,
+            tool_result: Some(ToolResult {
+                tool_use_id: "toolu_01".into(),
+                content: "127.0.0.1 localhost".into(),
+                is_error: false,
+            }),
+            created_at: 0,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn message_role_lowercase_in_json() {
+        let m = Message {
+            id: "msg_r".into(),
+            workspace_id: "ws_a".into(),
+            role: MessageRole::User,
+            text: "hi".into(),
+            is_partial: false,
+            tool_use: None,
+            tool_result: None,
+            created_at: 0,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"role\":\"user\""));
     }
 }
