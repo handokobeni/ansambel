@@ -232,7 +232,7 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
                 task.workspace_id = wsId;
               }
             }
-            return undefined;
+            return task ?? undefined;
           }
 
           case 'remove_task': {
