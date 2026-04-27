@@ -55,7 +55,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let m1 = make_msg("msg_a", "ws_x");
         let m2 = make_msg("msg_b", "ws_x");
-        save_messages(tmp.path(), "ws_x", &vec![m1.clone(), m2.clone()]).unwrap();
+        save_messages(tmp.path(), "ws_x", &[m1.clone(), m2.clone()]).unwrap();
         let loaded = load_messages(tmp.path(), "ws_x").unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0], m1);
@@ -65,7 +65,7 @@ mod tests {
     #[test]
     fn save_messages_writes_schema_version() {
         let tmp = TempDir::new().unwrap();
-        save_messages(tmp.path(), "ws_x", &vec![make_msg("msg_a", "ws_x")]).unwrap();
+        save_messages(tmp.path(), "ws_x", &[make_msg("msg_a", "ws_x")]).unwrap();
         let path = crate::platform::paths::messages_file(tmp.path(), "ws_x");
         let raw = std::fs::read_to_string(&path).unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -75,15 +75,15 @@ mod tests {
     #[test]
     fn save_messages_creates_parent_dir() {
         let tmp = TempDir::new().unwrap();
-        save_messages(tmp.path(), "ws_y", &vec![make_msg("msg_a", "ws_y")]).unwrap();
+        save_messages(tmp.path(), "ws_y", &[make_msg("msg_a", "ws_y")]).unwrap();
         assert!(tmp.path().join("messages").is_dir());
     }
 
     #[test]
     fn load_messages_handles_per_workspace_isolation() {
         let tmp = TempDir::new().unwrap();
-        save_messages(tmp.path(), "ws_a", &vec![make_msg("msg_x", "ws_a")]).unwrap();
-        save_messages(tmp.path(), "ws_b", &vec![make_msg("msg_y", "ws_b")]).unwrap();
+        save_messages(tmp.path(), "ws_a", &[make_msg("msg_x", "ws_a")]).unwrap();
+        save_messages(tmp.path(), "ws_b", &[make_msg("msg_y", "ws_b")]).unwrap();
         let a = load_messages(tmp.path(), "ws_a").unwrap();
         let b = load_messages(tmp.path(), "ws_b").unwrap();
         assert_eq!(a.len(), 1);
@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn append_message_persists_in_order() {
         let tmp = TempDir::new().unwrap();
-        save_messages(tmp.path(), "ws_z", &vec![make_msg("msg_1", "ws_z")]).unwrap();
+        save_messages(tmp.path(), "ws_z", &[make_msg("msg_1", "ws_z")]).unwrap();
         let mut current = load_messages(tmp.path(), "ws_z").unwrap();
         current.push(make_msg("msg_2", "ws_z"));
         save_messages(tmp.path(), "ws_z", &current).unwrap();
