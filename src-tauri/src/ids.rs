@@ -53,6 +53,33 @@ mod tests {
     }
 
     #[test]
+    fn message_id_has_prefix_and_length() {
+        let id = message_id();
+        assert!(id.starts_with("msg_"), "expected msg_ prefix, got {id}");
+        assert_eq!(id.len(), "msg_".len() + 6);
+    }
+
+    #[test]
+    fn message_id_uses_only_allowed_alphabet() {
+        let id = message_id();
+        let body = id.strip_prefix("msg_").unwrap();
+        for c in body.chars() {
+            assert!(
+                c.is_ascii_alphanumeric() && c.is_ascii_lowercase() || c.is_ascii_digit(),
+                "Unexpected char {:?} in id {}",
+                c,
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn message_id_no_collisions() {
+        let set: HashSet<String> = (0..1_000).map(|_| message_id()).collect();
+        assert_eq!(set.len(), 1_000);
+    }
+
+    #[test]
     fn todo_id_has_prefix() {
         assert!(todo_id().starts_with("td_"));
     }
