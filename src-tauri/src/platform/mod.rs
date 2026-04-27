@@ -1,5 +1,6 @@
 pub mod binary;
 pub mod paths;
+pub mod pty;
 
 #[cfg(test)]
 mod dep_tests {
