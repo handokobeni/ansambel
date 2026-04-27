@@ -1,0 +1,92 @@
+name: Journal
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  write-journal:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 10
+
+      - name: Generate journal entry
+        shell: python3 {0}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_ADDITIONS: ${{ github.event.pull_request.additions }}
+          PR_DELETIONS: ${{ github.event.pull_request.deletions }}
+          PR_CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          PR_MERGED_AT: ${{ github.event.pull_request.merged_at }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          import os, subprocess, pathlib
+
+          date = os.environ['PR_MERGED_AT'][:10]
+          journal_dir = pathlib.Path('journal')
+          journal_dir.mkdir(exist_ok=True)
+          journal_path = journal_dir / f'{date}.md'
+
+          try:
+            result = subprocess.run(
+              ['git', 'log', 'HEAD~1..HEAD', '--pretty=format:- %s'],
+              capture_output=True, text=True, check=False
+            )
+            commits = result.stdout.strip() or '- (no commits listed)'
+          except Exception:
+            commits = '- (unavailable)'
+
+          pr_body = os.environ.get('PR_BODY', '').strip()
+          summary = pr_body if pr_body else '(no description)'
+
+          entry_lines = [
+            f"## PR #{os.environ['PR_NUMBER']}: {os.environ['PR_TITLE']}",
+            '',
+            f"**Branch:** `{os.environ['PR_BRANCH']}`  ",
+            f"**Author:** {os.environ['PR_AUTHOR']}  ",
+            f"**Changes:** +{os.environ['PR_ADDITIONS']} -{os.environ['PR_DELETIONS']} across {os.environ['PR_CHANGED_FILES']} files  ",
+            f"**Link:** {os.environ['PR_URL']}",
+            '',
+            '### Commits',
+            commits,
+            '',
+            '### Summary',
+            summary,
+            '',
+            '---',
+          ]
+          entry = '\n'.join(entry_lines)
+
+          if journal_path.exists():
+            with open(journal_path, 'a') as f:
+              f.write('\n\n' + entry + '\n')
+          else:
+            with open(journal_path, 'w') as f:
+              f.write(f'# Journal — {date}\n\n' + entry + '\n')
+
+          print(f'Journal written: {journal_path}')
+
+      - name: Commit journal entry
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_MERGED_AT: ${{ github.event.pull_request.merged_at }}
+        run: |
+          DATE="${PR_MERGED_AT:0:10}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "journal/${DATE}.md"
+          git diff --staged --quiet && echo "No changes to commit" && exit 0
+          git commit -m "docs(journal): ${DATE} — PR #${PR_NUMBER}"
+          git push
