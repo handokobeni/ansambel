@@ -1,4 +1,5 @@
 use crate::commands::agent_stream::parse_line;
+use crate::commands::helpers::now_unix;
 use crate::error::AppResult;
 use crate::platform::pty::{spawn as pty_spawn, PtySession};
 use crate::state::{AgentEvent, AgentHandle, AgentStatus, AppState, WorkspaceStatus};
@@ -200,6 +201,72 @@ fn spawn_reader_thread(
     });
 }
 
+#[tauri::command]
+pub async fn send_message(
+    workspace_id: String,
+    text: String,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("resolve app data dir: {e}"))?;
+    send_message_inner_with_persist(state.inner().clone(), &data_dir, &workspace_id, &text)
+        .map_err(|e| e.to_string())
+}
+
+pub fn send_message_inner(
+    state: Arc<Mutex<AppState>>,
+    workspace_id: &str,
+    text: &str,
+) -> AppResult<()> {
+    use crate::error::AppError;
+    let s = state.lock().unwrap();
+    let handle = s
+        .agents
+        .get(workspace_id)
+        .ok_or_else(|| AppError::Command {
+            cmd: "send_message".into(),
+            msg: format!("no agent for workspace {workspace_id}"),
+        })?;
+    handle
+        .stdin_tx
+        .send(text.to_string())
+        .map_err(|e| AppError::Command {
+            cmd: "send_message".into(),
+            msg: format!("stdin closed: {e}"),
+        })?;
+    Ok(())
+}
+
+pub fn send_message_inner_with_persist(
+    state: Arc<Mutex<AppState>>,
+    data_dir: &Path,
+    workspace_id: &str,
+    text: &str,
+) -> AppResult<()> {
+    use crate::ids::message_id;
+    use crate::persistence::messages::{load_messages, save_messages};
+    use crate::state::{Message, MessageRole};
+
+    send_message_inner(state, workspace_id, text)?;
+
+    let mut current = load_messages(data_dir, workspace_id).unwrap_or_default();
+    current.push(Message {
+        id: message_id(),
+        workspace_id: workspace_id.into(),
+        role: MessageRole::User,
+        text: text.into(),
+        is_partial: false,
+        tool_use: None,
+        tool_result: None,
+        created_at: now_unix(),
+    });
+    save_messages(data_dir, workspace_id, &current)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,5 +421,89 @@ mod tests {
         let tmp = make_data_dir();
         let prefix = build_system_prompt_prefix(tmp.path(), "repo_y");
         assert!(prefix.is_empty());
+    }
+
+    #[test]
+    fn send_message_inner_sends_to_stdin_channel() {
+        use tokio::sync::mpsc;
+        let state = make_state();
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_send_a".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_send_a".into(),
+                stdin_tx: tx,
+                session_id: None,
+            },
+        );
+        send_message_inner(state, "ws_send_a", "Hello!").unwrap();
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received, "Hello!");
+    }
+
+    #[test]
+    fn send_message_inner_no_agent_returns_err() {
+        let state = make_state();
+        let result = send_message_inner(state, "ws_none", "hi");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no agent"));
+    }
+
+    #[test]
+    fn send_message_inner_appends_message_to_disk() {
+        use crate::persistence::messages::load_messages;
+        let tmp = make_data_dir();
+        let state = make_state();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_send_b".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_send_b".into(),
+                stdin_tx: tx,
+                session_id: None,
+            },
+        );
+        send_message_inner_with_persist(state, tmp.path(), "ws_send_b", "Persist me").unwrap();
+        let on_disk = load_messages(tmp.path(), "ws_send_b").unwrap();
+        assert_eq!(on_disk.len(), 1);
+        assert_eq!(on_disk[0].text, "Persist me");
+        assert_eq!(on_disk[0].role, crate::state::MessageRole::User);
+    }
+
+    #[test]
+    fn send_message_inner_persist_handles_existing_messages() {
+        use crate::persistence::messages::{load_messages, save_messages};
+        use crate::state::{Message, MessageRole};
+        let tmp = make_data_dir();
+        let state = make_state();
+        save_messages(
+            tmp.path(),
+            "ws_send_c",
+            &[Message {
+                id: "msg_old".into(),
+                workspace_id: "ws_send_c".into(),
+                role: MessageRole::Assistant,
+                text: "previous".into(),
+                is_partial: false,
+                tool_use: None,
+                tool_result: None,
+                created_at: 0,
+            }],
+        )
+        .unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_send_c".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_send_c".into(),
+                stdin_tx: tx,
+                session_id: None,
+            },
+        );
+        send_message_inner_with_persist(state, tmp.path(), "ws_send_c", "next").unwrap();
+        let on_disk = load_messages(tmp.path(), "ws_send_c").unwrap();
+        assert_eq!(on_disk.len(), 2);
+        assert_eq!(on_disk[0].text, "previous");
+        assert_eq!(on_disk[1].text, "next");
     }
 }
