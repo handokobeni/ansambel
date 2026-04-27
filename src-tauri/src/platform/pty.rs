@@ -202,4 +202,55 @@ mod tests {
         let result = spawn(cmd);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn pty_session_resize_succeeds() {
+        let session = spawn(echo_command()).expect("spawn echo");
+        assert!(session.resize(40, 80).is_ok());
+    }
+
+    #[test]
+    fn pty_session_resize_different_sizes() {
+        let session = spawn(echo_command()).expect("spawn echo");
+        assert!(session.resize(24, 80).is_ok());
+        assert!(session.resize(50, 220).is_ok());
+        assert!(session.resize(DEFAULT_ROWS, DEFAULT_COLS).is_ok());
+    }
+
+    #[test]
+    fn pty_session_try_wait_returns_ok() {
+        let mut cmd = if cfg!(windows) {
+            let mut c = CommandBuilder::new("cmd");
+            c.args(["/C", "exit 0"]);
+            c
+        } else {
+            let mut c = CommandBuilder::new("sh");
+            c.args(["-c", "exit 0"]);
+            c
+        };
+        cmd.cwd(std::env::temp_dir());
+        let mut session = spawn(cmd).expect("spawn exit");
+        // Give the child time to exit.
+        std::thread::sleep(Duration::from_millis(200));
+        let result = session.try_wait();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn pty_session_writer_can_write() {
+        let mut cmd = if cfg!(windows) {
+            let mut c = CommandBuilder::new("cmd");
+            c.args(["/C", "set /p X=&& echo got=%X%"]);
+            c
+        } else {
+            let mut c = CommandBuilder::new("sh");
+            c.args(["-c", "read X; echo got=$X"]);
+            c
+        };
+        cmd.cwd(std::env::temp_dir());
+        let session = spawn(cmd).expect("spawn read");
+        let mut writer = session.writer().expect("take writer");
+        // Writing should not error.
+        assert!(writeln!(writer, "test_value").is_ok());
+    }
 }
