@@ -78,6 +78,18 @@ jobs:
 
           print(f'Journal written: {journal_path}')
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Format journal entry with Prettier
+        env:
+          PR_MERGED_AT: ${{ github.event.pull_request.merged_at }}
+        run: |
+          DATE="${PR_MERGED_AT:0:10}"
+          bunx prettier --write "journal/${DATE}.md"
+
       - name: Commit journal entry
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
