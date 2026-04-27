@@ -222,7 +222,7 @@ pub fn send_message_inner(
     text: &str,
 ) -> AppResult<()> {
     use crate::error::AppError;
-    let s = state.lock().unwrap();
+    let s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
     let handle = s
         .agents
         .get(workspace_id)
