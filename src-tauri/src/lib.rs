@@ -53,6 +53,9 @@ pub fn run() {
             crate::commands::task::update_task,
             crate::commands::task::move_task,
             crate::commands::task::remove_task,
+            crate::commands::agent::spawn_agent,
+            crate::commands::agent::send_message,
+            crate::commands::agent::stop_agent,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -83,5 +86,28 @@ mod tests {
         let _ = crate::commands::task::update_task as *const () as usize;
         let _ = crate::commands::task::move_task as *const () as usize;
         let _ = crate::commands::task::remove_task as *const () as usize;
+    }
+
+    #[test]
+    fn all_agent_commands_are_accessible() {
+        // Compile-time check that all three command functions are pub and accessible
+        use crate::commands::agent::{send_message, spawn_agent, stop_agent};
+        let _ = std::any::type_name_of_val(&spawn_agent);
+        let _ = std::any::type_name_of_val(&send_message);
+        let _ = std::any::type_name_of_val(&stop_agent);
+    }
+
+    #[test]
+    fn app_state_has_agents_field_at_startup() {
+        use crate::state::{AppSettings, AppState};
+        use std::collections::HashMap;
+        let state = AppState {
+            repos: HashMap::new(),
+            workspaces: HashMap::new(),
+            tasks: HashMap::new(),
+            agents: HashMap::new(),
+            settings: AppSettings::default(),
+        };
+        assert!(state.agents.is_empty());
     }
 }
