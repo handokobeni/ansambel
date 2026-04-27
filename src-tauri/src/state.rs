@@ -131,6 +131,47 @@ pub struct Message {
     pub created_at: i64,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentStatus {
+    Running,
+    Waiting,
+    Error,
+    Stopped,
+}
+
+/// Streaming event from a running agent, sent over the Tauri Channel API.
+/// All variants use struct form so JSON is uniform:
+/// {"type":"status","status":"running"}, {"type":"error","message":"..."}.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum AgentEvent {
+    Init {
+        session_id: String,
+        model: String,
+    },
+    Message {
+        id: String,
+        role: MessageRole,
+        text: String,
+        is_partial: bool,
+    },
+    ToolUse {
+        message_id: String,
+        tool_use: ToolUse,
+    },
+    ToolResult {
+        message_id: String,
+        tool_result: ToolResult,
+    },
+    Status {
+        status: AgentStatus,
+    },
+    Error {
+        message: String,
+    },
+}
+
 pub fn app_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
@@ -476,5 +517,62 @@ mod tests {
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"role\":\"user\""));
+    }
+
+    #[test]
+    fn agent_status_round_trips_json() {
+        for (s, want) in [
+            (AgentStatus::Running, "\"running\""),
+            (AgentStatus::Waiting, "\"waiting\""),
+            (AgentStatus::Error, "\"error\""),
+            (AgentStatus::Stopped, "\"stopped\""),
+        ] {
+            let j = serde_json::to_string(&s).unwrap();
+            assert_eq!(j, want);
+        }
+    }
+
+    #[test]
+    fn agent_event_message_serializes_with_type_tag() {
+        let ev = AgentEvent::Message {
+            id: "msg_a".into(),
+            role: MessageRole::Assistant,
+            text: "Hi".into(),
+            is_partial: true,
+        };
+        let j = serde_json::to_string(&ev).unwrap();
+        assert!(j.contains("\"type\":\"message\""));
+        assert!(j.contains("\"is_partial\":true"));
+    }
+
+    #[test]
+    fn agent_event_status_serializes_with_type_tag() {
+        let ev = AgentEvent::Status {
+            status: AgentStatus::Running,
+        };
+        let j = serde_json::to_string(&ev).unwrap();
+        assert!(j.contains("\"type\":\"status\""));
+        assert!(j.contains("\"status\":\"running\""));
+    }
+
+    #[test]
+    fn agent_event_error_serializes() {
+        let ev = AgentEvent::Error {
+            message: "spawn failed".into(),
+        };
+        let j = serde_json::to_string(&ev).unwrap();
+        assert!(j.contains("\"type\":\"error\""));
+        assert!(j.contains("\"message\":\"spawn failed\""));
+    }
+
+    #[test]
+    fn agent_event_init_carries_session_id() {
+        let ev = AgentEvent::Init {
+            session_id: "ses_xyz".into(),
+            model: "claude-sonnet-4-6".into(),
+        };
+        let j = serde_json::to_string(&ev).unwrap();
+        assert!(j.contains("\"type\":\"init\""));
+        assert!(j.contains("\"session_id\":\"ses_xyz\""));
     }
 }
