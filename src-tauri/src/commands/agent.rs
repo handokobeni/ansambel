@@ -240,6 +240,25 @@ pub fn send_message_inner(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn stop_agent(
+    workspace_id: String,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<(), String> {
+    stop_agent_inner(state.inner().clone(), &workspace_id).map_err(|e| e.to_string())
+}
+
+pub fn stop_agent_inner(state: Arc<Mutex<AppState>>, workspace_id: &str) -> AppResult<()> {
+    use crate::error::AppError;
+    let mut s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+    // Remove handle — drops stdin_tx sender, which closes the PTY writer thread.
+    s.agents.remove(workspace_id);
+    if let Some(ws) = s.workspaces.get_mut(workspace_id) {
+        ws.status = WorkspaceStatus::Waiting;
+    }
+    Ok(())
+}
+
 pub fn send_message_inner_with_persist(
     state: Arc<Mutex<AppState>>,
     data_dir: &Path,
@@ -505,5 +524,84 @@ mod tests {
         assert_eq!(on_disk.len(), 2);
         assert_eq!(on_disk[0].text, "previous");
         assert_eq!(on_disk[1].text, "next");
+    }
+
+    #[test]
+    fn stop_agent_inner_no_handle_returns_ok_silently() {
+        let state = make_state();
+        // Calling stop on a workspace with no agent is a no-op (idempotent).
+        let result = stop_agent_inner(state, "ws_no_agent");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn stop_agent_inner_drops_stdin_tx() {
+        use tokio::sync::mpsc;
+        let state = make_state();
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_stop_a".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_stop_a".into(),
+                stdin_tx: tx,
+                session_id: None,
+            },
+        );
+        stop_agent_inner(state.clone(), "ws_stop_a").unwrap();
+        // After stop, the sender side is dropped, so try_recv returns Disconnected.
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn stop_agent_inner_removes_handle_from_map() {
+        use tokio::sync::mpsc;
+        let state = make_state();
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_stop_b".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_stop_b".into(),
+                stdin_tx: tx,
+                session_id: None,
+            },
+        );
+        stop_agent_inner(state.clone(), "ws_stop_b").unwrap();
+        assert!(!state.lock().unwrap().agents.contains_key("ws_stop_b"));
+    }
+
+    #[test]
+    fn stop_agent_inner_marks_workspace_waiting() {
+        use crate::state::WorkspaceStatus;
+        use tokio::sync::mpsc;
+        let state = make_state();
+        let tmp = make_data_dir();
+        let worktree = tmp.path().join("workspaces/ws_stop_c");
+        std::fs::create_dir_all(&worktree).unwrap();
+        write_workspace(&state, "ws_stop_c", "repo_c", worktree);
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .get_mut("ws_stop_c")
+            .unwrap()
+            .status = WorkspaceStatus::Running;
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_stop_c".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_stop_c".into(),
+                stdin_tx: tx,
+                session_id: None,
+            },
+        );
+        stop_agent_inner(state.clone(), "ws_stop_c").unwrap();
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.workspaces.get("ws_stop_c").unwrap().status,
+            WorkspaceStatus::Waiting
+        );
     }
 }
