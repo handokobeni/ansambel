@@ -43,3 +43,6 @@ desktop.ini
 
 # Local settings
 .claude/settings.local.json
+
+# Git worktrees (superpowers skill workspace)
+.worktrees/
