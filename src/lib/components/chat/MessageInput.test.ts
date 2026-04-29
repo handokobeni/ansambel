@@ -5,20 +5,19 @@ import MessageInput from './MessageInput.svelte';
 describe('MessageInput', () => {
   it('renders a textarea and a send button', () => {
     const onSend = vi.fn();
-    const { getByRole } = render(MessageInput, {
+    const { getByLabelText, getByRole } = render(MessageInput, {
       props: { onSend },
     });
-    const ta = getByRole('textbox') as HTMLTextAreaElement;
-    expect(ta).toBeTruthy();
+    expect(getByLabelText('Message')).toBeTruthy();
     expect(getByRole('button', { name: /send/i })).toBeTruthy();
   });
 
   it('calls onSend with input text on click', async () => {
     const onSend = vi.fn();
-    const { getByRole } = render(MessageInput, {
+    const { getByLabelText, getByRole } = render(MessageInput, {
       props: { onSend },
     });
-    const ta = getByRole('textbox') as HTMLTextAreaElement;
+    const ta = getByLabelText('Message') as HTMLTextAreaElement;
     await fireEvent.input(ta, { target: { value: 'Hello!' } });
     await fireEvent.click(getByRole('button', { name: /send/i }));
     expect(onSend).toHaveBeenCalledWith('Hello!');
@@ -26,10 +25,10 @@ describe('MessageInput', () => {
 
   it('clears input after send', async () => {
     const onSend = vi.fn();
-    const { getByRole } = render(MessageInput, {
+    const { getByLabelText, getByRole } = render(MessageInput, {
       props: { onSend },
     });
-    const ta = getByRole('textbox') as HTMLTextAreaElement;
+    const ta = getByLabelText('Message') as HTMLTextAreaElement;
     await fireEvent.input(ta, { target: { value: 'msg' } });
     await fireEvent.click(getByRole('button', { name: /send/i }));
     expect(ta.value).toBe('');
@@ -44,8 +43,8 @@ describe('MessageInput', () => {
 
   it('cmd+enter / ctrl+enter submits', async () => {
     const onSend = vi.fn();
-    const { getByRole } = render(MessageInput, { props: { onSend } });
-    const ta = getByRole('textbox') as HTMLTextAreaElement;
+    const { getByLabelText } = render(MessageInput, { props: { onSend } });
+    const ta = getByLabelText('Message') as HTMLTextAreaElement;
     await fireEvent.input(ta, { target: { value: 'shortcut' } });
     await fireEvent.keyDown(ta, { key: 'Enter', ctrlKey: true });
     expect(onSend).toHaveBeenCalledWith('shortcut');
