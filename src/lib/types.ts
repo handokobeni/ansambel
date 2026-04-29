@@ -74,3 +74,46 @@ export type TaskPatch = {
 };
 
 export type Mode = 'plan' | 'work';
+
+// --- Agent types (Phase 1c) ---
+
+export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
+
+export interface ToolUse {
+  id: string;
+  name: string;
+  input: unknown;
+}
+
+export interface ToolResult {
+  tool_use_id: string;
+  content: string;
+  is_error: boolean;
+}
+
+export interface Message {
+  id: string;
+  workspace_id: string;
+  role: MessageRole;
+  text: string;
+  is_partial: boolean;
+  tool_use: ToolUse | null;
+  tool_result: ToolResult | null;
+  created_at: number;
+}
+
+export type AgentStatus = 'running' | 'waiting' | 'error' | 'stopped';
+
+export type AgentEvent =
+  | { type: 'init'; session_id: string; model: string }
+  | {
+      type: 'message';
+      id: string;
+      role: MessageRole;
+      text: string;
+      is_partial: boolean;
+    }
+  | { type: 'tool_use'; message_id: string; tool_use: ToolUse }
+  | { type: 'tool_result'; message_id: string; tool_result: ToolResult }
+  | { type: 'status'; status: AgentStatus }
+  | { type: 'error'; message: string };
