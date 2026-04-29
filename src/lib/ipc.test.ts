@@ -328,6 +328,11 @@ describe('api.agent', () => {
     vi.mocked(invoke).mockRejectedValue('no agent');
     await expect(api.agent.send('ws_a', 'hi')).rejects.toBe('no agent');
   });
+
+  it('stop rejects when invoke rejects', async () => {
+    vi.mocked(invoke).mockRejectedValue('agent already stopped');
+    await expect(api.agent.stop('ws_a')).rejects.toBe('agent already stopped');
+  });
 });
 
 describe('agentChannel', () => {
