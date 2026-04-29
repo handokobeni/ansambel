@@ -68,7 +68,7 @@ pub fn spawn_agent_inner(
     std::thread::spawn(move || {
         use std::io::Write;
         while let Some(line) = stdin_rx.blocking_recv() {
-            if writeln!(writer, "{line}").is_err() {
+            if writeln!(writer, "{line}").is_err() || writer.flush().is_err() {
                 break;
             }
         }

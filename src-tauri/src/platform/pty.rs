@@ -188,8 +188,12 @@ mod tests {
                 .expect("child did not print 'ready' within 10 s");
             // set /p is now waiting for input; write CRLF (Windows console line end).
             writer.write_all(b"world\r\n").expect("write");
+            // Flush immediately: the underlying writer may be buffered, and if we
+            // drop it before flushing, the pipe closes (EOF) before set /p ever
+            // sees the payload — causing it to hang waiting for "real" input.
+            writer.flush().expect("flush");
             // Keep writer alive until output is confirmed so ConPTY does not
-            // deliver EOF to the child before the buffered payload is consumed.
+            // deliver EOF to the child before it has processed the line.
             let out = out_rx
                 .recv_timeout(Duration::from_secs(10))
                 .unwrap_or_default();
@@ -221,6 +225,7 @@ mod tests {
                 let _ = tx.send(out);
             });
             writeln!(writer, "world").expect("write");
+            writer.flush().expect("flush");
             drop(writer);
             let out = rx.recv_timeout(Duration::from_secs(10)).unwrap_or_default();
             assert!(
