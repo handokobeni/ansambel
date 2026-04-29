@@ -76,6 +76,7 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
         nextRepoSeq: 1,
         nextWsSeq: 1,
         nextTaskSeq: 1,
+        agentChannels: {} as Record<string, { onmessage?: (ev: unknown) => void }>,
       };
 
       function makeRepoId() {
@@ -239,6 +240,74 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
             const taskId = args.taskId as string;
             const idx = state.tasks.findIndex((t) => t.id === taskId);
             if (idx !== -1) state.tasks.splice(idx, 1);
+            return undefined;
+          }
+
+          case 'spawn_agent': {
+            const wsId = args.workspaceId as string;
+            const onEvent = args.onEvent as { onmessage?: (ev: unknown) => void };
+            // Synchronously emit init + status running on the next tick.
+            setTimeout(
+              () =>
+                onEvent.onmessage?.({
+                  type: 'init',
+                  session_id: 'ses_mock',
+                  model: 'claude-sonnet-4-6-mock',
+                }),
+              0
+            );
+            setTimeout(
+              () =>
+                onEvent.onmessage?.({
+                  type: 'status',
+                  status: 'running',
+                }),
+              0
+            );
+            // Stash so future send_message calls can echo back.
+            state.agentChannels[wsId] = onEvent;
+            // Mark workspace running.
+            const ws = state.workspaces.find((w) => w.id === wsId);
+            if (ws) ws.status = 'running';
+            return undefined;
+          }
+
+          case 'send_message': {
+            const wsId = args.workspaceId as string;
+            const text = args.text as string;
+            const onEvent = state.agentChannels[wsId];
+            if (!onEvent) return undefined;
+            // Fake echo reply after a tick.
+            setTimeout(
+              () =>
+                onEvent.onmessage?.({
+                  type: 'message',
+                  id: `msg_reply_${Date.now()}`,
+                  role: 'assistant',
+                  text: `Mock reply to: ${text}`,
+                  is_partial: false,
+                }),
+              30
+            );
+            return undefined;
+          }
+
+          case 'stop_agent': {
+            const wsId = args.workspaceId as string;
+            const onEvent = state.agentChannels[wsId];
+            if (onEvent) {
+              setTimeout(
+                () =>
+                  onEvent.onmessage?.({
+                    type: 'status',
+                    status: 'stopped',
+                  }),
+                0
+              );
+              delete state.agentChannels[wsId];
+            }
+            const ws = state.workspaces.find((w) => w.id === wsId);
+            if (ws) ws.status = 'waiting';
             return undefined;
           }
 
