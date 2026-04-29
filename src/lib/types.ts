@@ -104,6 +104,11 @@ export type Message = {
 
 export type AgentStatus = 'running' | 'waiting' | 'error' | 'stopped';
 
+// WorkspaceInfo extends Workspace with the resolved worktree directory path.
+export type WorkspaceInfo = Workspace & {
+  worktree_dir: string;
+};
+
 export type AgentEvent =
   | { type: 'init'; session_id: string; model: string }
   | {

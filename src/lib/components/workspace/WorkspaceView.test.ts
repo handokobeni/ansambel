@@ -1,0 +1,109 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, waitFor } from '@testing-library/svelte';
+
+// Mock @tauri-apps/api/core before importing anything that depends on it
+vi.mock('@tauri-apps/api/core', () => {
+  class MockChannel {
+    id = Math.random();
+    onmessage?: (ev: unknown) => void;
+  }
+
+  return {
+    invoke: vi.fn(),
+    Channel: MockChannel,
+  };
+});
+
+import { invoke } from '@tauri-apps/api/core';
+import WorkspaceView from './WorkspaceView.svelte';
+import { messages } from '$lib/stores/messages.svelte';
+import type { WorkspaceInfo } from '$lib/types';
+
+const ws = (overrides: Partial<WorkspaceInfo> = {}): WorkspaceInfo => ({
+  id: 'ws_a',
+  repo_id: 'repo_a',
+  title: 'Fix login bug',
+  description: 'desc',
+  branch: 'feat/x',
+  base_branch: 'main',
+  custom_branch: false,
+  status: 'not_started',
+  column: 'in_progress',
+  created_at: 0,
+  updated_at: 0,
+  worktree_dir: '/tmp/ws_a',
+  ...overrides,
+});
+
+beforeEach(() => {
+  messages.reset();
+  vi.mocked(invoke).mockReset();
+  vi.mocked(invoke).mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+  vi.clearAllMocks();
+});
+
+describe('WorkspaceView', () => {
+  it('renders workspace title and branch in header', () => {
+    const { getByText } = render(WorkspaceView, { props: { workspace: ws() } });
+    expect(getByText('Fix login bug')).toBeTruthy();
+    expect(getByText('feat/x')).toBeTruthy();
+  });
+
+  it('calls spawn_agent on mount when status is not_started', async () => {
+    render(WorkspaceView, {
+      props: { workspace: ws({ status: 'not_started' }) },
+    });
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        'spawn_agent',
+        expect.objectContaining({ workspaceId: 'ws_a' })
+      );
+    });
+  });
+
+  it('calls spawn_agent on mount when status is waiting', async () => {
+    render(WorkspaceView, { props: { workspace: ws({ status: 'waiting' }) } });
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('spawn_agent', expect.any(Object));
+    });
+  });
+
+  it('does not spawn_agent when status is running', async () => {
+    render(WorkspaceView, { props: { workspace: ws({ status: 'running' }) } });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(invoke).not.toHaveBeenCalledWith('spawn_agent', expect.any(Object));
+  });
+
+  it('renders ChatPanel', () => {
+    const { getByLabelText } = render(WorkspaceView, {
+      props: { workspace: ws() },
+    });
+    expect(getByLabelText(/message/i)).toBeTruthy();
+  });
+
+  it('forwards send to send_message backend', async () => {
+    const { getByLabelText, getByRole } = render(WorkspaceView, {
+      props: { workspace: ws() },
+    });
+    await waitFor(() => expect(invoke).toHaveBeenCalled());
+    const ta = getByLabelText(/message/i) as HTMLTextAreaElement;
+    const { fireEvent } = await import('@testing-library/svelte');
+    await fireEvent.input(ta, { target: { value: 'Hello' } });
+    await fireEvent.click(getByRole('button', { name: /send/i }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('send_message', {
+        workspaceId: 'ws_a',
+        text: 'Hello',
+      });
+    });
+  });
+
+  it('shows status pill reflecting the agent status', async () => {
+    const { getByText } = render(WorkspaceView, { props: { workspace: ws() } });
+    messages.apply({ type: 'status', status: 'running' }, 'ws_a');
+    await waitFor(() => expect(getByText(/running/i)).toBeTruthy());
+  });
+});

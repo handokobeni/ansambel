@@ -44,7 +44,7 @@
       type="submit"
       class="px-3 py-1.5 text-xs font-semibold rounded bg-[var(--accent)] text-[var(--bg-base)] hover:opacity-90 transition-opacity disabled:opacity-50 cursor-pointer"
       disabled={disabled || !value.trim()}
-      aria-label="Send message"
+      aria-label="Send"
     >
       Send
     </button>
