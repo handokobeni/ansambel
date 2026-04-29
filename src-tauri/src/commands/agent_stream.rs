@@ -1,5 +1,5 @@
 use crate::error::{AppError, Result};
-use crate::state::{AgentEvent, AgentStatus, MessageRole, ToolResult, ToolUse};
+use crate::state::{AgentEvent, MessageRole, ToolResult, ToolUse};
 use serde_json::Value;
 
 pub fn parse_line(line: &str) -> Result<Vec<AgentEvent>> {
@@ -28,9 +28,12 @@ pub fn parse_line(line: &str) -> Result<Vec<AgentEvent>> {
             Ok(vec![AgentEvent::Init { session_id, model }])
         }
         "assistant" | "user" => parse_message(&v, kind),
-        "result" => Ok(vec![AgentEvent::Status {
-            status: AgentStatus::Stopped,
-        }]),
+        // "result" marks the end of a single turn in stream-json mode.
+        // The agent is still alive and ready for the next user message —
+        // emitting no status change keeps the input enabled. Real shutdown
+        // is detected by EOF on the PTY reader thread, which sets
+        // WorkspaceStatus::Waiting.
+        "result" => Ok(Vec::new()),
         _ => Ok(Vec::new()),
     }
 }
@@ -131,7 +134,7 @@ fn parse_message(v: &Value, kind: &str) -> Result<Vec<AgentEvent>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{AgentEvent, AgentStatus, MessageRole};
+    use crate::state::{AgentEvent, MessageRole};
 
     #[test]
     fn parses_system_init_into_agent_init() {
@@ -232,15 +235,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_result_subtype_into_status_stopped() {
+    fn parses_result_as_noop_in_stream_json() {
+        // In stream-json mode the "result" event marks the end of a turn,
+        // not the agent shutting down. The agent stays alive for the next
+        // user message; real shutdown is signalled by EOF on the reader.
         let line =
             r#"{"type":"result","subtype":"success","total_cost_usd":0.001,"is_error":false}"#;
         let evs = parse_line(line).unwrap();
-        assert_eq!(evs.len(), 1);
-        match &evs[0] {
-            AgentEvent::Status { status } => assert_eq!(status, &AgentStatus::Stopped),
-            _ => panic!("expected Status"),
-        }
+        assert!(evs.is_empty());
     }
 
     #[test]

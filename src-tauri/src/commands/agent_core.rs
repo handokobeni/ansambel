@@ -707,9 +707,10 @@ mod tests {
             events_clone.lock().unwrap().push(ev);
         });
         let evs = events.lock().unwrap();
-        assert_eq!(evs.len(), 2);
+        // The "result" line is a no-op end-of-turn marker in stream-json mode,
+        // so only the assistant message produces an event.
+        assert_eq!(evs.len(), 1);
         assert!(matches!(&evs[0], crate::state::AgentEvent::Message { .. }));
-        assert!(matches!(&evs[1], crate::state::AgentEvent::Status { .. }));
     }
 
     #[test]
