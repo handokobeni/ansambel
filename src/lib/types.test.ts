@@ -33,7 +33,10 @@ describe('Phase 1c types', () => {
       session_id: 'ses_a',
       model: 'claude-sonnet-4-6',
     };
-    expectTypeOf(ev).toMatchTypeOf<{ type: 'init' }>();
+    if (ev.type === 'init') {
+      expectTypeOf(ev.session_id).toBeString();
+      expectTypeOf(ev.model).toBeString();
+    }
   });
 
   it('AgentEvent.Message carries id/role/text/is_partial', () => {
@@ -44,7 +47,12 @@ describe('Phase 1c types', () => {
       text: 'hi',
       is_partial: false,
     };
-    expectTypeOf(ev).toMatchTypeOf<{ type: 'message' }>();
+    if (ev.type === 'message') {
+      expectTypeOf(ev.id).toBeString();
+      expectTypeOf(ev.role).toEqualTypeOf<MessageRole>();
+      expectTypeOf(ev.text).toBeString();
+      expectTypeOf(ev.is_partial).toBeBoolean();
+    }
   });
 
   it('AgentEvent.Status carries status field', () => {

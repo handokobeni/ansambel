@@ -79,19 +79,19 @@ export type Mode = 'plan' | 'work';
 
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 
-export interface ToolUse {
+export type ToolUse = {
   id: string;
   name: string;
   input: unknown;
-}
+};
 
-export interface ToolResult {
+export type ToolResult = {
   tool_use_id: string;
   content: string;
   is_error: boolean;
-}
+};
 
-export interface Message {
+export type Message = {
   id: string;
   workspace_id: string;
   role: MessageRole;
@@ -100,7 +100,7 @@ export interface Message {
   tool_use: ToolUse | null;
   tool_result: ToolResult | null;
   created_at: number;
-}
+};
 
 export type AgentStatus = 'running' | 'waiting' | 'error' | 'stopped';
 
