@@ -45,6 +45,7 @@ pub fn spawn_agent_inner(
 
     let mut cmd = CommandBuilder::new(&claude);
     cmd.args([
+        "-p",
         "--input-format",
         "stream-json",
         "--output-format",
@@ -180,12 +181,22 @@ pub fn send_message_inner(
             cmd: "send_message".into(),
             msg: format!("no agent for workspace {workspace_id}"),
         })?;
+    // session_id is required by claude's stream-json input parser. The
+    // CLI's authoritative session_id arrives in the init event and is
+    // stored on AgentHandle; before that point we fall back to the
+    // workspace_id (any string is accepted for a fresh session).
+    let session_id = handle
+        .session_id
+        .clone()
+        .unwrap_or_else(|| workspace_id.to_string());
     let envelope = serde_json::json!({
         "type": "user",
+        "session_id": session_id,
         "message": {
             "role": "user",
             "content": [{ "type": "text", "text": text }],
         },
+        "parent_tool_use_id": serde_json::Value::Null,
     })
     .to_string();
     handle
@@ -409,9 +420,32 @@ mod tests {
         let received = rx.try_recv().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&received).expect("valid NDJSON");
         assert_eq!(parsed["type"], "user");
+        // session_id is required by the claude CLI; falls back to workspace_id
+        // until the init event populates AgentHandle.session_id.
+        assert_eq!(parsed["session_id"], "ws_send_a");
+        assert_eq!(parsed["parent_tool_use_id"], serde_json::Value::Null);
         assert_eq!(parsed["message"]["role"], "user");
         assert_eq!(parsed["message"]["content"][0]["type"], "text");
         assert_eq!(parsed["message"]["content"][0]["text"], "Hello!");
+    }
+
+    #[test]
+    fn send_message_inner_uses_captured_session_id_after_init() {
+        use tokio::sync::mpsc;
+        let state = make_state();
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_session".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_session".into(),
+                stdin_tx: tx,
+                session_id: Some("ses_authoritative".into()),
+            },
+        );
+        send_message_inner(state, "ws_session", "hi").unwrap();
+        let received = rx.try_recv().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&received).unwrap();
+        assert_eq!(parsed["session_id"], "ses_authoritative");
     }
 
     #[test]
