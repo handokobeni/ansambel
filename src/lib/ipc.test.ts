@@ -1,12 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Mock @tauri-apps/api/core before importing ipc
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn(),
-}));
+vi.mock('@tauri-apps/api/core', () => {
+  class MockChannel {
+    id = Math.random();
+    onmessage?: (ev: unknown) => void;
+  }
+
+  return {
+    invoke: vi.fn(),
+    Channel: MockChannel,
+  };
+});
 
 import { invoke } from '@tauri-apps/api/core';
-import { api } from './ipc';
+import { api, agentChannel } from './ipc';
 import type { Repo, Workspace } from './types';
 import type { Task, CreateTaskArgs, TaskPatch } from './types';
 
@@ -279,5 +287,65 @@ describe('api.task', () => {
       taskId: 'tk_abc123',
       force: true,
     });
+  });
+});
+
+describe('api.agent', () => {
+  it('spawn passes workspaceId and channel to invoke', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    const ch = agentChannel();
+    await api.agent.spawn('ws_a', ch);
+    expect(invoke).toHaveBeenCalledWith('spawn_agent', {
+      workspaceId: 'ws_a',
+      onEvent: ch,
+    });
+  });
+
+  it('send passes workspaceId and text', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.agent.send('ws_a', 'Hello world');
+    expect(invoke).toHaveBeenCalledWith('send_message', {
+      workspaceId: 'ws_a',
+      text: 'Hello world',
+    });
+  });
+
+  it('stop passes workspaceId only', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.agent.stop('ws_a');
+    expect(invoke).toHaveBeenCalledWith('stop_agent', {
+      workspaceId: 'ws_a',
+    });
+  });
+
+  it('spawn rejects when invoke rejects', async () => {
+    vi.mocked(invoke).mockRejectedValue('spawn failed');
+    const ch = agentChannel();
+    await expect(api.agent.spawn('ws_a', ch)).rejects.toBe('spawn failed');
+  });
+
+  it('send rejects when invoke rejects', async () => {
+    vi.mocked(invoke).mockRejectedValue('no agent');
+    await expect(api.agent.send('ws_a', 'hi')).rejects.toBe('no agent');
+  });
+});
+
+describe('agentChannel', () => {
+  it('returns a Tauri Channel-shaped object with onmessage setter', () => {
+    const ch = agentChannel();
+    expect(typeof ch).toBe('object');
+    ch.onmessage = (_ev) => undefined;
+    expect(typeof ch.onmessage).toBe('function');
+  });
+
+  it('two channels are independent instances', () => {
+    const a = agentChannel();
+    const b = agentChannel();
+    expect(a).not.toBe(b);
+  });
+
+  it('Channel id is a number (Tauri internal)', () => {
+    const ch = agentChannel() as unknown as { id: number };
+    expect(typeof ch.id).toBe('number');
   });
 });

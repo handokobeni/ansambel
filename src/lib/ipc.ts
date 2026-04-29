@@ -1,5 +1,5 @@
 // src/lib/ipc.ts
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import type {
   Repo,
   Workspace,
@@ -8,6 +8,7 @@ import type {
   CreateTaskArgs,
   TaskPatch,
   KanbanColumn,
+  AgentEvent,
 } from './types';
 
 export const api = {
@@ -48,4 +49,18 @@ export const api = {
     remove: (taskId: string, force?: boolean): Promise<void> =>
       invoke('remove_task', { taskId, force }),
   },
+
+  agent: {
+    spawn: (workspaceId: string, onEvent: Channel<AgentEvent>): Promise<void> =>
+      invoke('spawn_agent', { workspaceId, onEvent }),
+
+    send: (workspaceId: string, text: string): Promise<void> =>
+      invoke('send_message', { workspaceId, text }),
+
+    stop: (workspaceId: string): Promise<void> => invoke('stop_agent', { workspaceId }),
+  },
 };
+
+export function agentChannel(): Channel<AgentEvent> {
+  return new Channel<AgentEvent>();
+}
