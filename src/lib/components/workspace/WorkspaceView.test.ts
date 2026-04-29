@@ -101,6 +101,22 @@ describe('WorkspaceView', () => {
     });
   });
 
+  it('echoes user message to messages store immediately on send', async () => {
+    const { getByLabelText, getByRole } = render(WorkspaceView, {
+      props: { workspace: ws() },
+    });
+    await waitFor(() => expect(invoke).toHaveBeenCalled());
+    const ta = getByLabelText(/message/i) as HTMLTextAreaElement;
+    const { fireEvent } = await import('@testing-library/svelte');
+    await fireEvent.input(ta, { target: { value: 'Hello user' } });
+    await fireEvent.click(getByRole('button', { name: /send/i }));
+    await waitFor(() => {
+      const list = messages.listForWorkspace('ws_a');
+      const userMsg = list.find((m) => m.role === 'user');
+      expect(userMsg?.text).toBe('Hello user');
+    });
+  });
+
   it('shows status pill reflecting the agent status', async () => {
     const { getByText } = render(WorkspaceView, { props: { workspace: ws() } });
     messages.apply({ type: 'status', status: 'running' }, 'ws_a');

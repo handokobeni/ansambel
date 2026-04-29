@@ -35,6 +35,21 @@
   });
 
   async function handleSend(text: string) {
+    // Echo the user's own message into the store immediately so the bubble
+    // renders without waiting for the backend. The backend's send_message
+    // command writes the user message to disk; the agent Channel only
+    // streams Claude's responses back, so the user message must be added
+    // here on the frontend.
+    messages.apply(
+      {
+        type: 'message',
+        id: `msg_user_${Date.now()}`,
+        role: 'user',
+        text,
+        is_partial: false,
+      },
+      workspace.id
+    );
     try {
       await api.agent.send(workspace.id, text);
     } catch (err) {

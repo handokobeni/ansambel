@@ -45,7 +45,8 @@ pub fn spawn_agent_inner(
 
     let mut cmd = CommandBuilder::new(&claude);
     cmd.args([
-        "-p",
+        "--input-format",
+        "stream-json",
         "--output-format",
         "stream-json",
         "--verbose",
@@ -179,9 +180,17 @@ pub fn send_message_inner(
             cmd: "send_message".into(),
             msg: format!("no agent for workspace {workspace_id}"),
         })?;
+    let envelope = serde_json::json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{ "type": "text", "text": text }],
+        },
+    })
+    .to_string();
     handle
         .stdin_tx
-        .send(text.to_string())
+        .send(envelope)
         .map_err(|e| AppError::Command {
             cmd: "send_message".into(),
             msg: format!("stdin closed: {e}"),
@@ -398,7 +407,11 @@ mod tests {
         );
         send_message_inner(state, "ws_send_a", "Hello!").unwrap();
         let received = rx.try_recv().unwrap();
-        assert_eq!(received, "Hello!");
+        let parsed: serde_json::Value = serde_json::from_str(&received).expect("valid NDJSON");
+        assert_eq!(parsed["type"], "user");
+        assert_eq!(parsed["message"]["role"], "user");
+        assert_eq!(parsed["message"]["content"][0]["type"], "text");
+        assert_eq!(parsed["message"]["content"][0]["text"], "Hello!");
     }
 
     #[test]
