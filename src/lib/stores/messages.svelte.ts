@@ -2,9 +2,9 @@ import { SvelteMap } from 'svelte/reactivity';
 import type { AgentEvent, AgentStatus, Message, MessageRole } from '../types';
 
 class MessagesStore {
-  byWorkspace = $state(new SvelteMap<string, SvelteMap<string, Message>>());
-  status = $state(new SvelteMap<string, AgentStatus>());
-  error = $state(new SvelteMap<string, string>());
+  readonly byWorkspace = new SvelteMap<string, SvelteMap<string, Message>>();
+  readonly status = new SvelteMap<string, AgentStatus>();
+  readonly error = new SvelteMap<string, string>();
 
   private getOrCreate(wsId: string): SvelteMap<string, Message> {
     let map = this.byWorkspace.get(wsId);

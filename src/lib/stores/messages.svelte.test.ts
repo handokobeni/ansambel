@@ -114,6 +114,53 @@ describe('MessagesStore', () => {
     });
   });
 
+  it('apply ToolUse with no prior message creates a synthetic assistant message', () => {
+    messages.apply(
+      {
+        type: 'tool_use',
+        message_id: 'msg_orphan',
+        tool_use: { id: 'toolu_b', name: 'Write', input: {} },
+      },
+      'ws_a'
+    );
+    const list = messages.listForWorkspace('ws_a');
+    expect(list).toHaveLength(1);
+    expect(list[0].role).toBe('assistant');
+    expect(list[0].tool_use?.name).toBe('Write');
+    expect(list[0].text).toBe('');
+  });
+
+  it('apply Message event preserves created_at on subsequent updates', () => {
+    messages.apply(
+      {
+        type: 'message',
+        id: 'msg_a',
+        role: 'assistant',
+        text: 'first',
+        is_partial: true,
+      },
+      'ws_a'
+    );
+    const initialCreatedAt = messages.listForWorkspace('ws_a')[0].created_at;
+    // Wait a tick so Date.now() would differ.
+    const sleep = new Promise((r) => setTimeout(r, 5));
+    return sleep.then(() => {
+      messages.apply(
+        {
+          type: 'message',
+          id: 'msg_a',
+          role: 'assistant',
+          text: 'second',
+          is_partial: false,
+        },
+        'ws_a'
+      );
+      const list = messages.listForWorkspace('ws_a');
+      expect(list[0].text).toBe('second');
+      expect(list[0].created_at).toBe(initialCreatedAt);
+    });
+  });
+
   it('apply ToolResult creates a tool message', () => {
     messages.apply(
       {
