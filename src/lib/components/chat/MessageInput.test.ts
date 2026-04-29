@@ -50,6 +50,15 @@ describe('MessageInput', () => {
     expect(onSend).toHaveBeenCalledWith('shortcut');
   });
 
+  it('cmd+enter (metaKey) submits', async () => {
+    const onSend = vi.fn();
+    const { getByLabelText } = render(MessageInput, { props: { onSend } });
+    const ta = getByLabelText('Message') as HTMLTextAreaElement;
+    await fireEvent.input(ta, { target: { value: 'mac shortcut' } });
+    await fireEvent.keyDown(ta, { key: 'Enter', metaKey: true });
+    expect(onSend).toHaveBeenCalledWith('mac shortcut');
+  });
+
   it('disables send button when disabled prop is true', () => {
     const onSend = vi.fn();
     const { getByRole } = render(MessageInput, {

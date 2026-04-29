@@ -106,4 +106,62 @@ describe('WorkspaceView', () => {
     messages.apply({ type: 'status', status: 'running' }, 'ws_a');
     await waitFor(() => expect(getByText(/running/i)).toBeTruthy());
   });
+
+  it('captures spawn rejection as error in messages store', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === 'spawn_agent') throw 'spawn failed';
+      return undefined;
+    });
+    render(WorkspaceView, {
+      props: { workspace: ws({ status: 'not_started' }) },
+    });
+    await waitFor(() => {
+      expect(messages.errorFor('ws_a')).toBe('spawn failed');
+    });
+  });
+
+  it('captures send_message rejection as error in messages store', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === 'send_message') throw 'send failed';
+      return undefined;
+    });
+    const { getByLabelText, getByRole } = render(WorkspaceView, {
+      props: { workspace: ws() },
+    });
+    await waitFor(() => expect(invoke).toHaveBeenCalled());
+    const ta = getByLabelText(/message/i) as HTMLTextAreaElement;
+    const { fireEvent } = await import('@testing-library/svelte');
+    await fireEvent.input(ta, { target: { value: 'Hello' } });
+    await fireEvent.click(getByRole('button', { name: /send/i }));
+    await waitFor(() => {
+      expect(messages.errorFor('ws_a')).toBe('send failed');
+    });
+  });
+
+  it('routes channel onmessage events through messages.apply', async () => {
+    let capturedChannel: { onmessage?: (ev: unknown) => void } | undefined;
+    vi.mocked(invoke).mockImplementation(async (cmd, args) => {
+      if (cmd === 'spawn_agent') {
+        capturedChannel = (args as unknown as { onEvent: { onmessage?: (ev: unknown) => void } })
+          .onEvent;
+      }
+      return undefined;
+    });
+    render(WorkspaceView, {
+      props: { workspace: ws({ status: 'not_started' }) },
+    });
+    await waitFor(() => expect(capturedChannel).toBeDefined());
+    // Fire a message event through the channel
+    capturedChannel?.onmessage?.({
+      type: 'message',
+      id: 'msg_x',
+      role: 'assistant',
+      text: 'streamed reply',
+      is_partial: false,
+    });
+    await waitFor(() => {
+      const list = messages.listForWorkspace('ws_a');
+      expect(list.find((m) => m.id === 'msg_x')?.text).toBe('streamed reply');
+    });
+  });
 });

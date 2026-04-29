@@ -8,7 +8,7 @@
  */
 
 import type { Page } from '@playwright/test';
-import type { Repo, Workspace, Task } from '../../../src/lib/types';
+import type { Repo, WorkspaceInfo, Task } from '../../../src/lib/types';
 
 export interface ShimConfig {
   /** Override fixture path returned by plugin:dialog|open */
@@ -16,7 +16,7 @@ export interface ShimConfig {
   /** Initial repos returned by list_repos */
   initialRepos?: Repo[];
   /** Initial workspaces returned by list_workspaces */
-  initialWorkspaces?: Workspace[];
+  initialWorkspaces?: WorkspaceInfo[];
   /** Initial tasks returned by list_tasks */
   initialTasks?: Task[];
 }
@@ -37,6 +37,21 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
       initialRepos?: unknown[];
       initialWorkspaces?: unknown[];
       initialTasks?: unknown[];
+    } & {
+      initialWorkspaces?: Array<{
+        id: string;
+        repo_id: string;
+        branch: string;
+        base_branch: string;
+        custom_branch: boolean;
+        title: string;
+        description: string;
+        status: string;
+        column: string;
+        created_at: number;
+        updated_at: number;
+        worktree_dir: string;
+      }>;
     }) => {
       // In-memory state shared across invoke calls
       const state = {
@@ -61,6 +76,7 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
           column: string;
           created_at: number;
           updated_at: number;
+          worktree_dir: string;
         }>,
         tasks: (initialTasks ?? []) as Array<{
           id: string;
@@ -158,6 +174,7 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
               column: 'todo',
               created_at: now(),
               updated_at: now(),
+              worktree_dir: `/mock/worktrees/${id}`,
             };
             state.workspaces.push(ws);
             return ws;
@@ -228,6 +245,7 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
                   column: 'in_progress',
                   created_at: now(),
                   updated_at: now(),
+                  worktree_dir: `/mock/worktrees/${wsId}`,
                 };
                 state.workspaces.push(ws);
                 task.workspace_id = wsId;
