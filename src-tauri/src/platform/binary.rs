@@ -105,6 +105,7 @@ fn default_gh_fallbacks() -> Vec<PathBuf> {
     }
 }
 
+#[cfg(unix)]
 fn dirs_home() -> PathBuf {
     directories::UserDirs::new()
         .map(|d| d.home_dir().to_path_buf())

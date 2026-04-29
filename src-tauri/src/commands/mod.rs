@@ -1,3 +1,6 @@
+pub mod agent;
+pub mod agent_core;
+pub mod agent_stream;
 pub mod helpers;
 pub mod repo;
 pub mod system;

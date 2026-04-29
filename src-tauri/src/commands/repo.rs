@@ -335,6 +335,7 @@ mod tests {
                     column: crate::state::KanbanColumn::Todo,
                     created_at: 0,
                     updated_at: 0,
+                    worktree_dir: std::path::PathBuf::new(),
                 },
             );
         }

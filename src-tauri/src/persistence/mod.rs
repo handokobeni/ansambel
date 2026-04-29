@@ -1,5 +1,6 @@
 pub mod atomic;
 pub mod debounce;
+pub mod messages;
 pub mod repos;
 pub mod settings;
 pub mod tasks;
