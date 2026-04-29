@@ -134,15 +134,17 @@ mod tests {
 
     #[test]
     fn spawn_pty_writes_stdin() {
-        // On Windows: emit "ready" before set /p so the reader thread can
-        // signal us exactly when the child is waiting for stdin.  Dropping
-        // the writer before the child reads the buffered data causes ConPTY
-        // to deliver EOF before the payload, so we keep the writer alive
-        // until "got=world" is confirmed in the output.
+        // On Windows: cmd.exe's "set /p" uses ReadConsole, which ConPTY does
+        // not reliably feed from pipe-writes to the master.  Use "findstr"
+        // instead — it reads stdin via ReadFile (pipe semantics), which ConPTY
+        // does forward correctly.  "echo ready" fires first so we know the
+        // child has started before we write; we then flush+drop the writer so
+        // findstr sees the data followed by EOF and exits, allowing "echo
+        // got=world" to run.
         #[cfg(windows)]
         let cmd = {
             let mut c = CommandBuilder::new("cmd");
-            c.args(["/C", "echo ready && set /p X= && echo got=%X%"]);
+            c.args(["/C", r#"echo ready && findstr /R "." && echo got=world"#]);
             c.cwd(std::env::temp_dir());
             c
         };
@@ -186,18 +188,15 @@ mod tests {
             ready_rx
                 .recv_timeout(Duration::from_secs(10))
                 .expect("child did not print 'ready' within 10 s");
-            // set /p is now waiting for input; write CRLF (Windows console line end).
+            // findstr is now waiting for stdin.  Write the line, flush so the
+            // data reaches the ConPTY pipe immediately, then drop the writer to
+            // signal EOF — findstr exits only after seeing EOF.
             writer.write_all(b"world\r\n").expect("write");
-            // Flush immediately: the underlying writer may be buffered, and if we
-            // drop it before flushing, the pipe closes (EOF) before set /p ever
-            // sees the payload — causing it to hang waiting for "real" input.
             writer.flush().expect("flush");
-            // Keep writer alive until output is confirmed so ConPTY does not
-            // deliver EOF to the child before it has processed the line.
+            drop(writer);
             let out = out_rx
                 .recv_timeout(Duration::from_secs(10))
                 .unwrap_or_default();
-            drop(writer);
             assert!(
                 out.contains("got=world"),
                 "expected got=world in PTY output, got: {out:?}"
