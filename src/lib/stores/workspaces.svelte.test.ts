@@ -12,9 +12,9 @@ vi.mock('$lib/ipc', () => ({
 
 import { api } from '$lib/ipc';
 import { WorkspacesStore } from './workspaces.svelte';
-import type { Workspace } from '$lib/types';
+import type { WorkspaceInfo } from '$lib/types';
 
-const makeWorkspace = (overrides: Partial<Workspace> = {}): Workspace => ({
+const makeWorkspace = (overrides: Partial<WorkspaceInfo> = {}): WorkspaceInfo => ({
   id: 'ws_abc123',
   repo_id: 'repo_abc123',
   branch: 'feat/task-1',
@@ -26,6 +26,7 @@ const makeWorkspace = (overrides: Partial<Workspace> = {}): Workspace => ({
   column: 'todo',
   created_at: 1776000000,
   updated_at: 1776000000,
+  worktree_dir: '/tmp/ws_abc123',
   ...overrides,
 });
 

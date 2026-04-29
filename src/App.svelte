@@ -5,6 +5,7 @@
   import Sidebar from '$lib/components/Sidebar.svelte';
   import KanbanBoard from '$lib/components/kanban/KanbanBoard.svelte';
   import NewTaskDialog from '$lib/components/kanban/NewTaskDialog.svelte';
+  import WorkspaceView from '$lib/components/workspace/WorkspaceView.svelte';
   import { repos } from '$lib/stores/repos.svelte';
   import { workspaces } from '$lib/stores/workspaces.svelte';
   import { tasks } from '$lib/stores/tasks.svelte';
@@ -107,17 +108,7 @@
         </div>
       {/if}
     {:else if selectedWorkspace}
-      <section
-        class="h-full flex flex-col items-center justify-center gap-2 text-[var(--text-secondary)]"
-      >
-        <p class="text-base font-semibold text-[var(--text-primary)]">
-          Workspace: {selectedWorkspace.title}
-        </p>
-        <p class="text-xs text-[var(--text-muted)]">
-          Branch: {selectedWorkspace.branch}
-        </p>
-        <p class="text-xs text-[var(--text-muted)]">Chat coming in Phase 1c.</p>
-      </section>
+      <WorkspaceView workspace={selectedWorkspace} />
     {:else}
       <div class="h-full flex items-center justify-center text-sm text-[var(--text-muted)]">
         Select or create a workspace

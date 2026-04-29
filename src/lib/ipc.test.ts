@@ -15,7 +15,7 @@ vi.mock('@tauri-apps/api/core', () => {
 
 import { invoke } from '@tauri-apps/api/core';
 import { api, agentChannel } from './ipc';
-import type { Repo, Workspace } from './types';
+import type { Repo, WorkspaceInfo } from './types';
 import type { Task, CreateTaskArgs, TaskPatch } from './types';
 
 const mockRepo: Repo = {
@@ -28,7 +28,7 @@ const mockRepo: Repo = {
   updated_at: 1776000000,
 };
 
-const mockWorkspace: Workspace = {
+const mockWorkspace: WorkspaceInfo = {
   id: 'ws_abc123',
   repo_id: 'repo_abc123',
   branch: 'feat/task-1',
@@ -40,6 +40,7 @@ const mockWorkspace: Workspace = {
   column: 'todo',
   created_at: 1776000000,
   updated_at: 1776000000,
+  worktree_dir: '/tmp/ws_abc123',
 };
 
 beforeEach(() => {

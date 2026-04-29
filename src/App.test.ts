@@ -3,6 +3,19 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import App from './App.svelte';
 
+// Mock @tauri-apps/api/core so WorkspaceView (rendered in work mode) does not
+// break tests that run without a real Tauri runtime.
+vi.mock('@tauri-apps/api/core', () => {
+  class MockChannel {
+    id = Math.random();
+    onmessage?: (ev: unknown) => void;
+  }
+  return {
+    invoke: vi.fn().mockResolvedValue(undefined),
+    Channel: MockChannel,
+  };
+});
+
 vi.mock('$lib/stores/repos.svelte', () => ({
   repos: {
     selectedRepoId: null as string | null,
@@ -122,14 +135,15 @@ describe('App', () => {
       custom_branch: false,
       title: 'Test workspace',
       description: '',
-      status: 'waiting',
+      status: 'running',
       column: 'in_progress',
       created_at: 1776000001,
       updated_at: 1776000001,
+      worktree_dir: '/tmp/ws_abc',
     });
     render(App);
     await waitFor(() => {
-      expect(screen.getByText(/workspace: test workspace/i)).toBeInTheDocument();
+      expect(screen.getByText('Test workspace')).toBeInTheDocument();
     });
   });
 
@@ -156,5 +170,49 @@ describe('App', () => {
     const workBtn = await screen.findByRole('button', { name: /^work$/i });
     await fireEvent.click(workBtn);
     expect(modeStore.set).toHaveBeenCalledWith('work');
+  });
+});
+
+describe('App work mode', () => {
+  it('renders WorkspaceView when work mode + selected workspace', async () => {
+    vi.mocked(workspaces.getSelected).mockReturnValue({
+      id: 'ws_a',
+      repo_id: 'repo_a',
+      title: 'Fix login',
+      description: '',
+      branch: 'feat/x',
+      base_branch: 'main',
+      custom_branch: false,
+      status: 'running',
+      column: 'in_progress',
+      created_at: 0,
+      updated_at: 0,
+      worktree_dir: '/tmp/ws_a',
+    });
+    modeStore.set('work');
+    const { getByText } = render(App);
+    await waitFor(() => expect(getByText('Fix login')).toBeTruthy());
+  });
+
+  it('falls back to "Select or create" when work mode but no workspace', async () => {
+    vi.mocked(workspaces.getSelected).mockReturnValue(null);
+    modeStore.set('work');
+    const { getByText } = render(App);
+    expect(getByText(/select or create/i)).toBeTruthy();
+  });
+
+  it('keeps Plan mode rendering KanbanBoard', async () => {
+    modeStore.set('plan');
+    vi.mocked(repos.getSelected).mockReturnValue({
+      id: 'repo_a',
+      name: 'Demo',
+      path: '/x',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 0,
+      updated_at: 0,
+    });
+    const { getByText } = render(App);
+    await waitFor(() => expect(getByText(/Todo/)).toBeTruthy());
   });
 });

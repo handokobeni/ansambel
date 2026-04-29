@@ -2,7 +2,7 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type {
   Repo,
-  Workspace,
+  WorkspaceInfo,
   CreateWorkspaceArgs,
   Task,
   CreateTaskArgs,
@@ -28,9 +28,9 @@ export const api = {
   },
 
   workspace: {
-    create: (args: CreateWorkspaceArgs): Promise<Workspace> => invoke('create_workspace', args),
+    create: (args: CreateWorkspaceArgs): Promise<WorkspaceInfo> => invoke('create_workspace', args),
 
-    list: (repoId?: string): Promise<Workspace[]> => invoke('list_workspaces', { repoId }),
+    list: (repoId?: string): Promise<WorkspaceInfo[]> => invoke('list_workspaces', { repoId }),
 
     remove: (workspaceId: string): Promise<void> => invoke('remove_workspace', { workspaceId }),
   },
