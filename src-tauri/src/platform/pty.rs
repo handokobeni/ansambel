@@ -136,7 +136,7 @@ mod tests {
     fn spawn_pty_writes_stdin() {
         let mut cmd = if cfg!(windows) {
             let mut c = CommandBuilder::new("cmd");
-            c.args(["/C", "set /p X=&& echo got=%X%"]);
+            c.args(["/C", "set /p X= && echo got=%X%"]);
             c
         } else {
             let mut c = CommandBuilder::new("sh");
@@ -144,24 +144,42 @@ mod tests {
             c
         };
         cmd.cwd(std::env::temp_dir());
-        let session = spawn(cmd).expect("spawn read");
-        let mut writer = session.writer().expect("take writer");
-        writeln!(writer, "world").expect("write line");
+        let session = spawn(cmd).expect("spawn");
+        // Give the child time to start and issue its read before we write.
+        std::thread::sleep(Duration::from_millis(150));
+        let mut writer = session.writer().expect("writer");
+        // Windows console (set /p) requires CRLF to accept the line.
+        #[cfg(windows)]
+        writer.write_all(b"world\r\n").expect("write");
+        #[cfg(not(windows))]
+        writeln!(writer, "world").expect("write");
         drop(writer);
-        let reader = session.reader().expect("clone reader");
-        let mut br = BufReader::new(reader);
-        let mut out = String::new();
-        for _ in 0..10 {
-            let mut line = String::new();
-            if br.read_line(&mut line).is_err() {
-                break;
+
+        // Read in a separate thread so a ConPTY EOF-delivery edge case on
+        // Windows cannot hang the whole test suite.
+        let reader = session.reader().expect("reader");
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let mut br = BufReader::new(reader);
+            let mut out = String::new();
+            for _ in 0..20 {
+                let mut line = String::new();
+                match br.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                out.push_str(&line);
+                if out.contains("got=world") {
+                    break;
+                }
             }
-            out.push_str(&line);
-            if out.contains("got=world") {
-                break;
-            }
-        }
-        assert!(out.contains("got=world"), "expected got=world, saw {out:?}");
+            let _ = tx.send(out);
+        });
+        let out = rx.recv_timeout(Duration::from_secs(10)).unwrap_or_default();
+        assert!(
+            out.contains("got=world"),
+            "expected got=world in PTY output, got: {out:?}"
+        );
     }
 
     #[test]
