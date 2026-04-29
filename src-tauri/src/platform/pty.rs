@@ -134,52 +134,100 @@ mod tests {
 
     #[test]
     fn spawn_pty_writes_stdin() {
-        let mut cmd = if cfg!(windows) {
+        // On Windows: emit "ready" before set /p so the reader thread can
+        // signal us exactly when the child is waiting for stdin.  Dropping
+        // the writer before the child reads the buffered data causes ConPTY
+        // to deliver EOF before the payload, so we keep the writer alive
+        // until "got=world" is confirmed in the output.
+        #[cfg(windows)]
+        let cmd = {
             let mut c = CommandBuilder::new("cmd");
-            c.args(["/C", "set /p X= && echo got=%X%"]);
-            c
-        } else {
-            let mut c = CommandBuilder::new("sh");
-            c.args(["-c", "read X; echo got=$X"]);
+            c.args(["/C", "echo ready && set /p X= && echo got=%X%"]);
+            c.cwd(std::env::temp_dir());
             c
         };
-        cmd.cwd(std::env::temp_dir());
-        let session = spawn(cmd).expect("spawn");
-        // Give the child time to start and issue its read before we write.
-        std::thread::sleep(Duration::from_millis(150));
-        let mut writer = session.writer().expect("writer");
-        // Windows console (set /p) requires CRLF to accept the line.
-        #[cfg(windows)]
-        writer.write_all(b"world\r\n").expect("write");
         #[cfg(not(windows))]
-        writeln!(writer, "world").expect("write");
-        drop(writer);
-
-        // Read in a separate thread so a ConPTY EOF-delivery edge case on
-        // Windows cannot hang the whole test suite.
+        let cmd = {
+            let mut c = CommandBuilder::new("sh");
+            c.args(["-c", "read X; echo got=$X"]);
+            c.cwd(std::env::temp_dir());
+            c
+        };
+        let session = spawn(cmd).expect("spawn");
         let reader = session.reader().expect("reader");
-        let (tx, rx) = std::sync::mpsc::channel::<String>();
-        std::thread::spawn(move || {
-            let mut br = BufReader::new(reader);
-            let mut out = String::new();
-            for _ in 0..20 {
-                let mut line = String::new();
-                match br.read_line(&mut line) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
+        let mut writer = session.writer().expect("writer");
+
+        #[cfg(windows)]
+        {
+            // Two channels: one to signal "ready", one to return the full output.
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+            let (out_tx, out_rx) = std::sync::mpsc::channel::<String>();
+            std::thread::spawn(move || {
+                let mut br = BufReader::new(reader);
+                let mut out = String::new();
+                let mut signaled = false;
+                for _ in 0..50 {
+                    let mut line = String::new();
+                    match br.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    out.push_str(&line);
+                    if !signaled && out.contains("ready") {
+                        let _ = ready_tx.send(());
+                        signaled = true;
+                    }
+                    if out.contains("got=world") {
+                        break;
+                    }
                 }
-                out.push_str(&line);
-                if out.contains("got=world") {
-                    break;
+                let _ = out_tx.send(out);
+            });
+            ready_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("child did not print 'ready' within 10 s");
+            // set /p is now waiting for input; write CRLF (Windows console line end).
+            writer.write_all(b"world\r\n").expect("write");
+            // Keep writer alive until output is confirmed so ConPTY does not
+            // deliver EOF to the child before the buffered payload is consumed.
+            let out = out_rx
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap_or_default();
+            drop(writer);
+            assert!(
+                out.contains("got=world"),
+                "expected got=world in PTY output, got: {out:?}"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            // Unix PTY buffers stdin so timing is not critical; read in a
+            // thread to guard against an unlikely EOF-delivery delay.
+            let (tx, rx) = std::sync::mpsc::channel::<String>();
+            std::thread::spawn(move || {
+                let mut br = BufReader::new(reader);
+                let mut out = String::new();
+                for _ in 0..20 {
+                    let mut line = String::new();
+                    match br.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                    out.push_str(&line);
+                    if out.contains("got=world") {
+                        break;
+                    }
                 }
-            }
-            let _ = tx.send(out);
-        });
-        let out = rx.recv_timeout(Duration::from_secs(10)).unwrap_or_default();
-        assert!(
-            out.contains("got=world"),
-            "expected got=world in PTY output, got: {out:?}"
-        );
+                let _ = tx.send(out);
+            });
+            writeln!(writer, "world").expect("write");
+            drop(writer);
+            let out = rx.recv_timeout(Duration::from_secs(10)).unwrap_or_default();
+            assert!(
+                out.contains("got=world"),
+                "expected got=world in PTY output, got: {out:?}"
+            );
+        }
     }
 
     #[test]
