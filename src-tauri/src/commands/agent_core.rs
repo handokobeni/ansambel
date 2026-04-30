@@ -273,17 +273,31 @@ pub fn process_reader_events_with_cancel<F>(
         tracing::info!(workspace_id, "agent reader: cancelled");
     }
     // EOF / cancel cleanup — reset workspace status and drop the agent handle.
+    // Use Arc::ptr_eq on the cancel token to verify the handle in state is
+    // still ours: after a user-initiated Stop+respawn, a fresh handle (with a
+    // different cancel Arc) may already occupy the slot, and blindly removing
+    // would orphan the new agent and break the user's next send.
     if let Ok(mut s) = state.lock() {
-        if let Some(ws) = s.workspaces.get_mut(workspace_id) {
-            ws.status = WorkspaceStatus::Waiting;
+        let still_ours = s
+            .agents
+            .get(workspace_id)
+            .map(|h| std::sync::Arc::ptr_eq(&h.cancel, &cancel))
+            .unwrap_or(false);
+        if still_ours {
+            if let Some(ws) = s.workspaces.get_mut(workspace_id) {
+                ws.status = WorkspaceStatus::Waiting;
+            }
+            s.agents.remove(workspace_id);
         }
-        s.agents.remove(workspace_id);
     }
 }
 
 /// Backwards-compatible thin wrapper for tests and callers that don't need
-/// cancellation. Equivalent to `process_reader_events_with_cancel` with a
-/// never-fired cancel token.
+/// to drive cancellation themselves. Adopts the existing handle's cancel
+/// Arc as the ownership token so EOF cleanup still removes the handle —
+/// without that adoption, the ptr_eq check in
+/// `process_reader_events_with_cancel` would always fail on a freshly-made
+/// "never-fire" Arc and leave the handle stranded in state.
 pub fn process_reader_events<F>(
     reader: Box<dyn std::io::Read + Send>,
     state: Arc<Mutex<AppState>>,
@@ -292,8 +306,12 @@ pub fn process_reader_events<F>(
 ) where
     F: Fn(AgentEvent),
 {
-    let never = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    process_reader_events_with_cancel(reader, state, workspace_id, never, send_event)
+    let cancel = state
+        .lock()
+        .ok()
+        .and_then(|s| s.agents.get(workspace_id).map(|h| h.cancel.clone()))
+        .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    process_reader_events_with_cancel(reader, state, workspace_id, cancel, send_event)
 }
 
 pub fn send_message_inner(
@@ -868,6 +886,20 @@ mod tests {
             .get_mut("ws_reader_c")
             .unwrap()
             .status = WorkspaceStatus::Running;
+        // Insert an agent handle so the EOF cleanup recognises this run as
+        // its own and flips the workspace status (the post-Stop+respawn
+        // race protection now requires Arc::ptr_eq on the cancel token).
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_reader_c".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_reader_c".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(8).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
         // Empty reader = immediate EOF
         let reader: Box<dyn std::io::Read + Send> = Box::new(Cursor::new(b"".to_vec()));
         process_reader_events(reader, state.clone(), "ws_reader_c", &|_| {});
@@ -1366,6 +1398,20 @@ mod tests {
             "repo_x",
             std::path::PathBuf::from("/tmp/x"),
         );
+        // Insert an agent handle whose cancel Arc *is* the same one we'll
+        // pass to process_reader_events_with_cancel — that's what the
+        // ptr_eq ownership check uses to authorize EOF cleanup.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_cx".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_cx".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(8).0,
+                cancel: cancel.clone(),
+            },
+        );
         let cancel_for_thread = cancel.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1406,6 +1452,126 @@ mod tests {
         let s = state.lock().unwrap();
         assert_eq!(
             s.workspaces.get("ws_cx").unwrap().status,
+            crate::state::WorkspaceStatus::Waiting
+        );
+    }
+
+    #[test]
+    fn reader_cleanup_does_not_remove_handle_after_respawn() {
+        // After a Stop+respawn race, the OLD reader thread's cleanup must
+        // not blow away the NEW agent handle that has just been inserted by
+        // spawn_agent_inner. Each handle carries its own cancel Arc; the
+        // cleanup verifies ownership via Arc::ptr_eq.
+        use std::sync::atomic::Ordering;
+        use tokio::sync::mpsc;
+        let state = make_state();
+        write_workspace(
+            &state,
+            "ws_resp",
+            "repo_resp",
+            PathBuf::from("/tmp/ws_resp"),
+        );
+
+        // Pretend we are the *old* reader thread: hold a cancel Arc that
+        // matches a handle that was already removed by stop_agent.
+        let old_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        // Now simulate respawn: insert a fresh handle with a *different*
+        // cancel Arc.
+        let (new_tx, _new_rx) = mpsc::unbounded_channel::<String>();
+        let new_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state.lock().unwrap().agents.insert(
+            "ws_resp".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_resp".into(),
+                stdin_tx: new_tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(8).0,
+                cancel: new_cancel.clone(),
+            },
+        );
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .get_mut("ws_resp")
+            .unwrap()
+            .status = crate::state::WorkspaceStatus::Running;
+
+        // Run the old reader's tail-end cleanup with an empty reader (immediate
+        // EOF). The cleanup must NOT remove the new handle.
+        let empty: &[u8] = &[];
+        process_reader_events_with_cancel(
+            Box::new(empty),
+            state.clone(),
+            "ws_resp",
+            old_cancel,
+            &|_| {},
+        );
+
+        let s = state.lock().unwrap();
+        assert!(
+            s.agents.contains_key("ws_resp"),
+            "old reader cleanup must not remove the freshly-respawned handle"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&s.agents.get("ws_resp").unwrap().cancel, &new_cancel),
+            "the surviving handle must be the new one, not a leftover from the old reader"
+        );
+        assert_eq!(
+            s.workspaces.get("ws_resp").unwrap().status,
+            crate::state::WorkspaceStatus::Running,
+            "the new spawn's Running status must not be reset to Waiting by the old reader"
+        );
+        // sanity: cancel state untouched
+        assert!(!new_cancel.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn reader_cleanup_removes_handle_when_still_ours() {
+        // The "process died on its own" path: same cancel Arc still owns the
+        // handle in state, so cleanup proceeds (drop handle, flip workspace
+        // to Waiting). This guards against accidentally widening the ptr_eq
+        // check into a no-op for the EOF case.
+        use tokio::sync::mpsc;
+        let state = make_state();
+        write_workspace(&state, "ws_eof", "repo_eof", PathBuf::from("/tmp/ws_eof"));
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state.lock().unwrap().agents.insert(
+            "ws_eof".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_eof".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(8).0,
+                cancel: cancel.clone(),
+            },
+        );
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .get_mut("ws_eof")
+            .unwrap()
+            .status = crate::state::WorkspaceStatus::Running;
+
+        let empty: &[u8] = &[];
+        process_reader_events_with_cancel(
+            Box::new(empty),
+            state.clone(),
+            "ws_eof",
+            cancel,
+            &|_| {},
+        );
+
+        let s = state.lock().unwrap();
+        assert!(
+            !s.agents.contains_key("ws_eof"),
+            "EOF cleanup must drop the owning handle"
+        );
+        assert_eq!(
+            s.workspaces.get("ws_eof").unwrap().status,
             crate::state::WorkspaceStatus::Waiting
         );
     }

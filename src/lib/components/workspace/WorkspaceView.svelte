@@ -88,12 +88,18 @@
       // continues seamlessly — same UX as Claude/ChatGPT web.
       const current = messages.statusFor(workspace.id) ?? workspace.status;
       if (current === 'stopped' || current === 'not_started') {
-        if (!channel) {
-          channel = agentChannel();
-          channel.onmessage = (ev: AgentEvent) => {
-            messages.apply(ev, workspace.id);
-          };
+        // Detach the previous channel and use a fresh one. The old reader
+        // thread on the backend can still emit a trailing Status::Stopped
+        // through its broadcaster after respawn; routing it to a dead
+        // channel keeps the new agent's status from flapping back to
+        // "stopped" the moment we set it to "running".
+        if (channel) {
+          channel.onmessage = () => {};
         }
+        channel = agentChannel();
+        channel.onmessage = (ev: AgentEvent) => {
+          messages.apply(ev, workspace.id);
+        };
         await api.agent.spawn(workspace.id, channel);
       }
       await api.agent.send(workspace.id, text);
