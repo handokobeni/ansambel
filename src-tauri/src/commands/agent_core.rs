@@ -1,22 +1,46 @@
 use crate::commands::agent_stream::parse_line;
 use crate::commands::helpers::now_unix;
-use crate::error::AppResult;
-use crate::platform::pty::{spawn as pty_spawn, PtySession};
+use crate::error::{AppError, AppResult};
 use crate::state::{AgentEvent, AgentHandle, AppState, WorkspaceStatus};
-use portable_pty::CommandBuilder;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+
+/// Owns the Claude agent child process and its stdout pipe.
+///
+/// Claude's `--print --input-format stream-json` mode refuses TTY stdin and
+/// requires plain pipes (the CLI prints
+/// `Error: Input must be provided either through stdin or as a prompt argument`
+/// when run under a PTY). We spawn via `std::process::Command` with
+/// `Stdio::piped()` so the CLI accepts NDJSON on stdin.
+pub struct AgentProcess {
+    child: Child,
+    stdout: Option<ChildStdout>,
+}
+
+impl AgentProcess {
+    pub fn reader(&mut self) -> AppResult<Box<dyn std::io::Read + Send>> {
+        let stdout = self.stdout.take().ok_or_else(|| AppError::Command {
+            cmd: "spawn_agent".into(),
+            msg: "stdout already taken".into(),
+        })?;
+        Ok(Box::new(stdout))
+    }
+
+    pub fn try_wait(&mut self) -> AppResult<()> {
+        let _ = self.child.try_wait();
+        Ok(())
+    }
+}
 
 pub fn spawn_agent_inner(
     state: Arc<Mutex<AppState>>,
     data_dir: &Path,
     workspace_id: &str,
     claude_path: Option<PathBuf>,
-) -> AppResult<PtySession> {
-    use crate::error::AppError;
-
+) -> AppResult<AgentProcess> {
     let (worktree_dir, repo_id) = {
         let s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
         let ws = s
@@ -43,7 +67,7 @@ pub fn spawn_agent_inner(
             msg: "claude binary not found".into(),
         })?;
 
-    let mut cmd = CommandBuilder::new(&claude);
+    let mut cmd = Command::new(&claude);
     cmd.args([
         "-p",
         "--input-format",
@@ -56,17 +80,47 @@ pub fn spawn_agent_inner(
         "--disallowedTools",
         "EnterWorktree,ExitWorktree",
     ]);
-    cmd.cwd(&worktree_dir);
+    cmd.current_dir(&worktree_dir);
 
     let prefix = build_system_prompt_prefix(data_dir, &repo_id);
     if !prefix.is_empty() {
         cmd.args(["--append-system-prompt", &prefix]);
     }
 
-    let session = pty_spawn(cmd)?;
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| AppError::Command {
+        cmd: "spawn_agent".into(),
+        msg: format!("spawn claude: {e}"),
+    })?;
+
+    let stdin_pipe = child.stdin.take().ok_or_else(|| AppError::Command {
+        cmd: "spawn_agent".into(),
+        msg: "child stdin not piped".into(),
+    })?;
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    // Drain stderr to tracing so the CLI's complaints land in the logs instead
+    // of being silently buffered until the pipe fills and the child blocks.
+    if let Some(stderr) = stderr_pipe {
+        let stderr_workspace_id = workspace_id.to_string();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                tracing::warn!(
+                    workspace_id = %stderr_workspace_id,
+                    line = %line,
+                    "agent stderr"
+                );
+            }
+        });
+    }
 
     let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<String>();
-    let mut writer = session.writer()?;
+    let mut writer = stdin_pipe;
     let writer_workspace_id = workspace_id.to_string();
     std::thread::spawn(move || {
         use std::io::Write;
@@ -102,7 +156,10 @@ pub fn spawn_agent_inner(
         );
     } // lock dropped here
 
-    Ok(session)
+    Ok(AgentProcess {
+        child,
+        stdout: stdout_pipe,
+    })
 }
 
 pub fn build_system_prompt_prefix(data_dir: &Path, repo_id: &str) -> String {

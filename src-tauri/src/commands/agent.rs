@@ -3,7 +3,7 @@
 // tests.  All business logic lives in `agent_core.rs` (fully covered).
 pub use crate::commands::agent_core::{
     build_system_prompt_prefix, process_reader_events, send_message_inner,
-    send_message_inner_with_persist, spawn_agent_inner, stop_agent_inner,
+    send_message_inner_with_persist, spawn_agent_inner, stop_agent_inner, AgentProcess,
 };
 
 use crate::state::{AgentEvent, AgentStatus, AppState};
@@ -58,7 +58,7 @@ pub async fn stop_agent(
 }
 
 fn spawn_reader_thread(
-    mut session: crate::platform::pty::PtySession,
+    mut process: AgentProcess,
     on_event: Channel<AgentEvent>,
     state: Arc<Mutex<AppState>>,
     workspace_id: String,
@@ -67,7 +67,7 @@ fn spawn_reader_thread(
         status: AgentStatus::Running,
     });
     std::thread::spawn(move || {
-        let reader = match session.reader() {
+        let reader = match process.reader() {
             Ok(r) => r,
             Err(e) => {
                 let _ = on_event.send(AgentEvent::Error {
@@ -79,7 +79,7 @@ fn spawn_reader_thread(
         process_reader_events(reader, state, &workspace_id, &|ev: AgentEvent| {
             let _ = on_event.send(ev);
         });
-        let _ = session.try_wait();
+        let _ = process.try_wait();
         let _ = on_event.send(AgentEvent::Status {
             status: AgentStatus::Stopped,
         });
