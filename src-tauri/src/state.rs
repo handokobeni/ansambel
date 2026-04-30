@@ -80,6 +80,12 @@ pub struct AgentHandle {
     /// message bursts; slow consumers drop oldest with `Lagged`, which
     /// is acceptable for a UI that re-renders on the next message.
     pub event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
+    /// Cancel signal for the reader thread. `stop_agent` flips this to
+    /// `true` before dropping the handle so the reader exits its loop
+    /// even if EOF on stdout is slow to arrive (e.g. hung CLI child).
+    /// Defense-in-depth — the dropped stdin_tx still closes the child's
+    /// stdin which usually forces EOF.
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Default, Debug)]
@@ -630,9 +636,11 @@ mod tests {
             stdin_tx: tx,
             session_id: None,
             event_tx,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         assert_eq!(h.workspace_id, "ws_xyz");
         assert!(h.session_id.is_none());
+        assert!(!h.cancel.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[test]

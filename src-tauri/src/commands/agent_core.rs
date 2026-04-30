@@ -114,6 +114,7 @@ pub fn spawn_agent_inner(
     // with `Lagged`, which is acceptable for a UI that re-renders on the
     // next message.
     let (event_tx, _) = tokio::sync::broadcast::channel::<AgentEvent>(256);
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Forward stderr to both `tracing::warn` (logs) and the broadcaster
     // (chat error banner). When Claude's CLI complains about auth, quota,
@@ -169,6 +170,7 @@ pub fn spawn_agent_inner(
                 stdin_tx,
                 session_id: None,
                 event_tx,
+                cancel,
             },
         );
     } // lock dropped here
@@ -203,20 +205,26 @@ pub fn build_system_prompt_prefix(data_dir: &Path, repo_id: &str) -> String {
 
 /// Inner reader loop extracted for testability — does not require a Tauri Channel.
 /// Reads NDJSON lines from `reader`, parses each into `AgentEvent`s, and calls
-/// `send_event` for every event. On EOF, resets workspace status to `Waiting`
-/// and removes the agent handle from state.
-pub fn process_reader_events<F>(
+/// `send_event` for every event. On EOF (or cancel), resets workspace status
+/// to `Waiting` and removes the agent handle from state.
+///
+/// `cancel` is checked between reads. `stop_agent` flips it to `true` before
+/// dropping the handle so the loop exits even if the child stdout doesn't
+/// EOF promptly (defense-in-depth — closing stdin usually forces EOF).
+pub fn process_reader_events_with_cancel<F>(
     reader: Box<dyn std::io::Read + Send>,
     state: Arc<Mutex<AppState>>,
     workspace_id: &str,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     send_event: &F,
 ) where
     F: Fn(AgentEvent),
 {
+    use std::sync::atomic::Ordering;
     let mut br = BufReader::new(reader);
     let mut line = String::new();
     let mut parser = StreamParser::new();
-    loop {
+    while !cancel.load(Ordering::Relaxed) {
         line.clear();
         match br.read_line(&mut line) {
             Ok(0) => {
@@ -261,13 +269,31 @@ pub fn process_reader_events<F>(
             }
         }
     }
-    // EOF cleanup — reset workspace status and drop the agent handle.
+    if cancel.load(Ordering::Relaxed) {
+        tracing::info!(workspace_id, "agent reader: cancelled");
+    }
+    // EOF / cancel cleanup — reset workspace status and drop the agent handle.
     if let Ok(mut s) = state.lock() {
         if let Some(ws) = s.workspaces.get_mut(workspace_id) {
             ws.status = WorkspaceStatus::Waiting;
         }
         s.agents.remove(workspace_id);
     }
+}
+
+/// Backwards-compatible thin wrapper for tests and callers that don't need
+/// cancellation. Equivalent to `process_reader_events_with_cancel` with a
+/// never-fired cancel token.
+pub fn process_reader_events<F>(
+    reader: Box<dyn std::io::Read + Send>,
+    state: Arc<Mutex<AppState>>,
+    workspace_id: &str,
+    send_event: &F,
+) where
+    F: Fn(AgentEvent),
+{
+    let never = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    process_reader_events_with_cancel(reader, state, workspace_id, never, send_event)
 }
 
 pub fn send_message_inner(
@@ -376,7 +402,16 @@ pub fn event_to_persisted_message(
 pub fn stop_agent_inner(state: Arc<Mutex<AppState>>, workspace_id: &str) -> AppResult<()> {
     use crate::error::AppError;
     let mut s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
-    // Remove handle — drops stdin_tx sender, which closes the PTY writer thread.
+    // Flip the cancel token *before* removing the handle so the reader
+    // thread observes it on its next read_line check and exits cleanly,
+    // even if the child stdout doesn't EOF promptly.
+    if let Some(handle) = s.agents.get(workspace_id) {
+        handle
+            .cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    // Remove handle — drops stdin_tx sender, which closes the child's
+    // stdin and (usually) forces EOF on stdout.
     s.agents.remove(workspace_id);
     if let Some(ws) = s.workspaces.get_mut(workspace_id) {
         ws.status = WorkspaceStatus::Waiting;
@@ -503,6 +538,7 @@ mod tests {
                 stdin_tx: tx,
                 session_id: None,
                 event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         let result = spawn_agent_inner(state, tmp.path(), "ws_a", None);
@@ -598,6 +634,7 @@ mod tests {
                 stdin_tx: tx,
                 session_id: None,
                 event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         send_message_inner(state, "ws_send_a", "Hello!").unwrap();
@@ -625,6 +662,7 @@ mod tests {
                 stdin_tx: tx,
                 session_id: Some("ses_authoritative".into()),
                 event_tx: tokio::sync::broadcast::channel::<AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         send_message_inner(state, "ws_session", "hi").unwrap();
@@ -655,6 +693,7 @@ mod tests {
                 stdin_tx: tx,
                 session_id: None,
                 event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         let writer = MessageWriter::new(std::time::Duration::from_millis(50));
@@ -697,6 +736,7 @@ mod tests {
                 stdin_tx: tx,
                 session_id: None,
                 event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         let writer = MessageWriter::new(std::time::Duration::from_millis(50));
@@ -728,6 +768,7 @@ mod tests {
                 stdin_tx: tx,
                 session_id: None,
                 event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         stop_agent_inner(state.clone(), "ws_stop_a").unwrap();
@@ -750,6 +791,7 @@ mod tests {
                 stdin_tx: tx,
                 session_id: None,
                 event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         stop_agent_inner(state.clone(), "ws_stop_b").unwrap();
@@ -780,6 +822,7 @@ mod tests {
                 stdin_tx: tx,
                 session_id: None,
                 event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         stop_agent_inner(state.clone(), "ws_stop_c").unwrap();
@@ -852,6 +895,7 @@ mod tests {
                 stdin_tx: tx,
                 session_id: None,
                 event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         let reader: Box<dyn std::io::Read + Send> = Box::new(Cursor::new(b"".to_vec()));
@@ -877,6 +921,7 @@ mod tests {
                 stdin_tx: tx,
                 session_id: None,
                 event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         process_reader_events(reader, state.clone(), "ws_reader_a", &|ev| {
@@ -1012,6 +1057,7 @@ mod tests {
                 stdin_tx: tx,
                 session_id: None,
                 event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         let result = send_message_inner(state, "ws_closed", "hello");
@@ -1099,6 +1145,7 @@ mod tests {
                 stdin_tx: tx,
                 session_id: None,
                 event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         let echo_path = if cfg!(windows) {
@@ -1216,6 +1263,7 @@ mod tests {
                 stdin_tx: tx,
                 session_id: None,
                 event_tx,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         let result = reattach_agent_inner(state, "ws_re");
@@ -1235,6 +1283,7 @@ mod tests {
                 stdin_tx: tx,
                 session_id: None,
                 event_tx: event_tx_for_handle,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         let mut sub = reattach_agent_inner(state, "ws_sub").unwrap();
@@ -1279,5 +1328,110 @@ mod tests {
             AgentEvent::Error { message } => assert_eq!(message, "CLI: "),
             _ => panic!("expected Error event"),
         }
+    }
+
+    #[test]
+    fn process_reader_events_exits_when_cancel_token_set() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        // Reader that yields a short init line on every read with a
+        // 10 ms sleep, capped at 100 reads. The cancel must cut the
+        // loop short well before the cap so we observe < cap events.
+        struct CountingReader {
+            count: Arc<AtomicUsize>,
+            cap: usize,
+        }
+        impl std::io::Read for CountingReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                let n = self.count.fetch_add(1, Ordering::Relaxed);
+                if n >= self.cap {
+                    return Ok(0);
+                }
+                let line = b"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\",\"model\":\"m\"}\n";
+                let len = line.len().min(buf.len());
+                buf[..len].copy_from_slice(&line[..len]);
+                Ok(len)
+            }
+        }
+
+        let cap = 200usize; // Without cancel, the test would take ~2s.
+        let read_count = Arc::new(AtomicUsize::new(0));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let state = make_state();
+        write_workspace(
+            &state,
+            "ws_cx",
+            "repo_x",
+            std::path::PathBuf::from("/tmp/x"),
+        );
+        let cancel_for_thread = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            cancel_for_thread.store(true, Ordering::Relaxed);
+        });
+
+        let event_count = Arc::new(AtomicUsize::new(0));
+        let event_count_for_cb = event_count.clone();
+        let start = std::time::Instant::now();
+        process_reader_events_with_cancel(
+            Box::new(CountingReader {
+                count: read_count.clone(),
+                cap,
+            }),
+            state.clone(),
+            "ws_cx",
+            cancel.clone(),
+            &|_| {
+                event_count_for_cb.fetch_add(1, Ordering::Relaxed);
+            },
+        );
+
+        // The loop must exit well before the natural EOF. With a 10 ms
+        // per-read latency, ~5 reads should land inside the 50 ms cancel
+        // window — generously cap the upper bound at half the reader cap.
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "cancel did not abort reader: elapsed={:?}",
+            start.elapsed()
+        );
+        assert!(cancel.load(Ordering::Relaxed));
+        let observed = event_count.load(Ordering::Relaxed);
+        assert!(
+            observed < cap,
+            "cancel must cut loop short: observed {observed} events out of cap {cap}"
+        );
+        // EOF/cancel cleanup must still run — workspace flips to Waiting.
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.workspaces.get("ws_cx").unwrap().status,
+            crate::state::WorkspaceStatus::Waiting
+        );
+    }
+
+    #[test]
+    fn stop_agent_inner_flips_cancel_token() {
+        use std::sync::atomic::Ordering;
+        use tokio::sync::mpsc;
+        let state = make_state();
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state.lock().unwrap().agents.insert(
+            "ws_cancel".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_cancel".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: cancel.clone(),
+            },
+        );
+        assert!(!cancel.load(Ordering::Relaxed));
+        stop_agent_inner(state, "ws_cancel").unwrap();
+        assert!(
+            cancel.load(Ordering::Relaxed),
+            "stop_agent must flip the cancel token before dropping the handle"
+        );
     }
 }

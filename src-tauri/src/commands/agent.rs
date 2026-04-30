@@ -3,8 +3,9 @@
 // tests.  All business logic lives in `agent_core.rs` (fully covered).
 pub use crate::commands::agent_core::{
     build_system_prompt_prefix, event_to_persisted_message, process_reader_events,
-    reattach_agent_inner, send_message_inner, send_message_inner_with_persist, spawn_agent_inner,
-    stderr_line_to_event, stop_agent_inner, AgentProcess,
+    process_reader_events_with_cancel, reattach_agent_inner, send_message_inner,
+    send_message_inner_with_persist, spawn_agent_inner, stderr_line_to_event, stop_agent_inner,
+    AgentProcess,
 };
 
 use crate::persistence::message_writer::MessageWriter;
@@ -131,12 +132,16 @@ fn spawn_reader_thread(
     workspace_id: String,
     data_dir: PathBuf,
 ) {
-    let event_tx = match state.lock() {
-        Ok(s) => s
-            .agents
-            .get(&workspace_id)
-            .map(|h| h.event_tx.clone())
-            .expect("agent handle present immediately after spawn"),
+    let (event_tx, cancel) = match state.lock() {
+        Ok(s) => match s.agents.get(&workspace_id) {
+            Some(h) => (h.event_tx.clone(), h.cancel.clone()),
+            None => {
+                let _ = initial_subscriber.send(AgentEvent::Error {
+                    message: "agent handle missing immediately after spawn".into(),
+                });
+                return;
+            }
+        },
         Err(e) => {
             let _ = initial_subscriber.send(AgentEvent::Error {
                 message: format!("state lock: {e}"),
@@ -159,22 +164,28 @@ fn spawn_reader_thread(
                 return;
             }
         };
-        process_reader_events(reader, state, &workspace_id, &|ev: AgentEvent| {
-            // Persist assistant + tool events through the debounced writer
-            // so a tool-heavy turn (5+ tool_use + tool_result + assistant
-            // text) collapses into a single disk write per ~500 ms window.
-            // User messages take the same path via send_message_inner.
-            if let Some(msg) = event_to_persisted_message(&ev, &workspace_id) {
-                if let Err(e) = message_writer.queue(&data_dir, &workspace_id, msg) {
-                    tracing::warn!(
-                        workspace_id = %workspace_id,
-                        error = %e,
-                        "agent reader: queue failed"
-                    );
+        process_reader_events_with_cancel(
+            reader,
+            state,
+            &workspace_id,
+            cancel,
+            &|ev: AgentEvent| {
+                // Persist assistant + tool events through the debounced writer
+                // so a tool-heavy turn (5+ tool_use + tool_result + assistant
+                // text) collapses into a single disk write per ~500 ms window.
+                // User messages take the same path via send_message_inner.
+                if let Some(msg) = event_to_persisted_message(&ev, &workspace_id) {
+                    if let Err(e) = message_writer.queue(&data_dir, &workspace_id, msg) {
+                        tracing::warn!(
+                            workspace_id = %workspace_id,
+                            error = %e,
+                            "agent reader: queue failed"
+                        );
+                    }
                 }
-            }
-            let _ = event_tx_reader.send(ev);
-        });
+                let _ = event_tx_reader.send(ev);
+            },
+        );
         let _ = process.try_wait();
         let _ = event_tx_reader.send(AgentEvent::Status {
             status: AgentStatus::Stopped,
