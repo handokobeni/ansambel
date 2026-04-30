@@ -151,6 +151,27 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    Image,
+}
+
+/// File attached to a chat message. Stored alongside the Message in
+/// messages.json. Files are copied into `<data_dir>/attachments/<ws>/<msg>/`
+/// on send so the chat is self-contained even after the user moves or
+/// deletes the original.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Attachment {
+    pub kind: AttachmentKind,
+    /// MIME type, e.g. "image/png". Pinned by the picker's filter list.
+    pub media_type: String,
+    /// Canonical path of the copied file under the app data dir.
+    pub path: String,
+    /// Original basename, kept for display purposes only.
+    pub filename: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Message {
     pub id: String,
@@ -161,6 +182,10 @@ pub struct Message {
     pub tool_use: Option<ToolUse>,
     pub tool_result: Option<ToolResult>,
     pub created_at: i64,
+    /// Attached files (currently images only). Defaulted on deserialise so
+    /// pre-attachment Message records on disk still load cleanly.
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -232,6 +257,18 @@ pub enum AgentEvent {
         /// True while the thinking block is still streaming. Mirrors the
         /// Message variant so the same bubble can update in place.
         is_partial: bool,
+    },
+    /// Per-message token usage as reported by Claude in the assistant line's
+    /// `message.usage` block. Drives the live "Cooking… (Xs · ↓ Yk tokens)"
+    /// indicator above the input. `total_input` sums the three input sources
+    /// (input + cache_creation + cache_read) per the project's token rule.
+    Usage {
+        message_id: String,
+        input_tokens: u64,
+        cache_creation_input_tokens: u64,
+        cache_read_input_tokens: u64,
+        output_tokens: u64,
+        total_input: u64,
     },
 }
 
@@ -352,6 +389,26 @@ mod tests {
         assert_eq!(type_field(&v), "thinking");
         assert!(v.get("message_id").is_some());
         assert!(v.get("is_partial").is_some());
+    }
+
+    #[test]
+    fn agent_event_wire_shape_usage_is_usage() {
+        let v = to_value(AgentEvent::Usage {
+            message_id: "msg_a".into(),
+            input_tokens: 12,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 4500,
+            output_tokens: 230,
+            total_input: 4512,
+        });
+        assert_eq!(type_field(&v), "usage");
+        assert_eq!(v.get("input_tokens").and_then(|x| x.as_u64()), Some(12));
+        assert_eq!(
+            v.get("cache_read_input_tokens").and_then(|x| x.as_u64()),
+            Some(4500)
+        );
+        assert_eq!(v.get("output_tokens").and_then(|x| x.as_u64()), Some(230));
+        assert_eq!(v.get("total_input").and_then(|x| x.as_u64()), Some(4512));
     }
 
     #[test]
@@ -598,6 +655,7 @@ mod tests {
             tool_use: None,
             tool_result: None,
             created_at: 1_776_000_000,
+            attachments: Vec::new(),
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
@@ -615,6 +673,7 @@ mod tests {
             tool_use: None,
             tool_result: None,
             created_at: 0,
+            attachments: Vec::new(),
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"is_partial\":true"));
@@ -631,6 +690,7 @@ mod tests {
             tool_use: None,
             tool_result: None,
             created_at: 0,
+            attachments: Vec::new(),
         };
         let json = serde_json::to_string(&plain).unwrap();
         assert!(json.contains("\"tool_use\":null"));
@@ -651,6 +711,7 @@ mod tests {
             }),
             tool_result: None,
             created_at: 0,
+            attachments: Vec::new(),
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
@@ -672,6 +733,7 @@ mod tests {
                 is_error: false,
             }),
             created_at: 0,
+            attachments: Vec::new(),
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
@@ -689,6 +751,7 @@ mod tests {
             tool_use: None,
             tool_result: None,
             created_at: 0,
+            attachments: Vec::new(),
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"role\":\"user\""));

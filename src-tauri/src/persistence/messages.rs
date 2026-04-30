@@ -310,6 +310,7 @@ mod tests {
             tool_use: None,
             tool_result: None,
             created_at: 1_776_000_000,
+            attachments: Vec::new(),
         }
     }
 

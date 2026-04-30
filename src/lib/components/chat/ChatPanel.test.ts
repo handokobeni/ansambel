@@ -51,7 +51,7 @@ describe('ChatPanel', () => {
     expect(container.querySelector('textarea')).toBeTruthy();
   });
 
-  it('forwards send to onSend prop', async () => {
+  it('forwards send to onSend prop with empty attachments by default', async () => {
     const onSend = vi.fn();
     const { container, getByRole } = render(ChatPanel, {
       props: { workspaceId: 'ws_a', onSend },
@@ -60,7 +60,9 @@ describe('ChatPanel', () => {
     const { fireEvent } = await import('@testing-library/svelte');
     await fireEvent.input(ta, { target: { value: 'hi' } });
     await fireEvent.click(getByRole('button', { name: /send/i }));
-    expect(onSend).toHaveBeenCalledWith('hi');
+    // MessageInput now passes the (possibly empty) attachments list as a
+    // second argument so multimodal turns flow through unchanged.
+    expect(onSend).toHaveBeenCalledWith('hi', []);
   });
 
   it('disables input when status is not running and not waiting', () => {

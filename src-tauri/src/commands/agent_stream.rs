@@ -1,5 +1,5 @@
 use crate::error::{AppError, Result};
-use crate::state::{AgentEvent, MessageRole, ToolResult, ToolUse};
+use crate::state::{AgentEvent, AgentStatus, MessageRole, ToolResult, ToolUse};
 use serde_json::Value;
 
 pub fn parse_line(line: &str) -> Result<Vec<AgentEvent>> {
@@ -48,11 +48,15 @@ pub fn parse_line(line: &str) -> Result<Vec<AgentEvent>> {
         }
         "assistant" | "user" => parse_message(&v, kind),
         // "result" marks the end of a single turn in stream-json mode.
-        // The agent is still alive and ready for the next user message —
-        // emitting no status change keeps the input enabled. Real shutdown
-        // is detected by EOF on the PTY reader thread, which sets
-        // WorkspaceStatus::Waiting.
-        "result" => Ok(Vec::new()),
+        // The agent process stays alive for the next user message, so we
+        // don't kill it — but we DO transition the user-facing status from
+        // "running" (currently processing a turn) to "waiting" (idle, ready
+        // for next prompt). The TurnStatusBar above the input gates on
+        // running, so without this signal the indicator would otherwise
+        // hang forever after a turn completes.
+        "result" => Ok(vec![AgentEvent::Status {
+            status: AgentStatus::Waiting,
+        }]),
         _ => Ok(Vec::new()),
     }
 }
@@ -287,6 +291,39 @@ fn parse_message(v: &Value, kind: &str) -> Result<Vec<AgentEvent>> {
             tool_result: tr,
         });
     }
+    // Pull token usage off the assistant message when present. The CLI
+    // emits this on the final (non-streaming) `assistant` line, so a turn
+    // produces one Usage event per message — perfect for accumulating into
+    // a per-turn total in the frontend.
+    if kind == "assistant" {
+        if let Some(usage) = msg.get("usage") {
+            let input_tokens = usage
+                .get("input_tokens")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0);
+            let cache_creation_input_tokens = usage
+                .get("cache_creation_input_tokens")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0);
+            let cache_read_input_tokens = usage
+                .get("cache_read_input_tokens")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0);
+            let output_tokens = usage
+                .get("output_tokens")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(0);
+            let total_input = input_tokens + cache_creation_input_tokens + cache_read_input_tokens;
+            events.push(AgentEvent::Usage {
+                message_id: id.clone(),
+                input_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                output_tokens,
+                total_input,
+            });
+        }
+    }
     Ok(events)
 }
 
@@ -328,6 +365,80 @@ mod tests {
             }
             other => panic!("expected Message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_assistant_usage_into_usage_event_with_summed_total_input() {
+        // Real Claude CLI line includes message.usage. The frontend turn-
+        // status indicator depends on this — without the Usage event the
+        // "↓ Yk tokens" never updates.
+        let line = r#"{"type":"assistant","message":{"id":"msg_u1","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":12,"cache_creation_input_tokens":50,"cache_read_input_tokens":4500,"output_tokens":230}}}"#;
+        let evs = parse_line(line).unwrap();
+        // First the Message, then the Usage.
+        assert!(evs.iter().any(|e| matches!(e, AgentEvent::Message { .. })));
+        let usage = evs
+            .iter()
+            .find(|e| matches!(e, AgentEvent::Usage { .. }))
+            .expect("expected a Usage event after the Message");
+        match usage {
+            AgentEvent::Usage {
+                message_id,
+                input_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                output_tokens,
+                total_input,
+            } => {
+                assert_eq!(message_id, "msg_u1");
+                assert_eq!(*input_tokens, 12);
+                assert_eq!(*cache_creation_input_tokens, 50);
+                assert_eq!(*cache_read_input_tokens, 4500);
+                assert_eq!(*output_tokens, 230);
+                // total_input = input + cache_creation + cache_read per the
+                // project rule. Cache reads count against context just as
+                // much as fresh input does.
+                assert_eq!(*total_input, 12 + 50 + 4500);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn assistant_without_usage_emits_no_usage_event() {
+        // Older or mock CLIs may omit the usage block entirely. The parser
+        // must still succeed and just not emit Usage.
+        let line = r#"{"type":"assistant","message":{"id":"msg_u2","role":"assistant","content":[{"type":"text","text":"hi"}]}}"#;
+        let evs = parse_line(line).unwrap();
+        assert!(!evs.iter().any(|e| matches!(e, AgentEvent::Usage { .. })));
+    }
+
+    #[test]
+    fn assistant_usage_with_missing_fields_defaults_to_zero() {
+        // Defensive — partial usage shapes shouldn't panic. Absent counts
+        // are treated as zero so downstream sums stay safe.
+        let line = r#"{"type":"assistant","message":{"id":"msg_u3","role":"assistant","content":[{"type":"text","text":"x"}],"usage":{"output_tokens":5}}}"#;
+        let evs = parse_line(line).unwrap();
+        let usage = evs
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::Usage {
+                    input_tokens,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens,
+                    output_tokens,
+                    total_input,
+                    ..
+                } => Some((
+                    *input_tokens,
+                    *cache_creation_input_tokens,
+                    *cache_read_input_tokens,
+                    *output_tokens,
+                    *total_input,
+                )),
+                _ => None,
+            })
+            .expect("expected Usage even when fields are missing");
+        assert_eq!(usage, (0, 0, 0, 5, 0));
     }
 
     #[test]
@@ -570,14 +681,19 @@ mod tests {
     }
 
     #[test]
-    fn parses_result_as_noop_in_stream_json() {
-        // In stream-json mode the "result" event marks the end of a turn,
-        // not the agent shutting down. The agent stays alive for the next
-        // user message; real shutdown is signalled by EOF on the reader.
+    fn parses_result_into_status_waiting_in_stream_json() {
+        // The "result" event marks end-of-turn. The agent process stays
+        // alive (real shutdown is signalled by EOF on the reader), but the
+        // user-facing status must drop back to Waiting so the live turn
+        // indicator stops counting up.
         let line =
             r#"{"type":"result","subtype":"success","total_cost_usd":0.001,"is_error":false}"#;
         let evs = parse_line(line).unwrap();
-        assert!(evs.is_empty());
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            AgentEvent::Status { status } => assert_eq!(*status, AgentStatus::Waiting),
+            other => panic!("expected Status::Waiting, got {other:?}"),
+        }
     }
 
     #[test]

@@ -35,6 +35,18 @@
     });
 
     await repos.load();
+    // Cold-start auto-select: selectedRepoId is in-memory only, so on every
+    // restart it lands as null. Without this fallback the kanban renders
+    // "Add a repo to start" even when tasks.json/workspaces.json on disk
+    // have content — the user has to re-Add the repo to repopulate the
+    // board. Pick the first repo when nothing is selected and the list is
+    // non-empty; the existing if-block then hydrates tasks + workspaces.
+    if (!repos.selectedRepoId) {
+      const firstRepoId = repos.repos.keys().next().value;
+      if (firstRepoId) {
+        repos.select(firstRepoId);
+      }
+    }
     if (repos.selectedRepoId) {
       await Promise.all([
         workspaces.loadForRepo(repos.selectedRepoId),

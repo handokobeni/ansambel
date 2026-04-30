@@ -332,4 +332,110 @@ describe('MessagesStore', () => {
       expect(messages.listForWorkspace('ws_h4')).toEqual([]);
     });
   });
+
+  describe('turn state', () => {
+    it('starts a turn on status:running and clears it on status:waiting', () => {
+      const before = Date.now();
+      messages.apply({ type: 'status', status: 'running' }, 'ws_t');
+      const turn = messages.turnFor('ws_t');
+      expect(turn).not.toBeNull();
+      expect(turn!.startedAt).toBeGreaterThanOrEqual(before);
+      expect(turn!.inputTokens).toBe(0);
+      expect(turn!.outputTokens).toBe(0);
+
+      messages.apply({ type: 'status', status: 'waiting' }, 'ws_t');
+      expect(messages.turnFor('ws_t')).toBeNull();
+    });
+
+    it('clears turn state on status:stopped and status:error too', () => {
+      messages.apply({ type: 'status', status: 'running' }, 'ws_t1');
+      messages.apply({ type: 'status', status: 'stopped' }, 'ws_t1');
+      expect(messages.turnFor('ws_t1')).toBeNull();
+
+      messages.apply({ type: 'status', status: 'running' }, 'ws_t2');
+      messages.apply({ type: 'status', status: 'error' }, 'ws_t2');
+      expect(messages.turnFor('ws_t2')).toBeNull();
+    });
+
+    it('accumulates Usage events into the active turn', () => {
+      messages.apply({ type: 'status', status: 'running' }, 'ws_u');
+      messages.apply(
+        {
+          type: 'usage',
+          message_id: 'msg_a',
+          input_tokens: 12,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 4500,
+          output_tokens: 100,
+          total_input: 4512,
+        },
+        'ws_u'
+      );
+      messages.apply(
+        {
+          type: 'usage',
+          message_id: 'msg_b',
+          input_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 4600,
+          output_tokens: 200,
+          total_input: 4600,
+        },
+        'ws_u'
+      );
+      const turn = messages.turnFor('ws_u');
+      expect(turn).not.toBeNull();
+      expect(turn!.inputTokens).toBe(4512 + 4600);
+      expect(turn!.outputTokens).toBe(100 + 200);
+    });
+
+    it('drops Usage events that arrive while no turn is active', () => {
+      // The CLI sometimes echoes a final usage line just after status:waiting
+      // — without a guard those numbers would leak into the next turn.
+      messages.apply(
+        {
+          type: 'usage',
+          message_id: 'msg_orphan',
+          input_tokens: 100,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          output_tokens: 50,
+          total_input: 100,
+        },
+        'ws_orphan'
+      );
+      expect(messages.turnFor('ws_orphan')).toBeNull();
+    });
+
+    it('reset() clears turn state too so workspace switches start fresh', () => {
+      messages.apply({ type: 'status', status: 'running' }, 'ws_r');
+      messages.reset();
+      expect(messages.turnFor('ws_r')).toBeNull();
+    });
+
+    it('a second status:running starts a fresh turn (zeros tokens, advances startedAt)', async () => {
+      messages.apply({ type: 'status', status: 'running' }, 'ws_re');
+      messages.apply(
+        {
+          type: 'usage',
+          message_id: 'msg_x',
+          input_tokens: 10,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+          output_tokens: 5,
+          total_input: 10,
+        },
+        'ws_re'
+      );
+      const first = messages.turnFor('ws_re')!;
+      // Tiny delay so startedAt is observably distinct.
+      await new Promise((r) => setTimeout(r, 5));
+      messages.apply({ type: 'status', status: 'waiting' }, 'ws_re');
+      messages.apply({ type: 'status', status: 'running' }, 'ws_re');
+      const second = messages.turnFor('ws_re')!;
+      expect(second.inputTokens).toBe(0);
+      expect(second.outputTokens).toBe(0);
+      expect(second.startedAt).toBeGreaterThan(first.startedAt);
+    });
+  });
 });

@@ -3,11 +3,12 @@
   import { messages } from '$lib/stores/messages.svelte';
   import MessageBubble from './MessageBubble.svelte';
   import MessageInput from './MessageInput.svelte';
-  import type { Message } from '$lib/types';
+  import TurnStatusBar from './TurnStatusBar.svelte';
+  import type { AttachmentDraft, Message } from '$lib/types';
 
   interface Props {
     workspaceId: string;
-    onSend: (text: string) => void;
+    onSend: (text: string, attachments: AttachmentDraft[]) => void;
     /** Optional loader for older messages. Receives the id of the oldest
      * message currently in view; should return the next page in
      * chronological order (oldest first). An empty result marks the
@@ -217,5 +218,6 @@
     {/if}
   </div>
 
+  <TurnStatusBar {workspaceId} />
   <MessageInput {onSend} disabled={inputDisabled} />
 </section>

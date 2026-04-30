@@ -14,8 +14,13 @@
   let formSubmitting = $state(false);
 
   function statusDotClass(status: WorkspaceStatus): string {
-    if (status === 'running') return 'bg-amber-400';
-    if (status === 'waiting') return 'bg-[var(--status-ok)]';
+    // Green = running (agent is actively processing) matches the convention
+    // users expect ("green = active/on"). Waiting is alive-but-idle, shown
+    // amber as a softer ping. The earlier mapping (amber=running) collided
+    // with the selection highlight and made users think the green-dotted
+    // row was the selected one.
+    if (status === 'running') return 'bg-[var(--status-ok)]';
+    if (status === 'waiting') return 'bg-amber-400';
     return 'bg-[var(--text-muted)]';
   }
 
@@ -133,8 +138,12 @@
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <li
-        class="group flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-[var(--bg-hover)] transition-colors"
+        class="group flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-[var(--bg-hover)] transition-colors border-l-2"
         class:bg-[var(--bg-active)]={workspaces.selectedWorkspaceId === ws.id}
+        class:border-[var(--accent)]={workspaces.selectedWorkspaceId === ws.id}
+        class:border-transparent={workspaces.selectedWorkspaceId !== ws.id}
+        data-workspace-id={ws.id}
+        data-selected={workspaces.selectedWorkspaceId === ws.id}
         onclick={() => handleSelectWorkspace(ws.id)}
       >
         <!-- Status dot -->

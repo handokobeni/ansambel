@@ -1,5 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render } from '@testing-library/svelte';
+
+// MessageBubble uses convertFileSrc to serve local image files. The real
+// implementation requires the Tauri runtime, so stub it for tests.
+vi.mock('@tauri-apps/api/core', () => ({
+  convertFileSrc: (path: string) => `mock-asset://${path}`,
+}));
+
 import MessageBubble from './MessageBubble.svelte';
 import type { Message } from '../../types';
 
@@ -139,5 +146,114 @@ describe('MessageBubble', () => {
       },
     });
     expect(getByText(/ok output/)).toBeTruthy();
+  });
+
+  describe('attachments', () => {
+    it('renders an image thumbnail when message has an image attachment', () => {
+      const { container } = render(MessageBubble, {
+        props: {
+          message: make({
+            role: 'user',
+            text: 'look at this',
+            attachments: [
+              {
+                kind: 'image',
+                media_type: 'image/png',
+                path: '/data/attachments/ws_a/msg_a/design.png',
+                filename: 'design.png',
+              },
+            ],
+          }),
+        },
+      });
+      const img = container.querySelector(
+        '[data-testid="attachment-image"]'
+      ) as HTMLImageElement | null;
+      expect(img).toBeTruthy();
+      // convertFileSrc is stubbed to prefix paths with mock-asset://.
+      expect(img!.getAttribute('src')).toContain('mock-asset://');
+      expect(img!.getAttribute('src')).toContain('design.png');
+    });
+
+    it('uses the filename as alt text when present', () => {
+      const { container } = render(MessageBubble, {
+        props: {
+          message: make({
+            role: 'user',
+            text: '',
+            attachments: [
+              {
+                kind: 'image',
+                media_type: 'image/jpeg',
+                path: '/abs/screenshot.jpg',
+                filename: 'screenshot.jpg',
+              },
+            ],
+          }),
+        },
+      });
+      const img = container.querySelector(
+        '[data-testid="attachment-image"]'
+      ) as HTMLImageElement | null;
+      expect(img).toBeTruthy();
+      expect(img!.getAttribute('alt')).toBe('screenshot.jpg');
+    });
+
+    it('renders multiple thumbnails when multiple attachments are present', () => {
+      const { container } = render(MessageBubble, {
+        props: {
+          message: make({
+            role: 'user',
+            text: 'two pics',
+            attachments: [
+              {
+                kind: 'image',
+                media_type: 'image/png',
+                path: '/a/1.png',
+                filename: '1.png',
+              },
+              {
+                kind: 'image',
+                media_type: 'image/png',
+                path: '/a/2.png',
+                filename: '2.png',
+              },
+            ],
+          }),
+        },
+      });
+      const imgs = container.querySelectorAll('[data-testid="attachment-image"]');
+      expect(imgs.length).toBe(2);
+    });
+
+    it('does not render an attachments grid when message has no attachments', () => {
+      const { container } = render(MessageBubble, {
+        props: { message: make({ text: 'plain' }) },
+      });
+      expect(container.querySelector('[data-testid="attachment-grid"]')).toBeNull();
+    });
+
+    it('does not treat an attachment-only user message as empty', () => {
+      // Echoed multimodal turns may have `text: ""` — they should still render
+      // as a bubble because the attachment is the content.
+      const { container } = render(MessageBubble, {
+        props: {
+          message: make({
+            role: 'user',
+            text: '',
+            attachments: [
+              {
+                kind: 'image',
+                media_type: 'image/png',
+                path: '/a/x.png',
+                filename: 'x.png',
+              },
+            ],
+          }),
+        },
+      });
+      expect(container.querySelector('article')).toBeTruthy();
+      expect(container.querySelector('[data-testid="attachment-image"]')).toBeTruthy();
+    });
   });
 });

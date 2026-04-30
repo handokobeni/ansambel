@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { convertFileSrc } from '@tauri-apps/api/core';
   import type { Message } from '$lib/types';
   import { formatToolUse } from '$lib/tools/format';
 
@@ -21,11 +22,20 @@
       : (message.tool_result?.content ?? '')
   );
 
+  const attachments = $derived(message.attachments ?? []);
+  const hasAttachments = $derived(attachments.length > 0);
+
   // Defensive: an old persisted Message with empty text and no tool/result
   // (legacy parser emitted these for thinking-only turns) would otherwise
   // render as a blank rounded box. Hide it instead of letting it leak in.
+  // Attachments count as content too — a user echo with just an image must
+  // still render.
   const isEmpty = $derived(
-    !message.text && !message.tool_use && !message.tool_result && !message.is_partial
+    !message.text &&
+      !message.tool_use &&
+      !message.tool_result &&
+      !message.is_partial &&
+      !hasAttachments
   );
 </script>
 
@@ -70,6 +80,21 @@
         class="text-xs font-mono text-[var(--text-secondary)] whitespace-pre-wrap overflow-x-auto"
         data-tool-result
         class:text-[var(--error)]={message.tool_result.is_error}>{resultPreview}</pre>
+    {/if}
+
+    {#if hasAttachments}
+      <div class="flex flex-wrap gap-2" data-testid="attachment-grid">
+        {#each attachments as att, i (att.path + i)}
+          {#if att.kind === 'image'}
+            <img
+              src={convertFileSrc(att.path)}
+              alt={att.filename ?? 'attachment'}
+              data-testid="attachment-image"
+              class="max-w-[240px] max-h-[240px] rounded border border-[var(--border-light)] object-cover"
+            />
+          {/if}
+        {/each}
+      </div>
     {/if}
 
     {#if message.text}

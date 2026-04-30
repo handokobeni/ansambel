@@ -319,6 +319,20 @@ pub fn send_message_inner(
     workspace_id: &str,
     text: &str,
 ) -> AppResult<()> {
+    send_message_inner_with_attachments(state, workspace_id, text, &[])
+}
+
+/// Send a user message to the agent with optional attached image files.
+/// Each Attachment must already exist on disk at its `path`; this function
+/// reads + base64-encodes the bytes inline and pushes them as `image`
+/// content blocks BEFORE the trailing text block, matching how the
+/// Anthropic API wants multimodal turns ordered.
+pub fn send_message_inner_with_attachments(
+    state: Arc<Mutex<AppState>>,
+    workspace_id: &str,
+    text: &str,
+    attachments: &[crate::state::Attachment],
+) -> AppResult<()> {
     use crate::error::AppError;
     let s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
     let handle = s
@@ -336,12 +350,33 @@ pub fn send_message_inner(
         .session_id
         .clone()
         .unwrap_or_else(|| workspace_id.to_string());
+
+    let mut content: Vec<serde_json::Value> = Vec::with_capacity(attachments.len() + 1);
+    for att in attachments {
+        let bytes = std::fs::read(&att.path).map_err(|e| AppError::Command {
+            cmd: "send_message".into(),
+            msg: format!("read attachment {}: {e}", att.path),
+        })?;
+        let encoded = base64_encode(&bytes);
+        content.push(serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": att.media_type,
+                "data": encoded,
+            }
+        }));
+    }
+    // Text always comes last — ordering matters for Claude's multimodal
+    // attention, the prompt should reference the images preceding it.
+    content.push(serde_json::json!({ "type": "text", "text": text }));
+
     let envelope = serde_json::json!({
         "type": "user",
         "session_id": session_id,
         "message": {
             "role": "user",
-            "content": [{ "type": "text", "text": text }],
+            "content": content,
         },
         "parent_tool_use_id": serde_json::Value::Null,
     })
@@ -353,7 +388,50 @@ pub fn send_message_inner(
             cmd: "send_message".into(),
             msg: format!("stdin closed: {e}"),
         })?;
+    // Mark the turn as in-flight. The CLI streams content blocks back over
+    // many milliseconds before the `result` line arrives — Status::Running
+    // here lets the UI's TurnStatusBar appear immediately on send rather
+    // than only once the first assistant token shows up. The matching
+    // Waiting transition is emitted by the parser on `result`.
+    let _ = handle.event_tx.send(crate::state::AgentEvent::Status {
+        status: crate::state::AgentStatus::Running,
+    });
     Ok(())
+}
+
+/// Minimal base64 encoder for image bytes — keeps us off the `base64`
+/// crate which would be a fresh dependency for this single use case.
+/// Standard alphabet, padded.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut chunks = bytes.chunks_exact(3);
+    for chunk in &mut chunks {
+        let b = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | chunk[2] as u32;
+        out.push(ALPHA[((b >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHA[((b >> 12) & 0x3F) as usize] as char);
+        out.push(ALPHA[((b >> 6) & 0x3F) as usize] as char);
+        out.push(ALPHA[(b & 0x3F) as usize] as char);
+    }
+    let rem = chunks.remainder();
+    match rem.len() {
+        1 => {
+            let b = (rem[0] as u32) << 16;
+            out.push(ALPHA[((b >> 18) & 0x3F) as usize] as char);
+            out.push(ALPHA[((b >> 12) & 0x3F) as usize] as char);
+            out.push('=');
+            out.push('=');
+        }
+        2 => {
+            let b = ((rem[0] as u32) << 16) | ((rem[1] as u32) << 8);
+            out.push(ALPHA[((b >> 18) & 0x3F) as usize] as char);
+            out.push(ALPHA[((b >> 12) & 0x3F) as usize] as char);
+            out.push(ALPHA[((b >> 6) & 0x3F) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
 }
 
 /// Converts a streaming `AgentEvent` to a persistable `Message`, returning
@@ -385,6 +463,7 @@ pub fn event_to_persisted_message(
                 tool_use: None,
                 tool_result: None,
                 created_at: now,
+                attachments: Vec::new(),
             })
         }
         AgentEvent::ToolUse {
@@ -399,6 +478,7 @@ pub fn event_to_persisted_message(
             tool_use: Some(tool_use.clone()),
             tool_result: None,
             created_at: now,
+            attachments: Vec::new(),
         }),
         AgentEvent::ToolResult {
             message_id,
@@ -412,12 +492,14 @@ pub fn event_to_persisted_message(
             tool_use: None,
             tool_result: Some(tool_result.clone()),
             created_at: now,
+            attachments: Vec::new(),
         }),
         AgentEvent::Init { .. }
         | AgentEvent::Status { .. }
         | AgentEvent::Error { .. }
         | AgentEvent::Compact { .. }
-        | AgentEvent::Thinking { .. } => None,
+        | AgentEvent::Thinking { .. }
+        | AgentEvent::Usage { .. } => None,
     }
 }
 
@@ -468,13 +550,82 @@ pub fn send_message_inner_with_persist(
     workspace_id: &str,
     text: &str,
 ) -> AppResult<()> {
-    use crate::ids::message_id;
-    use crate::state::{Message, MessageRole};
+    send_message_inner_with_persist_and_attachments(
+        state,
+        message_writer,
+        data_dir,
+        workspace_id,
+        text,
+        &[],
+    )
+}
 
-    send_message_inner(state, workspace_id, text)?;
+/// Like `send_message_inner_with_persist` but also handles file attachments:
+/// each `AttachmentInput` (a path the user picked + media_type) is copied
+/// into `<data_dir>/attachments/<ws>/<msg>/` so the chat survives the user
+/// later moving or deleting the source file, then base64-encoded into the
+/// CLI envelope and stamped onto the persisted user `Message`.
+pub fn send_message_inner_with_persist_and_attachments(
+    state: Arc<Mutex<AppState>>,
+    message_writer: &crate::persistence::message_writer::MessageWriter,
+    data_dir: &Path,
+    workspace_id: &str,
+    text: &str,
+    attachments: &[crate::commands::agent::AttachmentInput],
+) -> AppResult<()> {
+    use crate::error::AppError;
+    use crate::ids::message_id;
+    use crate::state::{Attachment, AttachmentKind, Message, MessageRole};
+
+    let user_id = message_id();
+
+    // Copy each attachment into a dedicated directory for this message so
+    // the persisted `Message` references stable paths under the app data
+    // dir rather than the user's downloads folder.
+    let mut copied: Vec<Attachment> = Vec::with_capacity(attachments.len());
+    if !attachments.is_empty() {
+        let dest_dir = data_dir
+            .join("attachments")
+            .join(workspace_id)
+            .join(&user_id);
+        std::fs::create_dir_all(&dest_dir).map_err(|e| AppError::Command {
+            cmd: "send_message".into(),
+            msg: format!("create attachments dir {}: {e}", dest_dir.display()),
+        })?;
+        for input in attachments {
+            if !input.media_type.starts_with("image/") {
+                return Err(AppError::Command {
+                    cmd: "send_message".into(),
+                    msg: format!("unsupported media_type {:?}", input.media_type),
+                });
+            }
+            let source = std::path::Path::new(&input.source_path);
+            let basename = source
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+                .or_else(|| input.filename.clone())
+                .unwrap_or_else(|| format!("attachment-{}", copied.len()));
+            let dest = dest_dir.join(&basename);
+            std::fs::copy(source, &dest).map_err(|e| AppError::Command {
+                cmd: "send_message".into(),
+                msg: format!("copy attachment {}: {e}", input.source_path),
+            })?;
+            copied.push(Attachment {
+                kind: AttachmentKind::Image,
+                media_type: input.media_type.clone(),
+                path: dest.to_string_lossy().into_owned(),
+                filename: input.filename.clone().or(Some(basename)),
+            });
+        }
+    }
+
+    // Send to the CLI using the *copied* paths so a successful send proves
+    // the files are in their final home.
+    send_message_inner_with_attachments(state, workspace_id, text, &copied)?;
 
     let user_msg = Message {
-        id: message_id(),
+        id: user_id,
         workspace_id: workspace_id.into(),
         role: MessageRole::User,
         text: text.into(),
@@ -482,6 +633,7 @@ pub fn send_message_inner_with_persist(
         tool_use: None,
         tool_result: None,
         created_at: now_unix(),
+        attachments: copied,
     };
     message_writer.queue(data_dir, workspace_id, user_msg)
 }
@@ -694,6 +846,182 @@ mod tests {
     }
 
     #[test]
+    fn base64_encode_matches_known_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"hello world"), "aGVsbG8gd29ybGQ=");
+    }
+
+    #[test]
+    fn send_message_with_attachments_builds_image_blocks_before_text() {
+        use tokio::sync::mpsc;
+        let tmp = make_data_dir();
+        // Tiny "image" — content doesn't have to be valid PNG; the encoder
+        // just round-trips bytes.
+        let img_path = tmp.path().join("smol.png");
+        std::fs::write(&img_path, b"\x89PNG\x0d\x0a\x1a\x0a fake bytes").unwrap();
+
+        let state = make_state();
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_att".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_att".into(),
+                stdin_tx: tx,
+                session_id: Some("ses_x".into()),
+                event_tx: tokio::sync::broadcast::channel::<AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+
+        let attachments = [crate::state::Attachment {
+            kind: crate::state::AttachmentKind::Image,
+            media_type: "image/png".into(),
+            path: img_path.to_string_lossy().into_owned(),
+            filename: Some("smol.png".into()),
+        }];
+        send_message_inner_with_attachments(state, "ws_att", "look", &attachments).unwrap();
+
+        let received = rx.try_recv().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&received).expect("valid NDJSON");
+        let content = parsed["message"]["content"].as_array().unwrap();
+        // Image must come BEFORE the text block.
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["type"], "base64");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert!(!content[0]["source"]["data"].as_str().unwrap().is_empty());
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "look");
+    }
+
+    #[test]
+    fn send_message_with_attachments_returns_err_when_file_missing() {
+        use tokio::sync::mpsc;
+        let state = make_state();
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_missing_att".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_missing_att".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        let bogus = [crate::state::Attachment {
+            kind: crate::state::AttachmentKind::Image,
+            media_type: "image/png".into(),
+            path: "/nonexistent/foo.png".into(),
+            filename: None,
+        }];
+        let result = send_message_inner_with_attachments(state, "ws_missing_att", "x", &bogus);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("read attachment"));
+    }
+
+    #[tokio::test]
+    async fn send_message_with_persist_copies_attachment_into_data_dir() {
+        use crate::persistence::message_writer::MessageWriter;
+        use crate::persistence::messages::load_messages;
+        let tmp = make_data_dir();
+        // Source file lives outside the app data dir to mirror the real
+        // case where the user picks something from ~/Downloads.
+        let outside = TempDir::new().unwrap();
+        let src = outside.path().join("design.png");
+        std::fs::write(&src, b"\x89PNGsmol").unwrap();
+
+        let state = make_state();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_copy".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_copy".into(),
+                stdin_tx: tx,
+                session_id: Some("ses_y".into()),
+                event_tx: tokio::sync::broadcast::channel::<AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        let writer = MessageWriter::new(std::time::Duration::from_millis(20));
+        let inputs = [crate::commands::agent::AttachmentInput {
+            source_path: src.to_string_lossy().into_owned(),
+            media_type: "image/png".into(),
+            filename: Some("design.png".into()),
+        }];
+        send_message_inner_with_persist_and_attachments(
+            state,
+            &writer,
+            tmp.path(),
+            "ws_copy",
+            "see this",
+            &inputs,
+        )
+        .unwrap();
+        writer.flush_all().await;
+
+        // Source file untouched.
+        assert!(src.exists(), "source file must not be moved");
+
+        // Persisted Message references a path inside the data dir, and the
+        // file actually lives there now.
+        let on_disk = load_messages(tmp.path(), "ws_copy").unwrap();
+        assert_eq!(on_disk.len(), 1);
+        assert_eq!(on_disk[0].attachments.len(), 1);
+        let att = &on_disk[0].attachments[0];
+        assert_eq!(att.media_type, "image/png");
+        assert!(
+            att.path.starts_with(tmp.path().to_string_lossy().as_ref()),
+            "attachment path {} should live under data dir {}",
+            att.path,
+            tmp.path().display()
+        );
+        assert!(std::path::Path::new(&att.path).exists());
+    }
+
+    #[tokio::test]
+    async fn send_message_with_persist_rejects_non_image_media_types() {
+        use tokio::sync::mpsc;
+        let tmp = make_data_dir();
+        let outside = TempDir::new().unwrap();
+        let src = outside.path().join("note.txt");
+        std::fs::write(&src, b"hello").unwrap();
+
+        let state = make_state();
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_reject".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_reject".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        let writer = crate::persistence::message_writer::MessageWriter::new(
+            std::time::Duration::from_millis(20),
+        );
+        let inputs = [crate::commands::agent::AttachmentInput {
+            source_path: src.to_string_lossy().into_owned(),
+            media_type: "text/plain".into(),
+            filename: None,
+        }];
+        let result = send_message_inner_with_persist_and_attachments(
+            state,
+            &writer,
+            tmp.path(),
+            "ws_reject",
+            "x",
+            &inputs,
+        );
+        assert!(result.is_err(), "non-image media_type must be rejected");
+    }
+
+    #[test]
     fn send_message_inner_no_agent_returns_err() {
         let state = make_state();
         let result = send_message_inner(state, "ws_none", "hi");
@@ -747,6 +1075,7 @@ mod tests {
                 tool_use: None,
                 tool_result: None,
                 created_at: 0,
+                attachments: Vec::new(),
             }],
         )
         .unwrap();
@@ -987,10 +1316,17 @@ mod tests {
             events_clone.lock().unwrap().push(ev);
         });
         let evs = events.lock().unwrap();
-        // The "result" line is a no-op end-of-turn marker in stream-json mode,
-        // so only the assistant message produces an event.
-        assert_eq!(evs.len(), 1);
+        // The assistant line produces a Message; the "result" line now
+        // emits a trailing Status::Waiting so the live turn indicator can
+        // close out cleanly when the turn finishes.
+        assert_eq!(evs.len(), 2);
         assert!(matches!(&evs[0], crate::state::AgentEvent::Message { .. }));
+        match &evs[1] {
+            crate::state::AgentEvent::Status { status } => {
+                assert_eq!(*status, crate::state::AgentStatus::Waiting);
+            }
+            other => panic!("expected Status::Waiting trailer, got {other:?}"),
+        }
     }
 
     #[test]

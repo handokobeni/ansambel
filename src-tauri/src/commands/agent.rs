@@ -47,10 +47,25 @@ pub async fn spawn_agent(
     Ok(())
 }
 
+/// What the frontend sends for each attached file. The backend copies the
+/// file into the app data dir and constructs an `Attachment` record from
+/// the resulting canonical path.
+#[derive(serde::Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentInput {
+    /// Absolute path the user picked via the file dialog.
+    pub source_path: String,
+    /// MIME type — must start with `image/`.
+    pub media_type: String,
+    /// Original basename, optional. Falls back to source_path's basename.
+    pub filename: Option<String>,
+}
+
 #[tauri::command]
 pub async fn send_message(
     workspace_id: String,
     text: String,
+    attachments: Option<Vec<AttachmentInput>>,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     writer: tauri::State<'_, MessageWriter>,
     app: tauri::AppHandle,
@@ -59,12 +74,14 @@ pub async fn send_message(
         .path()
         .app_data_dir()
         .map_err(|e| format!("resolve app data dir: {e}"))?;
-    send_message_inner_with_persist(
+    let attachments = attachments.unwrap_or_default();
+    crate::commands::agent_core::send_message_inner_with_persist_and_attachments(
         state.inner().clone(),
         writer.inner(),
         &data_dir,
         &workspace_id,
         &text,
+        &attachments,
     )
     .map_err(|e| e.to_string())
 }
@@ -150,8 +167,12 @@ fn spawn_reader_thread(
         }
     };
     forward_subscriber(event_tx.subscribe(), initial_subscriber);
+    // The agent process is alive but no user prompt has landed yet — emit
+    // Waiting (idle, ready) rather than Running so the live turn indicator
+    // stays hidden until an actual turn starts. send_message bumps the
+    // status to Running when the user fires off a prompt.
     let _ = event_tx.send(AgentEvent::Status {
-        status: AgentStatus::Running,
+        status: AgentStatus::Waiting,
     });
     let event_tx_reader = event_tx.clone();
     std::thread::spawn(move || {

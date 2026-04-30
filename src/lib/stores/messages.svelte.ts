@@ -1,10 +1,16 @@
 import { SvelteMap } from 'svelte/reactivity';
-import type { AgentEvent, AgentStatus, Message } from '../types';
+import type { AgentEvent, AgentStatus, Attachment, Message, TurnState } from '../types';
 
 class MessagesStore {
   readonly byWorkspace = new SvelteMap<string, SvelteMap<string, Message>>();
   readonly status = new SvelteMap<string, AgentStatus>();
   readonly error = new SvelteMap<string, string>();
+  /// Per-workspace live-turn telemetry. Populated on status:running, cleared
+  /// on any non-running status. Drives the TurnStatusBar above the input.
+  /// Token totals accumulate across all assistant messages emitted during a
+  /// single turn so multi-step turns (text → tool → text → tool → text) show
+  /// the running total, not just the final assistant message.
+  readonly turn = new SvelteMap<string, TurnState>();
 
   private getOrCreate(wsId: string): SvelteMap<string, Message> {
     let map = this.byWorkspace.get(wsId);
@@ -40,6 +46,10 @@ class MessagesStore {
 
   errorFor(wsId: string): string | undefined {
     return this.error.get(wsId);
+  }
+
+  turnFor(wsId: string): TurnState | null {
+    return this.turn.get(wsId) ?? null;
   }
 
   apply(ev: AgentEvent, wsId: string): void {
@@ -105,10 +115,38 @@ class MessagesStore {
       }
       case 'status':
         this.status.set(wsId, ev.status);
+        if (ev.status === 'running') {
+          // Fresh turn — zero the accumulators and snapshot the start time
+          // so the indicator counts up from now, not from the previous
+          // turn's start.
+          this.turn.set(wsId, {
+            startedAt: Date.now(),
+            inputTokens: 0,
+            outputTokens: 0,
+          });
+        } else {
+          // Any non-running status (waiting / stopped / error) ends the
+          // active turn. Clearing here also stops the elapsed timer in the
+          // UI since the indicator is gated on this entry's presence.
+          this.turn.delete(wsId);
+        }
         return;
       case 'error':
         this.error.set(wsId, ev.message);
         return;
+      case 'usage': {
+        // Usage lines arrive after every assistant message. Accumulate into
+        // the active turn; ignore if no turn is active (the CLI sometimes
+        // echoes a trailing usage line after status:waiting).
+        const t = this.turn.get(wsId);
+        if (!t) return;
+        this.turn.set(wsId, {
+          startedAt: t.startedAt,
+          inputTokens: t.inputTokens + ev.total_input,
+          outputTokens: t.outputTokens + ev.output_tokens,
+        });
+        return;
+      }
       case 'thinking': {
         // Thinking blocks render as a thin "Claude is thinking…" marker so
         // the user has visibility into what the model is doing between
@@ -159,10 +197,21 @@ class MessagesStore {
     }
   }
 
+  /// Stamp attachments onto an existing Message. Used by the workspace echo
+  /// path: the AgentEvent::Message wire shape has no `attachments` field, so
+  /// when the user sends a multimodal turn the frontend has to attach the
+  /// previews itself (the eventual persisted record will carry them).
+  attachToMessage(wsId: string, messageId: string, attachments: Attachment[]): void {
+    const existing = this.byWorkspace.get(wsId)?.get(messageId);
+    if (!existing) return;
+    this.upsert({ ...existing, attachments });
+  }
+
   reset(): void {
     this.byWorkspace.clear();
     this.status.clear();
     this.error.clear();
+    this.turn.clear();
   }
 }
 
