@@ -77,6 +77,51 @@ describe('WorkspaceView', () => {
     expect(invoke).not.toHaveBeenCalledWith('spawn_agent', expect.any(Object));
   });
 
+  it('calls reattach_agent on mount when status is running', async () => {
+    render(WorkspaceView, { props: { workspace: ws({ status: 'running' }) } });
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        'reattach_agent',
+        expect.objectContaining({ workspaceId: 'ws_a' })
+      );
+    });
+  });
+
+  it('routes reattach channel events through messages.apply', async () => {
+    let captured: { onmessage?: (ev: unknown) => void } | undefined;
+    vi.mocked(invoke).mockImplementation(async (cmd, args) => {
+      if (cmd === 'reattach_agent') {
+        captured = (args as { onEvent: { onmessage?: (ev: unknown) => void } }).onEvent;
+      }
+      return undefined;
+    });
+    render(WorkspaceView, { props: { workspace: ws({ status: 'running' }) } });
+    await waitFor(() => expect(captured).toBeDefined());
+    captured?.onmessage?.({
+      type: 'message',
+      id: 'msg_live',
+      role: 'assistant',
+      text: 'live',
+      is_partial: false,
+    });
+    await waitFor(() => {
+      expect(messages.listForWorkspace('ws_a').find((m) => m.id === 'msg_live')?.text).toBe(
+        'live'
+      );
+    });
+  });
+
+  it('captures reattach rejection as error in messages store', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === 'reattach_agent') throw 'no agent for workspace ws_a';
+      return undefined;
+    });
+    render(WorkspaceView, { props: { workspace: ws({ status: 'running' }) } });
+    await waitFor(() => {
+      expect(messages.errorFor('ws_a')).toBe('no agent for workspace ws_a');
+    });
+  });
+
   it('renders ChatPanel', () => {
     const { getByLabelText } = render(WorkspaceView, {
       props: { workspace: ws() },

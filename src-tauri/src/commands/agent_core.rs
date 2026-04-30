@@ -151,12 +151,14 @@ pub fn spawn_agent_inner(
         if let Some(ws) = s.workspaces.get_mut(workspace_id) {
             ws.status = WorkspaceStatus::Running;
         }
+        let (event_tx, _) = tokio::sync::broadcast::channel::<AgentEvent>(256);
         s.agents.insert(
             workspace_id.into(),
             AgentHandle {
                 workspace_id: workspace_id.into(),
                 stdin_tx,
                 session_id: None,
+                event_tx,
             },
         );
     } // lock dropped here
@@ -362,6 +364,26 @@ pub fn stop_agent_inner(state: Arc<Mutex<AppState>>, workspace_id: &str) -> AppR
     Ok(())
 }
 
+/// Subscribes to a running agent's event broadcaster. Returns an error if no
+/// agent is registered for the workspace. Called when the user navigates back
+/// to a workspace that's still running and we need a fresh receiver to pump
+/// events to a new Tauri Channel — the original Channel handler is GC'd on
+/// component unmount, so without re-subscribing the UI would stall.
+pub fn reattach_agent_inner(
+    state: Arc<Mutex<AppState>>,
+    workspace_id: &str,
+) -> AppResult<tokio::sync::broadcast::Receiver<AgentEvent>> {
+    let s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+    let handle = s
+        .agents
+        .get(workspace_id)
+        .ok_or_else(|| AppError::Command {
+            cmd: "reattach_agent".into(),
+            msg: format!("no agent for workspace {workspace_id}"),
+        })?;
+    Ok(handle.event_tx.subscribe())
+}
+
 pub fn send_message_inner_with_persist(
     state: Arc<Mutex<AppState>>,
     data_dir: &Path,
@@ -462,6 +484,7 @@ mod tests {
                 workspace_id: "ws_a".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
             },
         );
         let result = spawn_agent_inner(state, tmp.path(), "ws_a", None);
@@ -556,6 +579,7 @@ mod tests {
                 workspace_id: "ws_send_a".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
             },
         );
         send_message_inner(state, "ws_send_a", "Hello!").unwrap();
@@ -582,6 +606,7 @@ mod tests {
                 workspace_id: "ws_session".into(),
                 stdin_tx: tx,
                 session_id: Some("ses_authoritative".into()),
+                event_tx: tokio::sync::broadcast::channel::<AgentEvent>(64).0,
             },
         );
         send_message_inner(state, "ws_session", "hi").unwrap();
@@ -610,6 +635,7 @@ mod tests {
                 workspace_id: "ws_send_b".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
             },
         );
         send_message_inner_with_persist(state, tmp.path(), "ws_send_b", "Persist me").unwrap();
@@ -647,6 +673,7 @@ mod tests {
                 workspace_id: "ws_send_c".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
             },
         );
         send_message_inner_with_persist(state, tmp.path(), "ws_send_c", "next").unwrap();
@@ -675,6 +702,7 @@ mod tests {
                 workspace_id: "ws_stop_a".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
             },
         );
         stop_agent_inner(state.clone(), "ws_stop_a").unwrap();
@@ -696,6 +724,7 @@ mod tests {
                 workspace_id: "ws_stop_b".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
             },
         );
         stop_agent_inner(state.clone(), "ws_stop_b").unwrap();
@@ -725,6 +754,7 @@ mod tests {
                 workspace_id: "ws_stop_c".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
             },
         );
         stop_agent_inner(state.clone(), "ws_stop_c").unwrap();
@@ -796,6 +826,7 @@ mod tests {
                 workspace_id: "ws_reader_eof".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
             },
         );
         let reader: Box<dyn std::io::Read + Send> = Box::new(Cursor::new(b"".to_vec()));
@@ -820,6 +851,7 @@ mod tests {
                 workspace_id: "ws_reader_a".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
             },
         );
         process_reader_events(reader, state.clone(), "ws_reader_a", &|ev| {
@@ -954,6 +986,7 @@ mod tests {
                 workspace_id: "ws_closed".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
             },
         );
         let result = send_message_inner(state, "ws_closed", "hello");
@@ -1040,6 +1073,7 @@ mod tests {
                 workspace_id: "ws_race".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
             },
         );
         let echo_path = if cfg!(windows) {
@@ -1134,5 +1168,57 @@ mod tests {
         assert!(event_to_persisted_message(&init, "ws").is_none());
         assert!(event_to_persisted_message(&status, "ws").is_none());
         assert!(event_to_persisted_message(&err, "ws").is_none());
+    }
+
+    // ── reattach_agent_inner tests ────────────────────────────────────────────
+    #[test]
+    fn reattach_agent_inner_returns_err_when_no_agent() {
+        let state = make_state();
+        let result = reattach_agent_inner(state, "ws_missing");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no agent"));
+    }
+
+    #[test]
+    fn reattach_agent_inner_returns_subscriber_when_agent_running() {
+        let state = make_state();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (event_tx, _) = tokio::sync::broadcast::channel::<AgentEvent>(64);
+        state.lock().unwrap().agents.insert(
+            "ws_re".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_re".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx,
+            },
+        );
+        let result = reattach_agent_inner(state, "ws_re");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn reattach_subscriber_receives_events_emitted_after_subscription() {
+        let state = make_state();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (event_tx, _) = tokio::sync::broadcast::channel::<AgentEvent>(64);
+        let event_tx_for_handle = event_tx.clone();
+        state.lock().unwrap().agents.insert(
+            "ws_sub".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_sub".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx: event_tx_for_handle,
+            },
+        );
+        let mut sub = reattach_agent_inner(state, "ws_sub").unwrap();
+        event_tx
+            .send(AgentEvent::Status {
+                status: crate::state::AgentStatus::Running,
+            })
+            .unwrap();
+        let received = sub.try_recv().unwrap();
+        assert!(matches!(received, AgentEvent::Status { .. }));
     }
 }

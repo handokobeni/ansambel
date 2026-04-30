@@ -18,7 +18,7 @@
   onMount(async () => {
     // Hydrate persisted history first so previous turns appear immediately
     // on workspace open. Failures here are non-fatal — we still want to
-    // spawn the agent so the user can start a fresh turn.
+    // spawn or reattach so the user can start a fresh turn.
     try {
       const history = await api.messages.list(workspace.id);
       messages.hydrate(workspace.id, history);
@@ -26,16 +26,21 @@
       messages.apply({ type: 'error', message: String(err) }, workspace.id);
     }
 
-    if (workspace.status === 'not_started' || workspace.status === 'waiting') {
-      channel = agentChannel();
-      channel.onmessage = (ev: AgentEvent) => {
-        messages.apply(ev, workspace.id);
-      };
-      try {
+    channel = agentChannel();
+    channel.onmessage = (ev: AgentEvent) => {
+      messages.apply(ev, workspace.id);
+    };
+    try {
+      if (workspace.status === 'not_started' || workspace.status === 'waiting') {
         await api.agent.spawn(workspace.id, channel);
-      } catch (err) {
-        messages.apply({ type: 'error', message: String(err) }, workspace.id);
+      } else {
+        // Status is running — the agent is alive on the backend but our
+        // Channel handler was GC'd on the previous unmount. Re-subscribe
+        // to the broadcaster so live events resume.
+        await api.agent.reattach(workspace.id, channel);
       }
+    } catch (err) {
+      messages.apply({ type: 'error', message: String(err) }, workspace.id);
     }
   });
 

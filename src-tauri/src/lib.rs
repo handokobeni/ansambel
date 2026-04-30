@@ -57,6 +57,7 @@ pub fn run() {
             crate::commands::agent::send_message,
             crate::commands::agent::stop_agent,
             crate::commands::agent::list_messages,
+            crate::commands::agent::reattach_agent,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -91,12 +92,15 @@ mod tests {
 
     #[test]
     fn all_agent_commands_are_accessible() {
-        // Compile-time check that all four command functions are pub and accessible
-        use crate::commands::agent::{list_messages, send_message, spawn_agent, stop_agent};
+        // Compile-time check that all five command functions are pub and accessible
+        use crate::commands::agent::{
+            list_messages, reattach_agent, send_message, spawn_agent, stop_agent,
+        };
         let _ = std::any::type_name_of_val(&spawn_agent);
         let _ = std::any::type_name_of_val(&send_message);
         let _ = std::any::type_name_of_val(&stop_agent);
         let _ = std::any::type_name_of_val(&list_messages);
+        let _ = std::any::type_name_of_val(&reattach_agent);
     }
 
     #[test]

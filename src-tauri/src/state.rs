@@ -73,6 +73,13 @@ pub struct AgentHandle {
     pub workspace_id: String,
     pub stdin_tx: tokio::sync::mpsc::UnboundedSender<String>,
     pub session_id: Option<String>,
+    /// Broadcast sender for agent events. The reader thread emits into
+    /// this; spawn_agent and reattach_agent both subscribe and forward
+    /// events to a Tauri Channel so the UI can re-attach when the user
+    /// switches workspaces and back. Buffer of 256 absorbs partial-
+    /// message bursts; slow consumers drop oldest with `Lagged`, which
+    /// is acceptable for a UI that re-renders on the next message.
+    pub event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
 }
 
 #[derive(Default, Debug)]
@@ -615,14 +622,29 @@ mod tests {
 
     #[test]
     fn agent_handle_has_required_fields() {
-        use tokio::sync::mpsc;
+        use tokio::sync::{broadcast, mpsc};
         let (tx, _rx) = mpsc::unbounded_channel::<String>();
+        let (event_tx, _) = broadcast::channel::<AgentEvent>(64);
         let h = AgentHandle {
             workspace_id: "ws_xyz".into(),
             stdin_tx: tx,
             session_id: None,
+            event_tx,
         };
         assert_eq!(h.workspace_id, "ws_xyz");
         assert!(h.session_id.is_none());
+    }
+
+    #[test]
+    fn agent_handle_event_broadcaster_delivers_to_multiple_subscribers() {
+        let (tx, _) = tokio::sync::broadcast::channel::<AgentEvent>(64);
+        let mut sub_a = tx.subscribe();
+        let mut sub_b = tx.subscribe();
+        tx.send(AgentEvent::Status {
+            status: AgentStatus::Running,
+        })
+        .unwrap();
+        assert!(sub_a.try_recv().is_ok());
+        assert!(sub_b.try_recv().is_ok());
     }
 }

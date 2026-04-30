@@ -64,6 +64,9 @@ export const api = {
       invoke('send_message', { workspaceId, text }),
 
     stop: (workspaceId: string): Promise<void> => invoke('stop_agent', { workspaceId }),
+
+    reattach: (workspaceId: string, onEvent: Channel<AgentEvent>): Promise<void> =>
+      invoke('reattach_agent', { workspaceId, onEvent }),
   },
 
   messages: {
