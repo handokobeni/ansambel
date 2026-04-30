@@ -19,6 +19,14 @@ export interface ShimConfig {
   initialWorkspaces?: WorkspaceInfo[];
   /** Initial tasks returned by list_tasks */
   initialTasks?: Task[];
+  /**
+   * How `send_message` mocks the assistant reply.
+   * - 'instant' (default): single complete `message` event (legacy behaviour).
+   * - 'streaming': 4 partial deltas with the same id at 30 ms intervals
+   *   followed by a final non-partial message — mirrors what the real CLI
+   *   emits when launched with `--include-partial-messages`.
+   */
+  replyProfile?: 'instant' | 'streaming';
 }
 
 /**
@@ -32,11 +40,13 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
       initialRepos,
       initialWorkspaces,
       initialTasks,
+      replyProfile,
     }: {
       dialogOpenPath?: string;
       initialRepos?: unknown[];
       initialWorkspaces?: unknown[];
       initialTasks?: unknown[];
+      replyProfile?: 'instant' | 'streaming';
     } & {
       initialWorkspaces?: Array<{
         id: string;
@@ -295,7 +305,45 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
             const text = args.text as string;
             const onEvent = state.agentChannels[wsId];
             if (!onEvent) return undefined;
-            // Fake echo reply after a tick.
+            if (replyProfile === 'streaming') {
+              // Mimic Claude CLI's `--include-partial-messages` cadence: a
+              // sequence of content_block_delta-shaped `message` events
+              // sharing one id with growing text, then a final non-partial
+              // message with the same id that closes the bubble.
+              const replyId = `msg_stream_${Date.now()}`;
+              const finalText = `Streaming reply to: ${text}`;
+              // Deterministic split points (~25%, 50%, 75%, 100%) so the
+              // assertions can poll for monotonic growth without flakiness.
+              const cuts = [0.25, 0.5, 0.75, 1].map((f) =>
+                Math.max(1, Math.floor(finalText.length * f))
+              );
+              cuts.forEach((cut, idx) => {
+                setTimeout(
+                  () =>
+                    onEvent.onmessage?.({
+                      type: 'message',
+                      id: replyId,
+                      role: 'assistant',
+                      text: finalText.slice(0, cut),
+                      is_partial: true,
+                    }),
+                  30 * (idx + 1)
+                );
+              });
+              setTimeout(
+                () =>
+                  onEvent.onmessage?.({
+                    type: 'message',
+                    id: replyId,
+                    role: 'assistant',
+                    text: finalText,
+                    is_partial: false,
+                  }),
+                30 * (cuts.length + 1)
+              );
+              return undefined;
+            }
+            // Default 'instant' profile: single complete reply.
             setTimeout(
               () =>
                 onEvent.onmessage?.({
@@ -358,6 +406,7 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
       initialRepos: config.initialRepos,
       initialWorkspaces: config.initialWorkspaces,
       initialTasks: config.initialTasks,
+      replyProfile: config.replyProfile,
     }
   );
 }
