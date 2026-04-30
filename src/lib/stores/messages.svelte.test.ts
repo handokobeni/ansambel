@@ -83,6 +83,42 @@ describe('MessagesStore', () => {
     expect(messages.errorFor('ws_a')).toBe('spawn failed');
   });
 
+  it('apply Compact event inserts a synthetic system marker into the message list', () => {
+    // Use a clearly-earlier created_at so the marker sorts after this turn.
+    messages.upsert({
+      id: 'msg_pre',
+      workspace_id: 'ws_a',
+      role: 'assistant',
+      text: 'old reply',
+      is_partial: false,
+      tool_use: null,
+      tool_result: null,
+      created_at: 100,
+    });
+    messages.apply({ type: 'compact', trigger: 'auto', pre_tokens: 45000 }, 'ws_a');
+    const list = messages.listForWorkspace('ws_a');
+    expect(list).toHaveLength(2);
+    const marker = list.find((m) => m.role === 'system');
+    expect(marker).toBeTruthy();
+    expect(marker!.text).toMatch(/compact/i);
+    // Token count rounded to k for readability.
+    expect(marker!.text).toMatch(/45k|45,000/);
+  });
+
+  it('apply Compact event without pre_tokens still produces a marker', () => {
+    messages.apply({ type: 'compact', trigger: 'manual', pre_tokens: null }, 'ws_a');
+    const list = messages.listForWorkspace('ws_a');
+    expect(list.find((m) => m.role === 'system')).toBeTruthy();
+  });
+
+  it('apply Compact emits unique ids so concurrent events do not collide', () => {
+    messages.apply({ type: 'compact', trigger: 'auto', pre_tokens: 1000 }, 'ws_a');
+    messages.apply({ type: 'compact', trigger: 'auto', pre_tokens: 2000 }, 'ws_a');
+    const markers = messages.listForWorkspace('ws_a').filter((m) => m.role === 'system');
+    expect(markers).toHaveLength(2);
+    expect(markers[0].id).not.toBe(markers[1].id);
+  });
+
   it('apply ToolUse attaches tool_use to existing message', () => {
     messages.apply(
       {

@@ -25,8 +25,11 @@ export interface ShimConfig {
    * - 'streaming': 4 partial deltas with the same id at 30 ms intervals
    *   followed by a final non-partial message — mirrors what the real CLI
    *   emits when launched with `--include-partial-messages`.
+   * - 'tools': a turn that issues a Read tool_use, a tool_result, a
+   *   compact_boundary event, and a final assistant message — exercises the
+   *   per-tool formatter and the compact marker rendering.
    */
-  replyProfile?: 'instant' | 'streaming';
+  replyProfile?: 'instant' | 'streaming' | 'tools';
 }
 
 /**
@@ -46,7 +49,7 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
       initialRepos?: unknown[];
       initialWorkspaces?: unknown[];
       initialTasks?: unknown[];
-      replyProfile?: 'instant' | 'streaming';
+      replyProfile?: 'instant' | 'streaming' | 'tools';
     } & {
       initialWorkspaces?: Array<{
         id: string;
@@ -305,6 +308,71 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
             const text = args.text as string;
             const onEvent = state.agentChannels[wsId];
             if (!onEvent) return undefined;
+            if (replyProfile === 'tools') {
+              // One full turn that hits all three tool/compact rendering paths.
+              const msgId = `msg_tools_${Date.now()}`;
+              const toolId = `toolu_${Date.now()}`;
+              setTimeout(
+                () =>
+                  onEvent.onmessage?.({
+                    type: 'tool_use',
+                    message_id: msgId,
+                    tool_use: {
+                      id: toolId,
+                      name: 'Read',
+                      input: { file_path: '/repo/src/foo.ts', offset: 1, limit: 50 },
+                    },
+                  }),
+                20
+              );
+              setTimeout(
+                () =>
+                  onEvent.onmessage?.({
+                    type: 'tool_use',
+                    message_id: `${msgId}_b`,
+                    tool_use: {
+                      id: `${toolId}_b`,
+                      name: 'Bash',
+                      input: { command: 'ls -la' },
+                    },
+                  }),
+                40
+              );
+              setTimeout(
+                () =>
+                  onEvent.onmessage?.({
+                    type: 'tool_result',
+                    message_id: `${msgId}_r`,
+                    tool_result: {
+                      tool_use_id: toolId,
+                      content: '127.0.0.1 localhost',
+                      is_error: false,
+                    },
+                  }),
+                60
+              );
+              setTimeout(
+                () =>
+                  onEvent.onmessage?.({
+                    type: 'compact',
+                    trigger: 'auto',
+                    pre_tokens: 45000,
+                  }),
+                80
+              );
+              setTimeout(
+                () =>
+                  onEvent.onmessage?.({
+                    type: 'message',
+                    id: `${msgId}_final`,
+                    role: 'assistant',
+                    text: `Tool turn reply to: ${text}`,
+                    is_partial: false,
+                  }),
+                100
+              );
+              return undefined;
+            }
             if (replyProfile === 'streaming') {
               // Mimic Claude CLI's `--include-partial-messages` cadence: a
               // sequence of content_block_delta-shaped `message` events

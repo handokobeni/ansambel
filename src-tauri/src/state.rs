@@ -202,6 +202,17 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    /// Conversation history was auto-compacted by Claude. Surfaced so the
+    /// chat can show a thin marker between turns — without this the user
+    /// loses track of why earlier context "disappeared" mid-thread.
+    Compact {
+        /// "auto" or "manual" per the CLI; passed through unchanged so the
+        /// UI can distinguish user-triggered /compact from automatic ones.
+        trigger: String,
+        /// Pre-compact token count when the CLI reports it. Optional because
+        /// the field has appeared and disappeared across CLI releases.
+        pre_tokens: Option<u64>,
+    },
 }
 
 pub fn app_version() -> &'static str {

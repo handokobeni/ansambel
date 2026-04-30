@@ -99,6 +99,30 @@ class MessagesStore {
       case 'error':
         this.error.set(wsId, ev.message);
         return;
+      case 'compact': {
+        // Render compaction as a thin system marker between turns. The
+        // marker is just a Message with role=system; the bubble component
+        // styles it as a centred notice instead of a chat bubble.
+        const tokens =
+          typeof ev.pre_tokens === 'number'
+            ? `≈${Math.round(ev.pre_tokens / 1000)}k tokens`
+            : 'auto';
+        const text = `Compacted earlier conversation (${ev.trigger}, ${tokens})`;
+        // Random suffix avoids id collisions when two compacts arrive in
+        // the same millisecond — Date.now() is too coarse on its own.
+        const id = `compact_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        this.upsert({
+          id,
+          workspace_id: wsId,
+          role: 'system',
+          text,
+          is_partial: false,
+          tool_use: null,
+          tool_result: null,
+          created_at: Date.now(),
+        });
+        return;
+      }
     }
   }
 

@@ -27,6 +27,25 @@ pub fn parse_line(line: &str) -> Result<Vec<AgentEvent>> {
                 .to_string();
             Ok(vec![AgentEvent::Init { session_id, model }])
         }
+        "system" if v.get("subtype").and_then(|s| s.as_str()) == Some("compact_boundary") => {
+            // Claude's auto-compaction marker. The compact_metadata payload
+            // carries the trigger (auto/manual) and a pre-compaction token
+            // count. Both are optional from our perspective — fall back to
+            // sensible defaults rather than failing the whole stream.
+            let meta = v.get("compact_metadata");
+            let trigger = meta
+                .and_then(|m| m.get("trigger"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("auto")
+                .to_string();
+            let pre_tokens = meta
+                .and_then(|m| m.get("pre_tokens"))
+                .and_then(|n| n.as_u64());
+            Ok(vec![AgentEvent::Compact {
+                trigger,
+                pre_tokens,
+            }])
+        }
         "assistant" | "user" => parse_message(&v, kind),
         // "result" marks the end of a single turn in stream-json mode.
         // The agent is still alive and ready for the next user message —
@@ -335,6 +354,59 @@ mod tests {
                 assert!(!tool_result.is_error);
             }
             _ => panic!("expected ToolResult"),
+        }
+    }
+
+    #[test]
+    fn parses_system_compact_boundary_with_full_metadata() {
+        let line = r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":45000}}"#;
+        let evs = parse_line(line).unwrap();
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            AgentEvent::Compact {
+                trigger,
+                pre_tokens,
+            } => {
+                assert_eq!(trigger, "auto");
+                assert_eq!(*pre_tokens, Some(45_000));
+            }
+            other => panic!("expected Compact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_system_compact_boundary_without_pre_tokens() {
+        // Older CLI variants drop pre_tokens — the parser must still emit
+        // a Compact event so the UI can flag the boundary.
+        let line = r#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"manual"}}"#;
+        let evs = parse_line(line).unwrap();
+        match &evs[0] {
+            AgentEvent::Compact {
+                trigger,
+                pre_tokens,
+            } => {
+                assert_eq!(trigger, "manual");
+                assert_eq!(*pre_tokens, None);
+            }
+            other => panic!("expected Compact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_system_compact_boundary_without_metadata_falls_back_to_auto() {
+        // Defensive: if the CLI ever ships a bare boundary marker, we still
+        // surface a useful event rather than dropping the line on the floor.
+        let line = r#"{"type":"system","subtype":"compact_boundary"}"#;
+        let evs = parse_line(line).unwrap();
+        match &evs[0] {
+            AgentEvent::Compact {
+                trigger,
+                pre_tokens,
+            } => {
+                assert_eq!(trigger, "auto");
+                assert!(pre_tokens.is_none());
+            }
+            other => panic!("expected Compact, got {other:?}"),
         }
     }
 

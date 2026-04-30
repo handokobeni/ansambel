@@ -413,7 +413,10 @@ pub fn event_to_persisted_message(
             tool_result: Some(tool_result.clone()),
             created_at: now,
         }),
-        AgentEvent::Init { .. } | AgentEvent::Status { .. } | AgentEvent::Error { .. } => None,
+        AgentEvent::Init { .. }
+        | AgentEvent::Status { .. }
+        | AgentEvent::Error { .. }
+        | AgentEvent::Compact { .. } => None,
     }
 }
 
