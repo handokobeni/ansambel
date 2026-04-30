@@ -1,16 +1,16 @@
 // src/lib/stores/workspaces.svelte.ts
 import { SvelteMap } from 'svelte/reactivity';
 import { api } from '$lib/ipc';
-import type { Workspace, CreateWorkspaceArgs } from '$lib/types';
+import type { WorkspaceInfo, CreateWorkspaceArgs } from '$lib/types';
 
 export class WorkspacesStore {
-  readonly byRepo = new SvelteMap<string, SvelteMap<string, Workspace>>();
+  readonly byRepo = new SvelteMap<string, SvelteMap<string, WorkspaceInfo>>();
   selectedWorkspaceId = $state<string | null>(null);
 
-  private getOrCreateInner(repoId: string): SvelteMap<string, Workspace> {
+  private getOrCreateInner(repoId: string): SvelteMap<string, WorkspaceInfo> {
     let inner = this.byRepo.get(repoId);
     if (!inner) {
-      inner = new SvelteMap<string, Workspace>();
+      inner = new SvelteMap<string, WorkspaceInfo>();
       this.byRepo.set(repoId, inner);
     }
     return inner;
@@ -25,7 +25,7 @@ export class WorkspacesStore {
     }
   }
 
-  async create(args: CreateWorkspaceArgs): Promise<Workspace> {
+  async create(args: CreateWorkspaceArgs): Promise<WorkspaceInfo> {
     const ws = await api.workspace.create(args);
     const inner = this.getOrCreateInner(ws.repo_id);
     inner.set(ws.id, ws);
@@ -40,7 +40,7 @@ export class WorkspacesStore {
     }
   }
 
-  listForRepo(repoId: string): Workspace[] {
+  listForRepo(repoId: string): WorkspaceInfo[] {
     const inner = this.byRepo.get(repoId);
     if (!inner) return [];
     return [...inner.values()];
@@ -50,7 +50,7 @@ export class WorkspacesStore {
     this.selectedWorkspaceId = id;
   }
 
-  getSelected(): Workspace | null {
+  getSelected(): WorkspaceInfo | null {
     if (this.selectedWorkspaceId === null) return null;
     for (const inner of this.byRepo.values()) {
       const ws = inner.get(this.selectedWorkspaceId);

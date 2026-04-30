@@ -1,22 +1,46 @@
-use crate::commands::agent_stream::parse_line;
+use crate::commands::agent_stream::StreamParser;
 use crate::commands::helpers::now_unix;
-use crate::error::AppResult;
-use crate::platform::pty::{spawn as pty_spawn, PtySession};
+use crate::error::{AppError, AppResult};
 use crate::state::{AgentEvent, AgentHandle, AppState, WorkspaceStatus};
-use portable_pty::CommandBuilder;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+
+/// Owns the Claude agent child process and its stdout pipe.
+///
+/// Claude's `--print --input-format stream-json` mode refuses TTY stdin and
+/// requires plain pipes (the CLI prints
+/// `Error: Input must be provided either through stdin or as a prompt argument`
+/// when run under a PTY). We spawn via `std::process::Command` with
+/// `Stdio::piped()` so the CLI accepts NDJSON on stdin.
+pub struct AgentProcess {
+    child: Child,
+    stdout: Option<ChildStdout>,
+}
+
+impl AgentProcess {
+    pub fn reader(&mut self) -> AppResult<Box<dyn std::io::Read + Send>> {
+        let stdout = self.stdout.take().ok_or_else(|| AppError::Command {
+            cmd: "spawn_agent".into(),
+            msg: "stdout already taken".into(),
+        })?;
+        Ok(Box::new(stdout))
+    }
+
+    pub fn try_wait(&mut self) -> AppResult<()> {
+        let _ = self.child.try_wait();
+        Ok(())
+    }
+}
 
 pub fn spawn_agent_inner(
     state: Arc<Mutex<AppState>>,
     data_dir: &Path,
     workspace_id: &str,
     claude_path: Option<PathBuf>,
-) -> AppResult<PtySession> {
-    use crate::error::AppError;
-
+) -> AppResult<AgentProcess> {
     let (worktree_dir, repo_id) = {
         let s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
         let ws = s
@@ -43,35 +67,76 @@ pub fn spawn_agent_inner(
             msg: "claude binary not found".into(),
         })?;
 
-    let mut cmd = CommandBuilder::new(&claude);
+    let mut cmd = Command::new(&claude);
     cmd.args([
         "-p",
+        "--input-format",
+        "stream-json",
         "--output-format",
         "stream-json",
         "--verbose",
+        // Surface content_block_delta events so the chat UI can render
+        // assistant text token-by-token instead of waiting for the whole
+        // turn. The trailing non-partial assistant line still arrives and
+        // overwrites the last partial via the message-id upsert.
+        "--include-partial-messages",
         "--permission-mode",
         "bypassPermissions",
         "--disallowedTools",
         "EnterWorktree,ExitWorktree",
     ]);
-    cmd.cwd(&worktree_dir);
+    cmd.current_dir(&worktree_dir);
 
     let prefix = build_system_prompt_prefix(data_dir, &repo_id);
     if !prefix.is_empty() {
         cmd.args(["--append-system-prompt", &prefix]);
     }
 
-    let session = pty_spawn(cmd)?;
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| AppError::Command {
+        cmd: "spawn_agent".into(),
+        msg: format!("spawn claude: {e}"),
+    })?;
+
+    let stdin_pipe = child.stdin.take().ok_or_else(|| AppError::Command {
+        cmd: "spawn_agent".into(),
+        msg: "child stdin not piped".into(),
+    })?;
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    // Drain stderr to tracing so the CLI's complaints land in the logs instead
+    // of being silently buffered until the pipe fills and the child blocks.
+    if let Some(stderr) = stderr_pipe {
+        let stderr_workspace_id = workspace_id.to_string();
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().map_while(Result::ok) {
+                tracing::warn!(
+                    workspace_id = %stderr_workspace_id,
+                    line = %line,
+                    "agent stderr"
+                );
+            }
+        });
+    }
 
     let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<String>();
-    let mut writer = session.writer()?;
+    let mut writer = stdin_pipe;
+    let writer_workspace_id = workspace_id.to_string();
     std::thread::spawn(move || {
         use std::io::Write;
         while let Some(line) = stdin_rx.blocking_recv() {
+            tracing::debug!(workspace_id = %writer_workspace_id, line = %line, "agent writer: stdin");
             if writeln!(writer, "{line}").is_err() || writer.flush().is_err() {
+                tracing::warn!(workspace_id = %writer_workspace_id, "agent writer: stdin write failed");
                 break;
             }
         }
+        tracing::info!(workspace_id = %writer_workspace_id, "agent writer: stdin channel closed");
     });
 
     {
@@ -96,7 +161,10 @@ pub fn spawn_agent_inner(
         );
     } // lock dropped here
 
-    Ok(session)
+    Ok(AgentProcess {
+        child,
+        stdout: stdout_pipe,
+    })
 }
 
 pub fn build_system_prompt_prefix(data_dir: &Path, repo_id: &str) -> String {
@@ -125,30 +193,45 @@ pub fn process_reader_events<F>(
 {
     let mut br = BufReader::new(reader);
     let mut line = String::new();
+    let mut parser = StreamParser::new();
     loop {
         line.clear();
         match br.read_line(&mut line) {
-            Ok(0) => break, // EOF
-            Ok(_) => match parse_line(&line) {
-                Ok(events) => {
-                    for ev in events {
-                        if let AgentEvent::Init { session_id, .. } = &ev {
-                            if let Ok(mut s) = state.lock() {
-                                if let Some(handle) = s.agents.get_mut(workspace_id) {
-                                    handle.session_id = Some(session_id.clone());
+            Ok(0) => {
+                tracing::info!(workspace_id, "agent reader: EOF");
+                break;
+            }
+            Ok(_) => {
+                tracing::debug!(workspace_id, line = %line.trim_end(), "agent reader: line");
+                match parser.parse_line(&line) {
+                    Ok(events) => {
+                        for ev in events {
+                            tracing::debug!(workspace_id, event = ?ev, "agent reader: event");
+                            if let AgentEvent::Init { session_id, .. } = &ev {
+                                if let Ok(mut s) = state.lock() {
+                                    if let Some(handle) = s.agents.get_mut(workspace_id) {
+                                        handle.session_id = Some(session_id.clone());
+                                    }
                                 }
                             }
+                            send_event(ev);
                         }
-                        send_event(ev);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            workspace_id,
+                            error = %e,
+                            line = %line.trim_end(),
+                            "agent reader: parse failed"
+                        );
+                        send_event(AgentEvent::Error {
+                            message: format!("parse: {e}"),
+                        });
                     }
                 }
-                Err(e) => {
-                    send_event(AgentEvent::Error {
-                        message: format!("parse: {e}"),
-                    });
-                }
-            },
+            }
             Err(e) => {
+                tracing::warn!(workspace_id, error = %e, "agent reader: read failed");
                 send_event(AgentEvent::Error {
                     message: format!("read: {e}"),
                 });
@@ -179,14 +262,93 @@ pub fn send_message_inner(
             cmd: "send_message".into(),
             msg: format!("no agent for workspace {workspace_id}"),
         })?;
+    // session_id is required by claude's stream-json input parser. The
+    // CLI's authoritative session_id arrives in the init event and is
+    // stored on AgentHandle; before that point we fall back to the
+    // workspace_id (any string is accepted for a fresh session).
+    let session_id = handle
+        .session_id
+        .clone()
+        .unwrap_or_else(|| workspace_id.to_string());
+    let envelope = serde_json::json!({
+        "type": "user",
+        "session_id": session_id,
+        "message": {
+            "role": "user",
+            "content": [{ "type": "text", "text": text }],
+        },
+        "parent_tool_use_id": serde_json::Value::Null,
+    })
+    .to_string();
     handle
         .stdin_tx
-        .send(text.to_string())
+        .send(envelope)
         .map_err(|e| AppError::Command {
             cmd: "send_message".into(),
             msg: format!("stdin closed: {e}"),
         })?;
     Ok(())
+}
+
+/// Converts a streaming `AgentEvent` to a persistable `Message`, returning
+/// `None` for events that should not be saved (init, status, error, partial
+/// message chunks). Tool events are persisted as separate `Tool`-role
+/// messages so the on-disk shape mirrors what the frontend store renders.
+pub fn event_to_persisted_message(
+    event: &AgentEvent,
+    workspace_id: &str,
+) -> Option<crate::state::Message> {
+    use crate::state::{Message, MessageRole};
+    let now = now_unix();
+    match event {
+        AgentEvent::Message {
+            id,
+            role,
+            text,
+            is_partial,
+        } => {
+            if *is_partial {
+                return None;
+            }
+            Some(Message {
+                id: id.clone(),
+                workspace_id: workspace_id.into(),
+                role: role.clone(),
+                text: text.clone(),
+                is_partial: false,
+                tool_use: None,
+                tool_result: None,
+                created_at: now,
+            })
+        }
+        AgentEvent::ToolUse {
+            message_id,
+            tool_use,
+        } => Some(Message {
+            id: format!("{message_id}/tool_use/{}", tool_use.id),
+            workspace_id: workspace_id.into(),
+            role: MessageRole::Tool,
+            text: String::new(),
+            is_partial: false,
+            tool_use: Some(tool_use.clone()),
+            tool_result: None,
+            created_at: now,
+        }),
+        AgentEvent::ToolResult {
+            message_id,
+            tool_result,
+        } => Some(Message {
+            id: format!("{message_id}/tool_result/{}", tool_result.tool_use_id),
+            workspace_id: workspace_id.into(),
+            role: MessageRole::Tool,
+            text: String::new(),
+            is_partial: false,
+            tool_use: None,
+            tool_result: Some(tool_result.clone()),
+            created_at: now,
+        }),
+        AgentEvent::Init { .. } | AgentEvent::Status { .. } | AgentEvent::Error { .. } => None,
+    }
 }
 
 pub fn stop_agent_inner(state: Arc<Mutex<AppState>>, workspace_id: &str) -> AppResult<()> {
@@ -398,7 +560,34 @@ mod tests {
         );
         send_message_inner(state, "ws_send_a", "Hello!").unwrap();
         let received = rx.try_recv().unwrap();
-        assert_eq!(received, "Hello!");
+        let parsed: serde_json::Value = serde_json::from_str(&received).expect("valid NDJSON");
+        assert_eq!(parsed["type"], "user");
+        // session_id is required by the claude CLI; falls back to workspace_id
+        // until the init event populates AgentHandle.session_id.
+        assert_eq!(parsed["session_id"], "ws_send_a");
+        assert_eq!(parsed["parent_tool_use_id"], serde_json::Value::Null);
+        assert_eq!(parsed["message"]["role"], "user");
+        assert_eq!(parsed["message"]["content"][0]["type"], "text");
+        assert_eq!(parsed["message"]["content"][0]["text"], "Hello!");
+    }
+
+    #[test]
+    fn send_message_inner_uses_captured_session_id_after_init() {
+        use tokio::sync::mpsc;
+        let state = make_state();
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_session".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_session".into(),
+                stdin_tx: tx,
+                session_id: Some("ses_authoritative".into()),
+            },
+        );
+        send_message_inner(state, "ws_session", "hi").unwrap();
+        let received = rx.try_recv().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&received).unwrap();
+        assert_eq!(parsed["session_id"], "ses_authoritative");
     }
 
     #[test]
@@ -660,9 +849,53 @@ mod tests {
             events_clone.lock().unwrap().push(ev);
         });
         let evs = events.lock().unwrap();
-        assert_eq!(evs.len(), 2);
+        // The "result" line is a no-op end-of-turn marker in stream-json mode,
+        // so only the assistant message produces an event.
+        assert_eq!(evs.len(), 1);
         assert!(matches!(&evs[0], crate::state::AgentEvent::Message { .. }));
-        assert!(matches!(&evs[1], crate::state::AgentEvent::Status { .. }));
+    }
+
+    #[test]
+    fn process_reader_events_streams_partial_then_final_assistant_message() {
+        use std::io::Cursor;
+        let state = make_state();
+        // Realistic --include-partial-messages stream: message_start →
+        // two text deltas → message_stop → final assistant message.
+        let ndjson = concat!(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_s","role":"assistant","content":[]}}}"#,
+            "\n",
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}}"#,
+            "\n",
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}}}"#,
+            "\n",
+            r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"id":"msg_s","role":"assistant","content":[{"type":"text","text":"Hello"}]}}"#,
+            "\n",
+        );
+        let reader: Box<dyn std::io::Read + Send> =
+            Box::new(Cursor::new(ndjson.as_bytes().to_vec()));
+        let events =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::<crate::state::AgentEvent>::new()));
+        let events_clone = events.clone();
+        process_reader_events(reader, state, "ws_stream", &|ev| {
+            events_clone.lock().unwrap().push(ev);
+        });
+        let evs = events.lock().unwrap();
+        // Two partials + one final = three Message events with id "msg_s".
+        assert_eq!(evs.len(), 3);
+        let texts: Vec<(&str, bool)> = evs
+            .iter()
+            .map(|e| match e {
+                crate::state::AgentEvent::Message {
+                    text, is_partial, ..
+                } => (text.as_str(), *is_partial),
+                _ => panic!("expected Message events only"),
+            })
+            .collect();
+        assert_eq!(texts[0], ("Hel", true));
+        assert_eq!(texts[1], ("Hello", true));
+        assert_eq!(texts[2], ("Hello", false));
     }
 
     #[test]
@@ -818,5 +1051,88 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.err().unwrap().to_string();
         assert!(err_msg.contains("already running"), "got: {err_msg}");
+    }
+
+    // ── event_to_persisted_message tests ──────────────────────────────────────
+    #[test]
+    fn event_to_persisted_message_converts_assistant_text() {
+        use crate::state::MessageRole;
+        let ev = AgentEvent::Message {
+            id: "msg_1".into(),
+            role: MessageRole::Assistant,
+            text: "Hello!".into(),
+            is_partial: false,
+        };
+        let msg = event_to_persisted_message(&ev, "ws_a").expect("should persist");
+        assert_eq!(msg.id, "msg_1");
+        assert_eq!(msg.workspace_id, "ws_a");
+        assert_eq!(msg.role, MessageRole::Assistant);
+        assert_eq!(msg.text, "Hello!");
+        assert!(!msg.is_partial);
+    }
+
+    #[test]
+    fn event_to_persisted_message_skips_partial_messages() {
+        use crate::state::MessageRole;
+        let ev = AgentEvent::Message {
+            id: "msg_2".into(),
+            role: MessageRole::Assistant,
+            text: "streaming...".into(),
+            is_partial: true,
+        };
+        assert!(event_to_persisted_message(&ev, "ws_a").is_none());
+    }
+
+    #[test]
+    fn event_to_persisted_message_converts_tool_use() {
+        use crate::state::{MessageRole, ToolUse};
+        let tu = ToolUse {
+            id: "toolu_1".into(),
+            name: "Read".into(),
+            input: serde_json::json!({"path": "/etc/hosts"}),
+        };
+        let ev = AgentEvent::ToolUse {
+            message_id: "msg_3".into(),
+            tool_use: tu.clone(),
+        };
+        let msg = event_to_persisted_message(&ev, "ws_b").expect("should persist");
+        assert_eq!(msg.role, MessageRole::Tool);
+        assert_eq!(msg.tool_use, Some(tu));
+        assert!(msg.tool_result.is_none());
+    }
+
+    #[test]
+    fn event_to_persisted_message_converts_tool_result() {
+        use crate::state::{MessageRole, ToolResult};
+        let tr = ToolResult {
+            tool_use_id: "toolu_1".into(),
+            content: "127.0.0.1 localhost".into(),
+            is_error: false,
+        };
+        let ev = AgentEvent::ToolResult {
+            message_id: "msg_4".into(),
+            tool_result: tr.clone(),
+        };
+        let msg = event_to_persisted_message(&ev, "ws_c").expect("should persist");
+        assert_eq!(msg.role, MessageRole::Tool);
+        assert_eq!(msg.tool_result, Some(tr));
+        assert!(msg.tool_use.is_none());
+    }
+
+    #[test]
+    fn event_to_persisted_message_skips_init_status_error() {
+        let init = AgentEvent::Init {
+            session_id: "ses".into(),
+            model: "claude-sonnet-4-6".into(),
+        };
+        let status = AgentEvent::Status {
+            status: crate::state::AgentStatus::Running,
+        };
+        let err = AgentEvent::Error {
+            message: "boom".into(),
+        };
+        assert!(event_to_persisted_message(&init, "ws").is_none());
+        assert!(event_to_persisted_message(&status, "ws").is_none());
+        assert!(event_to_persisted_message(&err, "ws").is_none());
     }
 }

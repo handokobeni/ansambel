@@ -32,6 +32,7 @@ vi.mock('$lib/stores/workspaces.svelte', () => {
       column: 'in_progress' as const,
       created_at: 1776000001,
       updated_at: 1776000001,
+      worktree_dir: '/tmp/ws_abc123',
     },
     {
       id: 'ws_def456',
@@ -45,6 +46,7 @@ vi.mock('$lib/stores/workspaces.svelte', () => {
       column: 'todo' as const,
       created_at: 1776000002,
       updated_at: 1776000002,
+      worktree_dir: '/tmp/ws_def456',
     },
   ];
   return {
@@ -84,6 +86,7 @@ const defaultWorkspaceList = [
     column: 'in_progress' as const,
     created_at: 1776000001,
     updated_at: 1776000001,
+    worktree_dir: '/tmp/ws_abc123',
   },
   {
     id: 'ws_def456',
@@ -97,6 +100,7 @@ const defaultWorkspaceList = [
     column: 'todo' as const,
     created_at: 1776000002,
     updated_at: 1776000002,
+    worktree_dir: '/tmp/ws_def456',
   },
 ];
 
@@ -149,6 +153,7 @@ describe('Sidebar', () => {
       column: 'todo',
       created_at: 1776000003,
       updated_at: 1776000003,
+      worktree_dir: '/tmp/ws_new111',
     });
     render(Sidebar);
     await fireEvent.click(screen.getByRole('button', { name: /new workspace/i }));
@@ -265,6 +270,7 @@ describe('Sidebar', () => {
         column: 'todo',
         created_at: 1776000010,
         updated_at: 1776000010,
+        worktree_dir: '/tmp/ws_xyz',
       },
     ]);
     const { container } = render(Sidebar);
@@ -286,6 +292,7 @@ describe('Sidebar', () => {
         column: 'done' as const,
         created_at: 1776000003,
         updated_at: 1776000003,
+        worktree_dir: '/tmp/ws_done1',
       },
     ];
     vi.mocked(workspaces.listForRepo).mockReturnValue(fallthroughList);

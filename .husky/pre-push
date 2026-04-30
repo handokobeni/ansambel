@@ -2,6 +2,14 @@
 
 export PATH="$HOME/.bun/bin:$HOME/.cargo/bin:$PATH"
 
+# When git invokes this hook from a worktree it sets GIT_DIR /
+# GIT_WORK_TREE in the environment. Rust tests that shell out to `git`
+# (commands::workspace, commands::helpers) would then inherit those
+# vars and operate on the parent repo instead of the temp dirs they
+# create — causing 19 failures. Unset them so child `git` invocations
+# resolve from current_dir like a normal shell.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+
 # Rust clippy with -D warnings
 cd src-tauri
 cargo clippy --lib --all-targets -- -D warnings

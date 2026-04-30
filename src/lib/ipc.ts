@@ -1,14 +1,21 @@
 // src/lib/ipc.ts
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import type {
   Repo,
-  Workspace,
+  WorkspaceInfo,
   CreateWorkspaceArgs,
   Task,
   CreateTaskArgs,
   TaskPatch,
   KanbanColumn,
+  AgentEvent,
+  Message,
 } from './types';
+
+export type ListMessagesOpts = {
+  limit?: number;
+  beforeId?: string;
+};
 
 export const api = {
   system: {
@@ -27,9 +34,9 @@ export const api = {
   },
 
   workspace: {
-    create: (args: CreateWorkspaceArgs): Promise<Workspace> => invoke('create_workspace', args),
+    create: (args: CreateWorkspaceArgs): Promise<WorkspaceInfo> => invoke('create_workspace', args),
 
-    list: (repoId?: string): Promise<Workspace[]> => invoke('list_workspaces', { repoId }),
+    list: (repoId?: string): Promise<WorkspaceInfo[]> => invoke('list_workspaces', { repoId }),
 
     remove: (workspaceId: string): Promise<void> => invoke('remove_workspace', { workspaceId }),
   },
@@ -48,4 +55,27 @@ export const api = {
     remove: (taskId: string, force?: boolean): Promise<void> =>
       invoke('remove_task', { taskId, force }),
   },
+
+  agent: {
+    spawn: (workspaceId: string, onEvent: Channel<AgentEvent>): Promise<void> =>
+      invoke('spawn_agent', { workspaceId, onEvent }),
+
+    send: (workspaceId: string, text: string): Promise<void> =>
+      invoke('send_message', { workspaceId, text }),
+
+    stop: (workspaceId: string): Promise<void> => invoke('stop_agent', { workspaceId }),
+  },
+
+  messages: {
+    list: (workspaceId: string, opts: ListMessagesOpts = {}): Promise<Message[]> =>
+      invoke('list_messages', {
+        workspaceId,
+        limit: opts.limit ?? null,
+        beforeId: opts.beforeId ?? null,
+      }),
+  },
 };
+
+export function agentChannel(): Channel<AgentEvent> {
+  return new Channel<AgentEvent>();
+}
