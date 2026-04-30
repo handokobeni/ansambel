@@ -40,9 +40,15 @@ pub fn run() {
 
             // Debounced message writer — collapses bursts of stream events
             // into a single disk write per workspace per ~500 ms window.
-            let message_writer = crate::persistence::message_writer::MessageWriter::new(
-                std::time::Duration::from_millis(500),
-            );
+            // Construction calls `tokio::spawn` for the debouncer worker,
+            // so it must run inside the Tauri async runtime context. The
+            // worker task lives on the long-lived global tokio runtime
+            // and survives after `block_on` returns.
+            let message_writer = tauri::async_runtime::block_on(async {
+                crate::persistence::message_writer::MessageWriter::new(
+                    std::time::Duration::from_millis(500),
+                )
+            });
             app.manage(message_writer);
 
             Ok(())
