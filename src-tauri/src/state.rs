@@ -213,6 +213,21 @@ pub enum AgentEvent {
         /// the field has appeared and disappeared across CLI releases.
         pre_tokens: Option<u64>,
     },
+    /// Extended-thinking content from an assistant turn. Treated separately
+    /// from regular text because the chat renders it as a thin "Claude is
+    /// thinking…" marker rather than a normal bubble — without this the
+    /// user only sees long pauses while the model deliberates.
+    Thinking {
+        /// Owning assistant message id, so the UI can co-locate the marker
+        /// with its turn.
+        message_id: String,
+        /// Full thinking text (or the partial accumulated so far when
+        /// `is_partial` is true).
+        text: String,
+        /// True while the thinking block is still streaming. Mirrors the
+        /// Message variant so the same bubble can update in place.
+        is_partial: bool,
+    },
 }
 
 pub fn app_version() -> &'static str {

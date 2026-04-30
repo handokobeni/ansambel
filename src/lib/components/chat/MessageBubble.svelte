@@ -20,9 +20,18 @@
         } more chars)`
       : (message.tool_result?.content ?? '')
   );
+
+  // Defensive: an old persisted Message with empty text and no tool/result
+  // (legacy parser emitted these for thinking-only turns) would otherwise
+  // render as a blank rounded box. Hide it instead of letting it leak in.
+  const isEmpty = $derived(
+    !message.text && !message.tool_use && !message.tool_result && !message.is_partial
+  );
 </script>
 
-{#if message.role === 'system'}
+{#if isEmpty && message.role !== 'system'}
+  <!-- nothing — see isEmpty derivation -->
+{:else if message.role === 'system'}
   <!-- System markers (e.g. compact_boundary) sit in the message stream as
        thin centered notices rather than chat bubbles. -->
   <div

@@ -98,6 +98,16 @@ describe('MessageBubble', () => {
     expect(getByText(/compacted earlier/i)).toBeTruthy();
   });
 
+  it('renders nothing when the message has no text, tool, or partial state', () => {
+    // Legacy parser used to emit Message{text:""} for thinking-only turns —
+    // those should render to nothing rather than an empty rounded bubble.
+    const { container } = render(MessageBubble, {
+      props: { message: make({ text: '', tool_use: null, tool_result: null, is_partial: false }) },
+    });
+    expect(container.querySelector('article')).toBeNull();
+    expect(container.querySelector('[data-role]')).toBeNull();
+  });
+
   it('truncates very long tool_result content with a tail hint', () => {
     const long = 'x'.repeat(2000);
     const { container } = render(MessageBubble, {

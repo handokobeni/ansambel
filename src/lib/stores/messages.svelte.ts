@@ -99,6 +99,29 @@ class MessagesStore {
       case 'error':
         this.error.set(wsId, ev.message);
         return;
+      case 'thinking': {
+        // Thinking blocks render as a thin "Claude is thinking…" marker so
+        // the user has visibility into what the model is doing between
+        // text and tool calls. The id is derived from the owning assistant
+        // message so streaming partials land on the same marker.
+        const THINKING_PREVIEW = 280;
+        const trimmed =
+          ev.text.length > THINKING_PREVIEW ? `${ev.text.slice(0, THINKING_PREVIEW)}…` : ev.text;
+        const id = `thinking_${ev.message_id}`;
+        const existing = this.byWorkspace.get(wsId)?.get(id);
+        const created_at = existing?.created_at ?? Date.now();
+        this.upsert({
+          id,
+          workspace_id: wsId,
+          role: 'system',
+          text: `✻ Thinking — ${trimmed}`,
+          is_partial: ev.is_partial,
+          tool_use: null,
+          tool_result: null,
+          created_at,
+        });
+        return;
+      }
       case 'compact': {
         // Render compaction as a thin system marker between turns. The
         // marker is just a Message with role=system; the bubble component

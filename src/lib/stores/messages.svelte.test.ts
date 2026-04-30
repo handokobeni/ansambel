@@ -111,6 +111,47 @@ describe('MessagesStore', () => {
     expect(list.find((m) => m.role === 'system')).toBeTruthy();
   });
 
+  it('apply Thinking event upserts a thinking-style marker in the list', () => {
+    messages.apply(
+      { type: 'thinking', message_id: 'msg_t', text: 'Inspecting auth flow', is_partial: false },
+      'ws_a'
+    );
+    const list = messages.listForWorkspace('ws_a');
+    const marker = list.find((m) => m.id.startsWith('thinking_msg_t'));
+    expect(marker).toBeTruthy();
+    expect(marker!.role).toBe('system');
+    expect(marker!.text).toMatch(/inspecting auth flow/i);
+  });
+
+  it('apply Thinking partial updates the same marker in place', () => {
+    messages.apply(
+      { type: 'thinking', message_id: 'msg_t2', text: 'Let me', is_partial: true },
+      'ws_a'
+    );
+    messages.apply(
+      {
+        type: 'thinking',
+        message_id: 'msg_t2',
+        text: 'Let me check the file',
+        is_partial: true,
+      },
+      'ws_a'
+    );
+    const markers = messages.listForWorkspace('ws_a').filter((m) => m.id.startsWith('thinking_'));
+    expect(markers).toHaveLength(1);
+    expect(markers[0].text).toMatch(/let me check the file/i);
+  });
+
+  it('apply Thinking truncates very long thinking text in the marker preview', () => {
+    const long = 'x'.repeat(600);
+    messages.apply(
+      { type: 'thinking', message_id: 'msg_long', text: long, is_partial: false },
+      'ws_a'
+    );
+    const marker = messages.listForWorkspace('ws_a').find((m) => m.id.startsWith('thinking_'));
+    expect(marker!.text.length).toBeLessThan(long.length);
+  });
+
   it('apply Compact emits unique ids so concurrent events do not collide', () => {
     messages.apply({ type: 'compact', trigger: 'auto', pre_tokens: 1000 }, 'ws_a');
     messages.apply({ type: 'compact', trigger: 'auto', pre_tokens: 2000 }, 'ws_a');

@@ -416,7 +416,8 @@ pub fn event_to_persisted_message(
         AgentEvent::Init { .. }
         | AgentEvent::Status { .. }
         | AgentEvent::Error { .. }
-        | AgentEvent::Compact { .. } => None,
+        | AgentEvent::Compact { .. }
+        | AgentEvent::Thinking { .. } => None,
     }
 }
 

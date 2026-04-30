@@ -122,4 +122,5 @@ export type AgentEvent =
   | { type: 'tool_result'; message_id: string; tool_result: ToolResult }
   | { type: 'status'; status: AgentStatus }
   | { type: 'error'; message: string }
-  | { type: 'compact'; trigger: string; pre_tokens: number | null };
+  | { type: 'compact'; trigger: string; pre_tokens: number | null }
+  | { type: 'thinking'; message_id: string; text: string; is_partial: boolean };

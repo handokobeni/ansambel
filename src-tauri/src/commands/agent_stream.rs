@@ -72,6 +72,10 @@ pub struct StreamParser {
     current_message_id: Option<String>,
     /// Accumulated text for the current message id.
     accumulated: String,
+    /// Accumulated thinking content for the current message id. Tracked
+    /// separately from `accumulated` because thinking blocks emit a
+    /// dedicated AgentEvent variant the UI styles distinctly.
+    thinking: String,
 }
 
 impl Default for StreamParser {
@@ -85,6 +89,7 @@ impl StreamParser {
         Self {
             current_message_id: None,
             accumulated: String::new(),
+            thinking: String::new(),
         }
     }
 
@@ -119,6 +124,7 @@ impl StreamParser {
                 {
                     self.current_message_id = Some(id.to_string());
                     self.accumulated.clear();
+                    self.thinking.clear();
                 }
                 Ok(Vec::new())
             }
@@ -128,32 +134,48 @@ impl StreamParser {
                     .and_then(|d| d.get("type"))
                     .and_then(|s| s.as_str())
                     .unwrap_or("");
-                if dtype != "text_delta" {
-                    // input_json_delta and other non-text deltas have no
-                    // partial UI representation; the final assistant line
-                    // will carry the completed tool_use input.
-                    return Ok(Vec::new());
-                }
                 let id = match self.current_message_id.as_ref() {
                     Some(id) => id.clone(),
                     None => return Ok(Vec::new()),
                 };
-                let chunk = event
-                    .get("delta")
-                    .and_then(|d| d.get("text"))
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("");
-                self.accumulated.push_str(chunk);
-                Ok(vec![AgentEvent::Message {
-                    id,
-                    role: MessageRole::Assistant,
-                    text: self.accumulated.clone(),
-                    is_partial: true,
-                }])
+                match dtype {
+                    "text_delta" => {
+                        let chunk = event
+                            .get("delta")
+                            .and_then(|d| d.get("text"))
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("");
+                        self.accumulated.push_str(chunk);
+                        Ok(vec![AgentEvent::Message {
+                            id,
+                            role: MessageRole::Assistant,
+                            text: self.accumulated.clone(),
+                            is_partial: true,
+                        }])
+                    }
+                    "thinking_delta" => {
+                        let chunk = event
+                            .get("delta")
+                            .and_then(|d| d.get("thinking"))
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("");
+                        self.thinking.push_str(chunk);
+                        Ok(vec![AgentEvent::Thinking {
+                            message_id: id,
+                            text: self.thinking.clone(),
+                            is_partial: true,
+                        }])
+                    }
+                    // input_json_delta and other deltas have no partial UI
+                    // representation; the final assistant line will carry
+                    // the completed tool_use input.
+                    _ => Ok(Vec::new()),
+                }
             }
             "message_stop" => {
                 self.current_message_id = None;
                 self.accumulated.clear();
+                self.thinking.clear();
                 Ok(Vec::new())
             }
             _ => Ok(Vec::new()),
@@ -176,6 +198,7 @@ fn parse_message(v: &Value, kind: &str) -> Result<Vec<AgentEvent>> {
         _ => MessageRole::User,
     };
     let mut text_parts: Vec<String> = Vec::new();
+    let mut thinking_parts: Vec<String> = Vec::new();
     let mut tool_uses: Vec<ToolUse> = Vec::new();
     let mut tool_results: Vec<ToolResult> = Vec::new();
 
@@ -186,6 +209,11 @@ fn parse_message(v: &Value, kind: &str) -> Result<Vec<AgentEvent>> {
                 "text" => {
                     if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
                         text_parts.push(t.to_string());
+                    }
+                }
+                "thinking" => {
+                    if let Some(t) = block.get("thinking").and_then(|t| t.as_str()) {
+                        thinking_parts.push(t.to_string());
                     }
                 }
                 "tool_use" => {
@@ -231,11 +259,19 @@ fn parse_message(v: &Value, kind: &str) -> Result<Vec<AgentEvent>> {
     let mut events: Vec<AgentEvent> = Vec::new();
     let combined_text: String = text_parts.join("");
     let has_text = !combined_text.is_empty();
-    if has_text || (tool_uses.is_empty() && tool_results.is_empty()) {
+    if has_text {
         events.push(AgentEvent::Message {
             id: id.clone(),
             role,
             text: combined_text,
+            is_partial: false,
+        });
+    }
+    let combined_thinking: String = thinking_parts.join("");
+    if !combined_thinking.is_empty() {
+        events.push(AgentEvent::Thinking {
+            message_id: id.clone(),
+            text: combined_thinking,
             is_partial: false,
         });
     }
@@ -354,6 +390,129 @@ mod tests {
                 assert!(!tool_result.is_error);
             }
             _ => panic!("expected ToolResult"),
+        }
+    }
+
+    #[test]
+    fn parses_thinking_block_emits_thinking_event() {
+        // Extended-thinking content lands in assistant.message.content as a
+        // block of type "thinking". The parser must surface it as a
+        // dedicated event so the UI can show "what Claude is doing".
+        let line = r#"{"type":"assistant","message":{"id":"msg_th","role":"assistant","content":[{"type":"thinking","thinking":"Let me check the file structure first."}]}}"#;
+        let evs = parse_line(line).unwrap();
+        // No empty-text Message must be emitted alongside the thinking block —
+        // the parser used to anchor a bubble with text="" for thinking-only
+        // turns and the chat would render it as an empty rounded box.
+        assert!(
+            !evs.iter()
+                .any(|e| matches!(e, AgentEvent::Message { text, .. } if text.is_empty())),
+            "thinking-only turn must not emit an empty Message: {evs:?}"
+        );
+        let thinking = evs
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::Thinking {
+                    message_id,
+                    text,
+                    is_partial,
+                } => Some((message_id, text, is_partial)),
+                _ => None,
+            })
+            .expect("expected Thinking event");
+        assert_eq!(thinking.0, "msg_th");
+        assert_eq!(thinking.1, "Let me check the file structure first.");
+        assert!(!thinking.2);
+    }
+
+    #[test]
+    fn assistant_turn_with_text_and_thinking_emits_both() {
+        let line = r#"{"type":"assistant","message":{"id":"msg_mix","role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"hello"}]}}"#;
+        let evs = parse_line(line).unwrap();
+        let has_thinking = evs
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Thinking { text, .. } if text == "hmm"));
+        let has_text = evs
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Message { text, .. } if text == "hello"));
+        assert!(has_thinking, "expected a Thinking event in {evs:?}");
+        assert!(has_text, "expected a text Message in {evs:?}");
+    }
+
+    #[test]
+    fn assistant_turn_with_only_tool_use_does_not_emit_empty_message() {
+        // The store creates a synthetic Message from the ToolUse event, so
+        // the parser must NOT also emit a trailing empty-text Message —
+        // that produced the visible "empty bubble" in production chats.
+        let line = r#"{"type":"assistant","message":{"id":"msg_t","role":"assistant","content":[{"type":"tool_use","id":"toolu_z","name":"Read","input":{"file_path":"/x"}}]}}"#;
+        let evs = parse_line(line).unwrap();
+        assert!(
+            !evs.iter()
+                .any(|e| matches!(e, AgentEvent::Message { text, .. } if text.is_empty())),
+            "tool-only turn must not emit an empty Message: {evs:?}"
+        );
+        // ToolUse must still be there.
+        assert!(
+            evs.iter().any(|e| matches!(e, AgentEvent::ToolUse { .. })),
+            "expected ToolUse event in {evs:?}"
+        );
+    }
+
+    #[test]
+    fn assistant_turn_completely_empty_emits_nothing() {
+        // Pathological "assistant message with no recognised content blocks"
+        // (only an unknown content type, or genuinely empty content array) —
+        // the parser must yield zero events rather than an empty bubble.
+        let line =
+            r#"{"type":"assistant","message":{"id":"msg_empty","role":"assistant","content":[]}}"#;
+        let evs = parse_line(line).unwrap();
+        assert!(
+            evs.is_empty(),
+            "empty content must yield zero events: {evs:?}"
+        );
+
+        let line2 = r#"{"type":"assistant","message":{"id":"msg_unknown","role":"assistant","content":[{"type":"weird_block","payload":"x"}]}}"#;
+        let evs2 = parse_line(line2).unwrap();
+        assert!(
+            evs2.is_empty(),
+            "assistant message with only unknown blocks must yield zero events: {evs2:?}"
+        );
+    }
+
+    #[test]
+    fn stream_parser_emits_partial_thinking_on_thinking_delta() {
+        // Mirrors the text_delta partial flow but for thinking blocks so the
+        // UI can stream "Claude is thinking…" content as it arrives.
+        let mut p = StreamParser::new();
+        p.parse_line(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_thx","role":"assistant","content":[]}}}"#,
+        )
+        .unwrap();
+        let evs = p
+            .parse_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me"}}}"#,
+            )
+            .unwrap();
+        match &evs[0] {
+            AgentEvent::Thinking {
+                message_id,
+                text,
+                is_partial,
+            } => {
+                assert_eq!(message_id, "msg_thx");
+                assert_eq!(text, "Let me");
+                assert!(*is_partial);
+            }
+            other => panic!("expected partial Thinking, got {other:?}"),
+        }
+        // Subsequent thinking deltas accumulate into the same id.
+        let evs2 = p
+            .parse_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" inspect"}}}"#,
+            )
+            .unwrap();
+        match &evs2[0] {
+            AgentEvent::Thinking { text, .. } => assert_eq!(text, "Let me inspect"),
+            other => panic!("expected accumulated Thinking, got {other:?}"),
         }
     }
 
