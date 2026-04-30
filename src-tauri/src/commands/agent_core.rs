@@ -155,7 +155,12 @@ pub fn process_reader_events<F>(
                         }
                     }
                     Err(e) => {
-                        tracing::warn!(workspace_id, error = %e, "agent reader: parse failed");
+                        tracing::warn!(
+                            workspace_id,
+                            error = %e,
+                            line = %line.trim_end(),
+                            "agent reader: parse failed"
+                        );
                         send_event(AgentEvent::Error {
                             message: format!("parse: {e}"),
                         });
