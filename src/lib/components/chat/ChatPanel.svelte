@@ -23,10 +23,15 @@
   const list = $derived(messages.listForWorkspace(workspaceId));
   const status = $derived(messages.statusFor(workspaceId));
   const inputDisabled = $derived(status === 'error' || status === 'stopped');
+  const error = $derived(messages.errorFor(workspaceId));
 
   let loading = $state(false);
   let exhausted = $state(false);
   let scrollEl: HTMLDivElement | undefined;
+  let dismissedError = $state<string | undefined>(undefined);
+  // Track whether the user has dismissed the *current* error string. A new
+  // error message resets dismissal so subsequent failures still surface.
+  const errorVisible = $derived(error !== undefined && error !== dismissedError);
 
   async function loadEarlier(): Promise<void> {
     if (!onLoadEarlier || loading || exhausted) return;
@@ -67,6 +72,24 @@
 </script>
 
 <section class="flex flex-col h-full bg-[var(--bg-base)]">
+  {#if errorVisible}
+    <div
+      role="alert"
+      data-testid="error-banner"
+      class="px-3 py-2 bg-[var(--error-bg,rgba(239,68,68,0.15))] text-[var(--error,#ef4444)] text-sm flex items-start justify-between gap-2 border-b border-[var(--border)]"
+    >
+      <span class="break-words">{error}</span>
+      <button
+        type="button"
+        aria-label="Dismiss error"
+        onclick={() => (dismissedError = error)}
+        class="shrink-0 px-1 hover:opacity-70"
+      >
+        ×
+      </button>
+    </div>
+  {/if}
+
   <div
     bind:this={scrollEl}
     onscroll={handleScroll}

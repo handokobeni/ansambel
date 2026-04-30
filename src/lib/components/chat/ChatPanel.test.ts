@@ -72,6 +72,58 @@ describe('ChatPanel', () => {
     expect(btn.disabled).toBe(true);
   });
 
+  describe('error banner', () => {
+    it('renders an error banner when messages.error is set for the workspace', () => {
+      messages.apply({ type: 'error', message: 'CLI: invalid auth token' }, 'ws_a');
+      const { getByRole, getByText } = render(ChatPanel, {
+        props: { workspaceId: 'ws_a', onSend: vi.fn() },
+      });
+      const banner = getByRole('alert');
+      expect(banner).toBeTruthy();
+      expect(getByText(/cli: invalid auth token/i)).toBeTruthy();
+    });
+
+    it('does not render the banner when no error is set', () => {
+      const { queryByRole } = render(ChatPanel, {
+        props: { workspaceId: 'ws_a', onSend: vi.fn() },
+      });
+      expect(queryByRole('alert')).toBeNull();
+    });
+
+    it('does not surface errors from a different workspace', () => {
+      messages.apply({ type: 'error', message: 'wrong workspace' }, 'ws_other');
+      const { queryByRole } = render(ChatPanel, {
+        props: { workspaceId: 'ws_a', onSend: vi.fn() },
+      });
+      expect(queryByRole('alert')).toBeNull();
+    });
+
+    it('hides the banner after the dismiss button is clicked', async () => {
+      messages.apply({ type: 'error', message: 'oops' }, 'ws_a');
+      const { getByLabelText, queryByRole } = render(ChatPanel, {
+        props: { workspaceId: 'ws_a', onSend: vi.fn() },
+      });
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(getByLabelText(/dismiss error/i));
+      expect(queryByRole('alert')).toBeNull();
+    });
+
+    it('resurfaces a fresh error after a previous one was dismissed', async () => {
+      messages.apply({ type: 'error', message: 'first' }, 'ws_a');
+      const { getByLabelText, queryByRole, findByText } = render(ChatPanel, {
+        props: { workspaceId: 'ws_a', onSend: vi.fn() },
+      });
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(getByLabelText(/dismiss error/i));
+      expect(queryByRole('alert')).toBeNull();
+      messages.apply({ type: 'error', message: 'second' }, 'ws_a');
+      // findByText awaits the next render tick — Svelte's $derived
+      // re-evaluates synchronously in a microtask, so the new error
+      // string should appear by the next macrotask.
+      expect(await findByText(/second/i)).toBeTruthy();
+    });
+  });
+
   describe('lazy load', () => {
     it('does not render load-earlier UI when onLoadEarlier is not provided', () => {
       messages.upsert(make('msg_1', 'ws_a'));

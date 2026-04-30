@@ -4,7 +4,7 @@
 pub use crate::commands::agent_core::{
     build_system_prompt_prefix, event_to_persisted_message, process_reader_events,
     reattach_agent_inner, send_message_inner, send_message_inner_with_persist, spawn_agent_inner,
-    stop_agent_inner, AgentProcess,
+    stderr_line_to_event, stop_agent_inner, AgentProcess,
 };
 
 use crate::persistence::message_writer::MessageWriter;

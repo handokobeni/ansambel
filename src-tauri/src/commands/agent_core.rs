@@ -108,10 +108,20 @@ pub fn spawn_agent_inner(
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
-    // Drain stderr to tracing so the CLI's complaints land in the logs instead
-    // of being silently buffered until the pipe fills and the child blocks.
+    // Construct the event broadcaster up-front so the stderr-pump thread
+    // (spawned below) can forward CLI stderr lines as Error events. Buffer
+    // of 256 absorbs partial-message bursts; slow consumers drop oldest
+    // with `Lagged`, which is acceptable for a UI that re-renders on the
+    // next message.
+    let (event_tx, _) = tokio::sync::broadcast::channel::<AgentEvent>(256);
+
+    // Forward stderr to both `tracing::warn` (logs) and the broadcaster
+    // (chat error banner). When Claude's CLI complains about auth, quota,
+    // or network errors, the user sees the actual reason instead of just
+    // "Stopped".
     if let Some(stderr) = stderr_pipe {
         let stderr_workspace_id = workspace_id.to_string();
+        let stderr_tx = event_tx.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
@@ -120,6 +130,7 @@ pub fn spawn_agent_inner(
                     line = %line,
                     "agent stderr"
                 );
+                let _ = stderr_tx.send(stderr_line_to_event(&line));
             }
         });
     }
@@ -151,7 +162,6 @@ pub fn spawn_agent_inner(
         if let Some(ws) = s.workspaces.get_mut(workspace_id) {
             ws.status = WorkspaceStatus::Running;
         }
-        let (event_tx, _) = tokio::sync::broadcast::channel::<AgentEvent>(256);
         s.agents.insert(
             workspace_id.into(),
             AgentHandle {
@@ -167,6 +177,16 @@ pub fn spawn_agent_inner(
         child,
         stdout: stdout_pipe,
     })
+}
+
+/// Maps a single line of agent CLI stderr to a chat-visible Error event.
+/// The `CLI:` prefix tells users the message originated from the agent
+/// process, not from Ansambel itself — useful for distinguishing auth
+/// errors from app bugs.
+pub fn stderr_line_to_event(line: &str) -> AgentEvent {
+    AgentEvent::Error {
+        message: format!("CLI: {}", line.trim_end()),
+    }
 }
 
 pub fn build_system_prompt_prefix(data_dir: &Path, repo_id: &str) -> String {
@@ -1225,5 +1245,39 @@ mod tests {
             .unwrap();
         let received = sub.try_recv().unwrap();
         assert!(matches!(received, AgentEvent::Status { .. }));
+    }
+
+    #[test]
+    fn stderr_line_to_event_wraps_with_cli_prefix() {
+        let ev = stderr_line_to_event("invalid_request_error: bad token");
+        match ev {
+            AgentEvent::Error { message } => {
+                assert!(message.starts_with("CLI: "));
+                assert!(message.contains("invalid_request_error"));
+                assert!(message.contains("bad token"));
+            }
+            _ => panic!("expected Error event"),
+        }
+    }
+
+    #[test]
+    fn stderr_line_to_event_trims_trailing_newline() {
+        let ev = stderr_line_to_event("oops\n");
+        match ev {
+            AgentEvent::Error { message } => {
+                assert_eq!(message, "CLI: oops");
+                assert!(!message.ends_with('\n'));
+            }
+            _ => panic!("expected Error event"),
+        }
+    }
+
+    #[test]
+    fn stderr_line_to_event_handles_blank_lines() {
+        let ev = stderr_line_to_event("");
+        match ev {
+            AgentEvent::Error { message } => assert_eq!(message, "CLI: "),
+            _ => panic!("expected Error event"),
+        }
     }
 }
