@@ -37,6 +37,33 @@ pub fn append_message(data_dir: &Path, workspace_id: &str, msg: &Message) -> Res
     save_messages(data_dir, workspace_id, &current)
 }
 
+/// Default page size for `list_messages` when no limit is supplied.
+pub const DEFAULT_MESSAGE_PAGE: usize = 50;
+
+/// Returns the most recent `limit` messages older than `before_id`, in
+/// chronological order (oldest first). When `before_id` is `None`, returns
+/// the latest page. When `before_id` is unknown, returns an empty slice so
+/// the frontend can stop paginating.
+pub fn list_messages_paginated(
+    data_dir: &Path,
+    workspace_id: &str,
+    limit: Option<usize>,
+    before_id: Option<&str>,
+) -> Result<Vec<Message>> {
+    let limit = limit.unwrap_or(DEFAULT_MESSAGE_PAGE).max(1);
+    let all = load_messages(data_dir, workspace_id).unwrap_or_default();
+    let upto = match before_id {
+        Some(id) => match all.iter().position(|m| m.id == id) {
+            Some(i) => i,
+            None => return Ok(Vec::new()),
+        },
+        None => all.len(),
+    };
+    let head = &all[..upto];
+    let start = head.len().saturating_sub(limit);
+    Ok(head[start..].to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +174,77 @@ mod tests {
         append_message(tmp.path(), "ws_d", &m).unwrap();
         let loaded = load_messages(tmp.path(), "ws_d").unwrap();
         assert_eq!(loaded.len(), 1);
+    }
+
+    fn write_history(tmp: &TempDir, ws: &str, count: usize) {
+        let msgs: Vec<Message> = (1..=count)
+            .map(|i| make_msg(&format!("msg_{i:03}"), ws))
+            .collect();
+        save_messages(tmp.path(), ws, &msgs).unwrap();
+    }
+
+    #[test]
+    fn list_messages_paginated_empty_history_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let out = list_messages_paginated(tmp.path(), "ws_empty", None, None).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn list_messages_paginated_returns_latest_page_by_default() {
+        let tmp = TempDir::new().unwrap();
+        write_history(&tmp, "ws_full", 200);
+        let out = list_messages_paginated(tmp.path(), "ws_full", None, None).unwrap();
+        assert_eq!(out.len(), DEFAULT_MESSAGE_PAGE);
+        assert_eq!(out.first().unwrap().id, "msg_151");
+        assert_eq!(out.last().unwrap().id, "msg_200");
+    }
+
+    #[test]
+    fn list_messages_paginated_respects_explicit_limit() {
+        let tmp = TempDir::new().unwrap();
+        write_history(&tmp, "ws_limit", 30);
+        let out = list_messages_paginated(tmp.path(), "ws_limit", Some(10), None).unwrap();
+        assert_eq!(out.len(), 10);
+        assert_eq!(out.first().unwrap().id, "msg_021");
+        assert_eq!(out.last().unwrap().id, "msg_030");
+    }
+
+    #[test]
+    fn list_messages_paginated_returns_all_when_history_smaller_than_limit() {
+        let tmp = TempDir::new().unwrap();
+        write_history(&tmp, "ws_small", 3);
+        let out = list_messages_paginated(tmp.path(), "ws_small", Some(50), None).unwrap();
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn list_messages_paginated_with_before_id_returns_older_page() {
+        let tmp = TempDir::new().unwrap();
+        write_history(&tmp, "ws_page", 100);
+        let out =
+            list_messages_paginated(tmp.path(), "ws_page", Some(20), Some("msg_050")).unwrap();
+        assert_eq!(out.len(), 20);
+        assert_eq!(out.first().unwrap().id, "msg_030");
+        assert_eq!(out.last().unwrap().id, "msg_049");
+    }
+
+    #[test]
+    fn list_messages_paginated_with_unknown_before_id_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        write_history(&tmp, "ws_x", 5);
+        let out = list_messages_paginated(tmp.path(), "ws_x", None, Some("nope")).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn list_messages_paginated_at_start_of_history_clamps_to_remaining() {
+        let tmp = TempDir::new().unwrap();
+        write_history(&tmp, "ws_start", 10);
+        let out =
+            list_messages_paginated(tmp.path(), "ws_start", Some(20), Some("msg_003")).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].id, "msg_001");
+        assert_eq!(out[1].id, "msg_002");
     }
 }

@@ -7,8 +7,8 @@ pub use crate::commands::agent_core::{
     AgentProcess,
 };
 
-use crate::persistence::messages::append_message;
-use crate::state::{AgentEvent, AgentStatus, AppState};
+use crate::persistence::messages::{append_message, list_messages_paginated};
+use crate::state::{AgentEvent, AgentStatus, AppState, Message};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
@@ -64,6 +64,21 @@ pub async fn stop_agent(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<(), String> {
     stop_agent_inner(state.inner().clone(), &workspace_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_messages(
+    workspace_id: String,
+    limit: Option<usize>,
+    before_id: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<Vec<Message>, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("resolve app data dir: {e}"))?;
+    list_messages_paginated(&data_dir, &workspace_id, limit, before_id.as_deref())
+        .map_err(|e| e.to_string())
 }
 
 fn spawn_reader_thread(
