@@ -44,6 +44,10 @@
     // The Channel's onmessage handler is GC'd when the component unmounts.
   });
 
+  async function loadEarlier(beforeId: string) {
+    return await api.messages.list(workspace.id, { beforeId });
+  }
+
   async function handleSend(text: string) {
     // Echo the user's own message into the store immediately so the bubble
     // renders without waiting for the backend. The backend's send_message
@@ -96,6 +100,6 @@
   </header>
 
   <div class="flex-1 overflow-hidden">
-    <ChatPanel workspaceId={workspace.id} onSend={handleSend} />
+    <ChatPanel workspaceId={workspace.id} onSend={handleSend} onLoadEarlier={loadEarlier} />
   </div>
 </section>

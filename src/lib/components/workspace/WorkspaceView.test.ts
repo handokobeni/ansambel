@@ -263,4 +263,39 @@ describe('WorkspaceView', () => {
       );
     });
   });
+
+  it('passes onLoadEarlier callback that invokes list_messages with beforeId', async () => {
+    let listCallCount = 0;
+    vi.mocked(invoke).mockImplementation(async (cmd, args) => {
+      if (cmd === 'list_messages') {
+        listCallCount += 1;
+        if (listCallCount === 1) {
+          // initial hydration — populate one message so Load earlier appears
+          return [
+            {
+              id: 'msg_recent',
+              workspace_id: 'ws_a',
+              role: 'user',
+              text: 'recent',
+              is_partial: false,
+              tool_use: null,
+              tool_result: null,
+              created_at: 200,
+            },
+          ];
+        }
+        // subsequent paginated call
+        expect((args as { beforeId?: string }).beforeId).toBe('msg_recent');
+        return [];
+      }
+      return undefined;
+    });
+    const { findByTestId } = render(WorkspaceView, { props: { workspace: ws() } });
+    const btn = await findByTestId('load-earlier-button');
+    const { fireEvent } = await import('@testing-library/svelte');
+    await fireEvent.click(btn);
+    await waitFor(() => {
+      expect(listCallCount).toBeGreaterThanOrEqual(2);
+    });
+  });
 });
