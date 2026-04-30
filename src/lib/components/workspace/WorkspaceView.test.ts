@@ -239,6 +239,34 @@ describe('WorkspaceView', () => {
     });
   });
 
+  it('renders Settings CTA when spawn fails with claude-binary-not-found', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === 'spawn_agent') throw 'spawn_agent: claude binary not found';
+      return undefined;
+    });
+    const { findByTestId } = render(WorkspaceView, {
+      props: { workspace: ws({ status: 'not_started' }) },
+    });
+    const cta = await findByTestId('settings-cta');
+    expect(cta).toBeTruthy();
+    expect((cta as HTMLAnchorElement).getAttribute('href')).toContain('settings');
+  });
+
+  it('does NOT render Settings CTA for unrelated spawn errors', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === 'spawn_agent') throw 'spawn_agent: random unrelated thing';
+      return undefined;
+    });
+    const { queryByTestId } = render(WorkspaceView, {
+      props: { workspace: ws({ status: 'not_started' }) },
+    });
+    // Wait for the rejection to flow into messages store and re-render.
+    await waitFor(() => {
+      expect(messages.errorFor('ws_a')).toContain('random unrelated thing');
+    });
+    expect(queryByTestId('settings-cta')).toBeNull();
+  });
+
   it('captures send_message rejection as error in messages store', async () => {
     vi.mocked(invoke).mockImplementation(async (cmd) => {
       if (cmd === 'send_message') throw 'send failed';
