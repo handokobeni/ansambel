@@ -386,18 +386,17 @@ pub fn reattach_agent_inner(
 
 pub fn send_message_inner_with_persist(
     state: Arc<Mutex<AppState>>,
+    message_writer: &crate::persistence::message_writer::MessageWriter,
     data_dir: &Path,
     workspace_id: &str,
     text: &str,
 ) -> AppResult<()> {
     use crate::ids::message_id;
-    use crate::persistence::messages::{load_messages, save_messages};
     use crate::state::{Message, MessageRole};
 
     send_message_inner(state, workspace_id, text)?;
 
-    let mut current = load_messages(data_dir, workspace_id).unwrap_or_default();
-    current.push(Message {
+    let user_msg = Message {
         id: message_id(),
         workspace_id: workspace_id.into(),
         role: MessageRole::User,
@@ -406,9 +405,8 @@ pub fn send_message_inner_with_persist(
         tool_use: None,
         tool_result: None,
         created_at: now_unix(),
-    });
-    save_messages(data_dir, workspace_id, &current)?;
-    Ok(())
+    };
+    message_writer.queue(data_dir, workspace_id, user_msg)
 }
 
 #[cfg(test)]
@@ -623,8 +621,9 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("no agent"));
     }
 
-    #[test]
-    fn send_message_inner_appends_message_to_disk() {
+    #[tokio::test]
+    async fn send_message_inner_appends_message_to_disk() {
+        use crate::persistence::message_writer::MessageWriter;
         use crate::persistence::messages::load_messages;
         let tmp = make_data_dir();
         let state = make_state();
@@ -638,15 +637,19 @@ mod tests {
                 event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
             },
         );
-        send_message_inner_with_persist(state, tmp.path(), "ws_send_b", "Persist me").unwrap();
+        let writer = MessageWriter::new(std::time::Duration::from_millis(50));
+        send_message_inner_with_persist(state, &writer, tmp.path(), "ws_send_b", "Persist me")
+            .unwrap();
+        writer.flush_all().await;
         let on_disk = load_messages(tmp.path(), "ws_send_b").unwrap();
         assert_eq!(on_disk.len(), 1);
         assert_eq!(on_disk[0].text, "Persist me");
         assert_eq!(on_disk[0].role, crate::state::MessageRole::User);
     }
 
-    #[test]
-    fn send_message_inner_persist_handles_existing_messages() {
+    #[tokio::test]
+    async fn send_message_inner_persist_handles_existing_messages() {
+        use crate::persistence::message_writer::MessageWriter;
         use crate::persistence::messages::{load_messages, save_messages};
         use crate::state::{Message, MessageRole};
         let tmp = make_data_dir();
@@ -676,7 +679,9 @@ mod tests {
                 event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
             },
         );
-        send_message_inner_with_persist(state, tmp.path(), "ws_send_c", "next").unwrap();
+        let writer = MessageWriter::new(std::time::Duration::from_millis(50));
+        send_message_inner_with_persist(state, &writer, tmp.path(), "ws_send_c", "next").unwrap();
+        writer.flush_all().await;
         let on_disk = load_messages(tmp.path(), "ws_send_c").unwrap();
         assert_eq!(on_disk.len(), 2);
         assert_eq!(on_disk[0].text, "previous");

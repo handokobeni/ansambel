@@ -7,7 +7,8 @@ pub use crate::commands::agent_core::{
     stop_agent_inner, AgentProcess,
 };
 
-use crate::persistence::messages::{append_message, list_messages_paginated};
+use crate::persistence::message_writer::MessageWriter;
+use crate::persistence::messages::list_messages_paginated;
 use crate::state::{AgentEvent, AgentStatus, AppState, Message};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -19,6 +20,7 @@ pub async fn spawn_agent(
     workspace_id: String,
     on_event: Channel<AgentEvent>,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    writer: tauri::State<'_, MessageWriter>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let data_dir = app
@@ -37,6 +39,7 @@ pub async fn spawn_agent(
         session,
         on_event,
         state.inner().clone(),
+        writer.inner().clone(),
         workspace_id,
         data_dir,
     );
@@ -48,14 +51,21 @@ pub async fn send_message(
     workspace_id: String,
     text: String,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    writer: tauri::State<'_, MessageWriter>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("resolve app data dir: {e}"))?;
-    send_message_inner_with_persist(state.inner().clone(), &data_dir, &workspace_id, &text)
-        .map_err(|e| e.to_string())
+    send_message_inner_with_persist(
+        state.inner().clone(),
+        writer.inner(),
+        &data_dir,
+        &workspace_id,
+        &text,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -117,6 +127,7 @@ fn spawn_reader_thread(
     mut process: AgentProcess,
     initial_subscriber: Channel<AgentEvent>,
     state: Arc<Mutex<AppState>>,
+    message_writer: MessageWriter,
     workspace_id: String,
     data_dir: PathBuf,
 ) {
@@ -149,16 +160,16 @@ fn spawn_reader_thread(
             }
         };
         process_reader_events(reader, state, &workspace_id, &|ev: AgentEvent| {
-            // Persist assistant + tool events to disk so reopening the
-            // workspace later rehydrates the history. User messages are
-            // already saved by send_message_inner_with_persist on the
-            // inbound path.
+            // Persist assistant + tool events through the debounced writer
+            // so a tool-heavy turn (5+ tool_use + tool_result + assistant
+            // text) collapses into a single disk write per ~500 ms window.
+            // User messages take the same path via send_message_inner.
             if let Some(msg) = event_to_persisted_message(&ev, &workspace_id) {
-                if let Err(e) = append_message(&data_dir, &workspace_id, &msg) {
+                if let Err(e) = message_writer.queue(&data_dir, &workspace_id, msg) {
                     tracing::warn!(
                         workspace_id = %workspace_id,
                         error = %e,
-                        "agent reader: persist failed"
+                        "agent reader: queue failed"
                     );
                 }
             }

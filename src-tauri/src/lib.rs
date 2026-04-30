@@ -37,6 +37,14 @@ pub fn run() {
             };
 
             app.manage(std::sync::Arc::new(std::sync::Mutex::new(state)));
+
+            // Debounced message writer — collapses bursts of stream events
+            // into a single disk write per workspace per ~500 ms window.
+            let message_writer = crate::persistence::message_writer::MessageWriter::new(
+                std::time::Duration::from_millis(500),
+            );
+            app.manage(message_writer);
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -59,8 +67,24 @@ pub fn run() {
             crate::commands::agent::list_messages,
             crate::commands::agent::reattach_agent,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // On shutdown drain any pending debounced writes so messages
+            // queued in the last 500 ms aren't lost when the user closes
+            // the window. We block the run-loop briefly here — the flush
+            // is bounded by the in-memory pending list, not network I/O.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(writer) =
+                    app.try_state::<crate::persistence::message_writer::MessageWriter>()
+                {
+                    let writer = writer.inner().clone();
+                    tauri::async_runtime::block_on(async move {
+                        writer.flush_all().await;
+                    });
+                }
+            }
+        });
 }
 
 #[cfg(test)]

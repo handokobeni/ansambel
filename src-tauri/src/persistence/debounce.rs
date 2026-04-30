@@ -8,10 +8,14 @@ use tokio::sync::mpsc;
 use tokio::sync::Notify;
 use tokio::time::{sleep_until, Duration, Instant};
 
+/// Closure that performs the actual write at flush time. Each queue
+/// replaces any pending closure for the same path — last write wins.
+type WriteFn = Box<dyn FnOnce() + Send + 'static>;
+
 enum Msg {
     Queue {
         path: PathBuf,
-        value: serde_json::Value,
+        write_fn: WriteFn,
         deadline: Instant,
     },
     Flush,
@@ -37,13 +41,30 @@ impl DebouncedWriter {
         }
     }
 
+    /// Queues a value to be serialized to JSON and written atomically at the
+    /// debounce deadline. Backwards-compatible shorthand around
+    /// `queue_with(path, move || write_atomic(&path, &value))`.
     pub fn queue<T: Serialize>(&self, path: PathBuf, value: &T) -> Result<()> {
         let v = serde_json::to_value(value)?;
+        let path_for_writer = path.clone();
+        self.queue_with(path, move || {
+            let _ = write_atomic(&path_for_writer, &v);
+        })
+    }
+
+    /// Queues an arbitrary write closure. Useful when the on-disk format
+    /// isn't a single serde value (e.g. JSONL message files where each
+    /// flush rewrites a multi-line file). Replaces any pending closure for
+    /// the same path so bursts collapse into a single write.
+    pub fn queue_with<F>(&self, path: PathBuf, write_fn: F) -> Result<()>
+    where
+        F: FnOnce() + Send + 'static,
+    {
         let deadline = Instant::now() + self.debounce;
         self.tx
             .send(Msg::Queue {
                 path,
-                value: v,
+                write_fn: Box::new(write_fn),
                 deadline,
             })
             .map_err(|e| crate::error::AppError::Other(format!("debouncer closed: {}", e)))?;
@@ -57,19 +78,19 @@ impl DebouncedWriter {
 }
 
 async fn worker(mut rx: mpsc::UnboundedReceiver<Msg>, flushed: Arc<Notify>) {
-    let mut pending: HashMap<PathBuf, (Instant, serde_json::Value)> = HashMap::new();
+    let mut pending: HashMap<PathBuf, (Instant, WriteFn)> = HashMap::new();
     loop {
         let next_deadline = pending.values().map(|(d, _)| *d).min();
         tokio::select! {
             Some(msg) = rx.recv() => {
                 match msg {
-                    Msg::Queue { path, value, deadline } => {
-                        pending.insert(path, (deadline, value));
+                    Msg::Queue { path, write_fn, deadline } => {
+                        pending.insert(path, (deadline, write_fn));
                     }
                     Msg::Flush => {
-                        for (path, (_, value)) in pending.drain() {
+                        for (_path, (_, write_fn)) in pending.drain() {
                             let _ = tokio::task::spawn_blocking(move || {
-                                let _ = write_atomic(&path, &value);
+                                write_fn();
                             }).await;
                         }
                         flushed.notify_waiters();
@@ -86,11 +107,9 @@ async fn worker(mut rx: mpsc::UnboundedReceiver<Msg>, flushed: Arc<Notify>) {
                     .map(|(p, _)| p.clone())
                     .collect();
                 for path in ready {
-                    if let Some((_, value)) = pending.remove(&path) {
-                        let p = path.clone();
-                        let v = value.clone();
+                    if let Some((_, write_fn)) = pending.remove(&path) {
                         let _ = tokio::task::spawn_blocking(move || {
-                            let _ = write_atomic(&p, &v);
+                            write_fn();
                         }).await;
                     }
                 }
@@ -103,6 +122,7 @@ async fn worker(mut rx: mpsc::UnboundedReceiver<Msg>, flushed: Arc<Notify>) {
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::time::{sleep, Duration};
 
     #[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
@@ -168,5 +188,50 @@ mod tests {
         let lb: S = serde_json::from_str(&std::fs::read_to_string(&b).unwrap()).unwrap();
         assert_eq!(la, S { v: 1 });
         assert_eq!(lb, S { v: 2 });
+    }
+
+    #[tokio::test]
+    async fn queue_with_runs_custom_closure_at_flush() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("custom.txt");
+        let path_for_writer = path.clone();
+
+        let writer = DebouncedWriter::new(Duration::from_millis(50));
+        writer
+            .queue_with(path.clone(), move || {
+                std::fs::write(&path_for_writer, b"hello jsonl").unwrap();
+            })
+            .unwrap();
+        writer.flush_all().await;
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello jsonl");
+    }
+
+    #[tokio::test]
+    async fn queue_with_collapses_burst_to_one_call_per_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("counter.txt");
+
+        // Use an Arc<AtomicUsize> to count how many closures actually run.
+        let counter = Arc::new(AtomicUsize::new(0));
+        let writer = DebouncedWriter::new(Duration::from_millis(80));
+
+        for _ in 0..10 {
+            let counter = counter.clone();
+            let path_for_writer = path.clone();
+            writer
+                .queue_with(path.clone(), move || {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    std::fs::write(&path_for_writer, b"x").unwrap();
+                })
+                .unwrap();
+        }
+        writer.flush_all().await;
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "10 queues for the same path should collapse to a single closure invocation"
+        );
     }
 }
