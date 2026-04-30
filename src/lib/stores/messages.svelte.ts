@@ -19,6 +19,15 @@ class MessagesStore {
     this.getOrCreate(msg.workspace_id).set(msg.id, msg);
   }
 
+  hydrate(wsId: string, batch: Message[]): void {
+    const map = this.getOrCreate(wsId);
+    for (const msg of batch) {
+      if (!map.has(msg.id)) {
+        map.set(msg.id, msg);
+      }
+    }
+  }
+
   listForWorkspace(wsId: string): Message[] {
     const map = this.byWorkspace.get(wsId);
     if (!map) return [];

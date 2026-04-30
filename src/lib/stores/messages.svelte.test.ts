@@ -183,4 +183,32 @@ describe('MessagesStore', () => {
     expect(messages.listForWorkspace('ws_x')).toEqual([]);
     expect(messages.listForWorkspace('ws_y')).toEqual([]);
   });
+
+  describe('hydrate', () => {
+    it('loads a batch of messages into a workspace', () => {
+      const batch = [make('msg_1', 'ws_h'), make('msg_2', 'ws_h')];
+      messages.hydrate('ws_h', batch);
+      expect(messages.listForWorkspace('ws_h')).toHaveLength(2);
+    });
+
+    it('preserves chronological order via created_at', () => {
+      const m1 = { ...make('msg_old', 'ws_h2'), created_at: 100 };
+      const m2 = { ...make('msg_new', 'ws_h2'), created_at: 200 };
+      messages.hydrate('ws_h2', [m2, m1]);
+      const list = messages.listForWorkspace('ws_h2');
+      expect(list[0].id).toBe('msg_old');
+      expect(list[1].id).toBe('msg_new');
+    });
+
+    it('does not duplicate messages already in the store', () => {
+      messages.upsert(make('msg_dup', 'ws_h3'));
+      messages.hydrate('ws_h3', [make('msg_dup', 'ws_h3'), make('msg_new', 'ws_h3')]);
+      expect(messages.listForWorkspace('ws_h3')).toHaveLength(2);
+    });
+
+    it('handles empty batches without error', () => {
+      messages.hydrate('ws_h4', []);
+      expect(messages.listForWorkspace('ws_h4')).toEqual([]);
+    });
+  });
 });

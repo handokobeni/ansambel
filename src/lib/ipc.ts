@@ -9,7 +9,13 @@ import type {
   TaskPatch,
   KanbanColumn,
   AgentEvent,
+  Message,
 } from './types';
+
+export type ListMessagesOpts = {
+  limit?: number;
+  beforeId?: string;
+};
 
 export const api = {
   system: {
@@ -58,6 +64,15 @@ export const api = {
       invoke('send_message', { workspaceId, text }),
 
     stop: (workspaceId: string): Promise<void> => invoke('stop_agent', { workspaceId }),
+  },
+
+  messages: {
+    list: (workspaceId: string, opts: ListMessagesOpts = {}): Promise<Message[]> =>
+      invoke('list_messages', {
+        workspaceId,
+        limit: opts.limit ?? null,
+        beforeId: opts.beforeId ?? null,
+      }),
   },
 };
 

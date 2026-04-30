@@ -180,4 +180,87 @@ describe('WorkspaceView', () => {
       expect(list.find((m) => m.id === 'msg_x')?.text).toBe('streamed reply');
     });
   });
+
+  it('hydrates persisted message history on mount', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === 'list_messages') {
+        return [
+          {
+            id: 'msg_h1',
+            workspace_id: 'ws_a',
+            role: 'user',
+            text: 'old user',
+            is_partial: false,
+            tool_use: null,
+            tool_result: null,
+            created_at: 100,
+          },
+          {
+            id: 'msg_h2',
+            workspace_id: 'ws_a',
+            role: 'assistant',
+            text: 'old reply',
+            is_partial: false,
+            tool_use: null,
+            tool_result: null,
+            created_at: 200,
+          },
+        ];
+      }
+      return undefined;
+    });
+    render(WorkspaceView, { props: { workspace: ws() } });
+    await waitFor(() => {
+      const list = messages.listForWorkspace('ws_a');
+      expect(list).toHaveLength(2);
+      expect(list[0].text).toBe('old user');
+      expect(list[1].text).toBe('old reply');
+    });
+  });
+
+  it('calls list_messages on mount before spawn_agent', async () => {
+    const callOrder: string[] = [];
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      callOrder.push(cmd);
+      if (cmd === 'list_messages') return [];
+      return undefined;
+    });
+    render(WorkspaceView, {
+      props: { workspace: ws({ status: 'not_started' }) },
+    });
+    await waitFor(() => {
+      expect(callOrder).toContain('spawn_agent');
+    });
+    const listIdx = callOrder.indexOf('list_messages');
+    const spawnIdx = callOrder.indexOf('spawn_agent');
+    expect(listIdx).toBeGreaterThanOrEqual(0);
+    expect(listIdx).toBeLessThan(spawnIdx);
+  });
+
+  it('captures list_messages rejection as error in messages store', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === 'list_messages') throw 'history load failed';
+      return undefined;
+    });
+    render(WorkspaceView, { props: { workspace: ws() } });
+    await waitFor(() => {
+      expect(messages.errorFor('ws_a')).toBe('history load failed');
+    });
+  });
+
+  it('still spawns the agent when history load fails', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === 'list_messages') throw 'load fail';
+      return undefined;
+    });
+    render(WorkspaceView, {
+      props: { workspace: ws({ status: 'not_started' }) },
+    });
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        'spawn_agent',
+        expect.objectContaining({ workspaceId: 'ws_a' })
+      );
+    });
+  });
 });
