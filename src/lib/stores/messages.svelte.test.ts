@@ -413,6 +413,64 @@ describe('MessagesStore', () => {
       expect(messages.turnFor('ws_r')).toBeNull();
     });
 
+    it('re-applying a tool_use with the same id preserves created_at', () => {
+      // Covers the existing?.created_at ?? Date.now() truthy branch.
+      messages.apply(
+        {
+          type: 'tool_use',
+          message_id: 'msg_p',
+          tool_use: { id: 'toolu_p', name: 'Read', input: { file_path: '/x' } },
+        },
+        'ws_pp'
+      );
+      const id = `msg_p/tool_use/toolu_p`;
+      const first = messages.listForWorkspace('ws_pp').find((m) => m.id === id)!;
+      const firstCreated = first.created_at;
+      // Re-apply (e.g. retry / replay) — created_at must be preserved.
+      messages.apply(
+        {
+          type: 'tool_use',
+          message_id: 'msg_p',
+          tool_use: { id: 'toolu_p', name: 'Read', input: { file_path: '/y' } },
+        },
+        'ws_pp'
+      );
+      const second = messages.listForWorkspace('ws_pp').find((m) => m.id === id)!;
+      expect(second.created_at).toBe(firstCreated);
+    });
+
+    it('re-applying a tool_result with the same id preserves created_at', () => {
+      messages.apply(
+        {
+          type: 'tool_result',
+          message_id: 'msg_q',
+          tool_result: { tool_use_id: 'toolu_q', content: 'ok', is_error: false },
+        },
+        'ws_qq'
+      );
+      const id = `msg_q/tool_result/toolu_q`;
+      const first = messages.listForWorkspace('ws_qq').find((m) => m.id === id)!;
+      const firstCreated = first.created_at;
+      messages.apply(
+        {
+          type: 'tool_result',
+          message_id: 'msg_q',
+          tool_result: { tool_use_id: 'toolu_q', content: 'ok2', is_error: false },
+        },
+        'ws_qq'
+      );
+      const second = messages.listForWorkspace('ws_qq').find((m) => m.id === id)!;
+      expect(second.created_at).toBe(firstCreated);
+    });
+
+    it('attachToMessage on an unknown message id is a no-op', () => {
+      // Covers the early-return branch in attachToMessage.
+      messages.attachToMessage('ws_unknown', 'msg_nonexistent', [
+        { kind: 'image', media_type: 'image/png', path: '/x.png', filename: 'x.png' },
+      ]);
+      expect(messages.listForWorkspace('ws_unknown')).toEqual([]);
+    });
+
     it('a second status:running starts a fresh turn (zeros tokens, advances startedAt)', async () => {
       messages.apply({ type: 'status', status: 'running' }, 'ws_re');
       messages.apply(

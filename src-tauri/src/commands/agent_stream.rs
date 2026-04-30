@@ -880,4 +880,20 @@ mod tests {
             other => panic!("expected final Message, got {other:?}"),
         }
     }
+
+    #[test]
+    fn stream_parser_default_matches_new() {
+        // The Default impl is what `derive`-style call sites (and library
+        // ergonomics) rely on; without a covering test it stays a dead
+        // fall-through that silently rots if `new()` ever gains required
+        // setup the Default forgets.
+        let p_default = StreamParser::default();
+        let p_new = StreamParser::new();
+        // Neither carries observable state on a fresh instance — both must
+        // round-trip an init line identically.
+        let mut a = p_default;
+        let mut b = p_new;
+        let line = r#"{"type":"system","subtype":"init","session_id":"s","model":"m","tools":[],"cwd":"/"}"#;
+        assert_eq!(a.parse_line(line).unwrap(), b.parse_line(line).unwrap());
+    }
 }

@@ -124,6 +124,38 @@ describe('TitleBar', () => {
     });
     expect(repos.select).not.toHaveBeenCalled();
   });
+
+  it('coerces non-Error rejections to a string for the alert', async () => {
+    // Covers the err-instanceof-Error fallback branch. Tauri commands
+    // commonly reject with a plain string rather than an Error object.
+    vi.mocked(open).mockResolvedValue('/home/user/raw-string-error');
+    vi.mocked(repos.add).mockRejectedValue('plain string failure');
+    render(TitleBar);
+    await fireEvent.click(screen.getByRole('button', { name: /add repo/i }));
+    await waitFor(() => {
+      expect(globalThis.alert).toHaveBeenCalledWith(
+        expect.stringContaining('plain string failure')
+      );
+    });
+  });
+
+  it('ignores a second click while the first add is in flight', async () => {
+    // Covers the `if (adding) return;` short-circuit so a fast double-tap
+    // doesn't open two dialogs / fire two backend calls.
+    let resolveOpen!: (v: string) => void;
+    vi.mocked(open).mockReturnValue(
+      new Promise<string>((r) => {
+        resolveOpen = r;
+      }) as unknown as Promise<string | string[] | null>
+    );
+    render(TitleBar);
+    const btn = screen.getByRole('button', { name: /add repo/i });
+    await fireEvent.click(btn);
+    await fireEvent.click(btn);
+    // Only one open() call regardless of double-click.
+    expect(open).toHaveBeenCalledTimes(1);
+    resolveOpen('/cancel-anyway');
+  });
 });
 
 describe('TitleBar mode toggle', () => {

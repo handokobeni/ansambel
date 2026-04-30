@@ -20,10 +20,14 @@
 
   async function handleAddRepo() {
     if (adding) return;
-    const selected = await open({ directory: true, multiple: false });
-    if (typeof selected !== 'string' || !selected) return;
+    // Latch the in-flight flag BEFORE awaiting the dialog so a fast
+    // double-click can't open two pickers / fire two backend calls. The
+    // finally below clears it after the whole flow (cancel, success, or
+    // error) settles.
     adding = true;
     try {
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected !== 'string' || !selected) return;
       const repo = await repos.add(selected);
       repos.select(repo.id);
       // Backend `add_repo` is idempotent on the canonical path — re-Add of

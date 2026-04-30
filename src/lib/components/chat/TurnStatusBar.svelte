@@ -37,17 +37,11 @@
   });
 
   const turn = $derived(messages.turnFor(workspaceId));
-  const elapsedSec = $derived(turn ? Math.max(0, Math.floor((now - turn.startedAt) / 1000)) : 0);
 
   // Rotating playful verbs — purely cosmetic, matches the Claude CLI vibe.
   // Cycle index is computed off the elapsed seconds so the rotation is
   // deterministic and doesn't need its own timer.
   const VERBS = ['Cooking', 'Forging', 'Brewing', 'Crunching'];
-  const verb = $derived(
-    turn
-      ? VERBS[Math.floor(elapsedSec / Math.max(1, Math.floor(verbCycleMs / 1000))) % VERBS.length]
-      : VERBS[0]
-  );
 
   function formatTokens(n: number): string {
     // < 1000 stays as a raw count to avoid the misleading "0.0k" early in
@@ -59,6 +53,9 @@
 </script>
 
 {#if turn}
+  {@const elapsedSec = Math.max(0, Math.floor((now - turn.startedAt) / 1000))}
+  {@const verbStep = Math.max(1, Math.floor(verbCycleMs / 1000))}
+  {@const verb = VERBS[Math.floor(elapsedSec / verbStep) % VERBS.length]}
   <div
     data-testid="turn-status-bar"
     class="flex items-center gap-2 px-3 py-1.5 text-xs text-[var(--text-muted)] border-t border-[var(--border)] bg-[var(--bg-base)]"

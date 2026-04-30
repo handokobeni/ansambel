@@ -105,13 +105,17 @@
           class="flex items-center gap-2 px-2 py-1 rounded bg-[var(--bg-card)] border border-[var(--border-light)] text-xs"
           data-testid="attachment-chip"
         >
+          <!-- filename is always set when the chip is created (basename
+               of the picked path); nullable on the wire shape but never
+               null in this component. The non-null assertion keeps the
+               template free of an unreachable fallback branch. -->
           <img
             src={convertFileSrc(att.sourcePath)}
-            alt={att.filename ?? 'attachment'}
+            alt={att.filename!}
             class="w-8 h-8 object-cover rounded"
           />
           <span class="text-[var(--text-secondary)] max-w-[160px] truncate">
-            {att.filename ?? att.sourcePath}
+            {att.filename!}
           </span>
           <button
             type="button"

@@ -1917,6 +1917,38 @@ mod tests {
     }
 
     #[test]
+    fn agent_process_reader_returns_stdout_pipe_then_errors_on_repeat() {
+        // AgentProcess::reader takes ownership of the stdout pipe so the
+        // reader thread can stream lines without holding the Child. A second
+        // call after the take must return AppError::Command rather than
+        // panicking on an Option::take of None.
+        let mut child = Command::new(if cfg!(windows) { "cmd" } else { "sh" })
+            .args::<&[&str], _>(if cfg!(windows) {
+                &["/C", "echo hi"]
+            } else {
+                &["-c", "echo hi"]
+            })
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn helper for AgentProcess test");
+        let stdout = child.stdout.take();
+        let mut proc = AgentProcess { child, stdout };
+        // First call hands out the stdout reader.
+        let reader = proc.reader();
+        assert!(reader.is_ok(), "first reader() must succeed");
+        // Drain so the child can exit cleanly.
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut reader.unwrap(), &mut buf);
+        // Second call must surface a structured error, not a panic.
+        let again = proc.reader();
+        assert!(again.is_err(), "second reader() must error after take");
+        assert!(
+            proc.try_wait().is_ok(),
+            "try_wait must surface Ok even after exit"
+        );
+    }
+
+    #[test]
     fn stop_agent_inner_flips_cancel_token() {
         use std::sync::atomic::Ordering;
         use tokio::sync::mpsc;
