@@ -160,7 +160,10 @@ describe('MessagesStore', () => {
     expect(markers[0].id).not.toBe(markers[1].id);
   });
 
-  it('apply ToolUse attaches tool_use to existing message', () => {
+  it('apply ToolUse creates a separate tool bubble alongside the parent text', () => {
+    // Live behaviour must match what the disk persister produces (separate
+    // Message per tool call) so hydration is idempotent and multi-tool
+    // turns render every call rather than collapsing into one bubble.
     messages.apply(
       {
         type: 'message',
@@ -175,23 +178,41 @@ describe('MessagesStore', () => {
       {
         type: 'tool_use',
         message_id: 'msg_a',
-        tool_use: {
-          id: 'toolu_a',
-          name: 'Read',
-          input: { path: '/etc/hosts' },
-        },
+        tool_use: { id: 'toolu_a', name: 'Read', input: { file_path: '/etc/hosts' } },
       },
       'ws_a'
     );
     const list = messages.listForWorkspace('ws_a');
-    expect(list[0].tool_use).toEqual({
-      id: 'toolu_a',
-      name: 'Read',
-      input: { path: '/etc/hosts' },
-    });
+    expect(list).toHaveLength(2);
+    const text = list.find((m) => m.id === 'msg_a');
+    const tool = list.find((m) => m.id === 'msg_a/tool_use/toolu_a');
+    expect(text!.text).toBe('using tool');
+    expect(text!.tool_use).toBeNull();
+    expect(tool!.role).toBe('tool');
+    expect(tool!.tool_use?.name).toBe('Read');
   });
 
-  it('apply ToolUse with no prior message creates a synthetic assistant message', () => {
+  it('apply ToolUse keeps each tool call distinct when one turn fires multiple', () => {
+    // Claude commonly issues Read + Bash + Edit in a single assistant
+    // message — the old keying-by-parent-message_id collapsed them all
+    // into one bubble showing only the last tool. Disk gets it right via
+    // unique ids; live must too.
+    const tools = [
+      { id: 'toolu_1', name: 'Read', input: { file_path: '/a' } },
+      { id: 'toolu_2', name: 'Bash', input: { command: 'ls' } },
+      { id: 'toolu_3', name: 'Edit', input: { file_path: '/b', old_string: 'x', new_string: 'y' } },
+    ];
+    for (const tu of tools) {
+      messages.apply({ type: 'tool_use', message_id: 'msg_multi', tool_use: tu }, 'ws_a');
+    }
+    const list = messages.listForWorkspace('ws_a').filter((m) => m.tool_use);
+    expect(list).toHaveLength(3);
+    expect(list.map((m) => m.tool_use!.name).sort()).toEqual(['Bash', 'Edit', 'Read']);
+  });
+
+  it('apply ToolUse with no prior message still produces a tool bubble', () => {
+    // Tool-only assistant turns (no text) — the disk persister writes them
+    // as a Tool-role Message; live must do the same.
     messages.apply(
       {
         type: 'tool_use',
@@ -202,9 +223,9 @@ describe('MessagesStore', () => {
     );
     const list = messages.listForWorkspace('ws_a');
     expect(list).toHaveLength(1);
-    expect(list[0].role).toBe('assistant');
+    expect(list[0].role).toBe('tool');
     expect(list[0].tool_use?.name).toBe('Write');
-    expect(list[0].text).toBe('');
+    expect(list[0].id).toBe('msg_orphan/tool_use/toolu_b');
   });
 
   it('apply Message event preserves created_at on subsequent updates', () => {
@@ -238,7 +259,7 @@ describe('MessagesStore', () => {
     });
   });
 
-  it('apply ToolResult creates a tool message', () => {
+  it('apply ToolResult creates a tool message keyed by tool_use_id', () => {
     messages.apply(
       {
         type: 'tool_result',
@@ -250,7 +271,30 @@ describe('MessagesStore', () => {
     const list = messages.listForWorkspace('ws_a');
     expect(list).toHaveLength(1);
     expect(list[0].role).toBe('tool');
+    expect(list[0].id).toBe('msg_r/tool_result/toolu_a');
     expect(list[0].tool_result?.content).toBe('ok');
+  });
+
+  it('apply ToolResult keeps each tool_use_id in its own bubble', () => {
+    messages.apply(
+      {
+        type: 'tool_result',
+        message_id: 'msg_user',
+        tool_result: { tool_use_id: 'toolu_1', content: 'a', is_error: false },
+      },
+      'ws_a'
+    );
+    messages.apply(
+      {
+        type: 'tool_result',
+        message_id: 'msg_user',
+        tool_result: { tool_use_id: 'toolu_2', content: 'b', is_error: false },
+      },
+      'ws_a'
+    );
+    const list = messages.listForWorkspace('ws_a');
+    expect(list).toHaveLength(2);
+    expect(list.map((m) => m.tool_result!.content).sort()).toEqual(['a', 'b']);
   });
 
   it('reset clears all workspaces', () => {

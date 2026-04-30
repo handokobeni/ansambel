@@ -1,5 +1,5 @@
 import { SvelteMap } from 'svelte/reactivity';
-import type { AgentEvent, AgentStatus, Message, MessageRole } from '../types';
+import type { AgentEvent, AgentStatus, Message } from '../types';
 
 class MessagesStore {
   readonly byWorkspace = new SvelteMap<string, SvelteMap<string, Message>>();
@@ -62,34 +62,44 @@ class MessagesStore {
         return;
       }
       case 'tool_use': {
-        const existing = this.byWorkspace.get(wsId)?.get(ev.message_id);
-        if (existing) {
-          this.upsert({ ...existing, tool_use: ev.tool_use });
-        } else {
-          this.upsert({
-            id: ev.message_id,
-            workspace_id: wsId,
-            role: 'assistant',
-            text: '',
-            is_partial: false,
-            tool_use: ev.tool_use,
-            tool_result: null,
-            created_at: Date.now(),
-          });
-        }
+        // One bubble per tool call. Keying by parent message_id (the old
+        // behaviour) collapsed multi-tool turns — Claude commonly fires
+        // Read+Bash+Edit in a single assistant message and the live store
+        // would overwrite the tool_use field on each ToolUse event,
+        // showing only the last (or sometimes none, when the bubble had
+        // already been claimed by a text Message). The disk persister
+        // already uses this `${message_id}/tool_use/${tool_use.id}` shape,
+        // so aligning live with it also makes hydration idempotent.
+        const id = `${ev.message_id}/tool_use/${ev.tool_use.id}`;
+        const existing = this.byWorkspace.get(wsId)?.get(id);
+        const created_at = existing?.created_at ?? Date.now();
+        this.upsert({
+          id,
+          workspace_id: wsId,
+          role: 'tool',
+          text: '',
+          is_partial: false,
+          tool_use: ev.tool_use,
+          tool_result: null,
+          created_at,
+        });
         return;
       }
       case 'tool_result': {
-        const role: MessageRole = 'tool';
+        // Same id scheme as the persister so a tool_use bubble and its
+        // matching tool_result bubble line up live and after reload.
+        const id = `${ev.message_id}/tool_result/${ev.tool_result.tool_use_id}`;
+        const existing = this.byWorkspace.get(wsId)?.get(id);
+        const created_at = existing?.created_at ?? Date.now();
         this.upsert({
-          id: ev.message_id,
+          id,
           workspace_id: wsId,
-          role,
+          role: 'tool',
           text: '',
           is_partial: false,
           tool_use: null,
           tool_result: ev.tool_result,
-          created_at: Date.now(),
+          created_at,
         });
         return;
       }
