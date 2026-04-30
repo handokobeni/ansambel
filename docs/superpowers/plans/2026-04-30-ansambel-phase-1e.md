@@ -1,12 +1,26 @@
 # Phase 1e — Robustness, Resilience, and Polish
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use
+> superpowers:subagent-driven-development (recommended) or
+> superpowers:executing-plans to implement this plan task-by-task. Steps use
+> checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close out Phase 1 with no functional regressions, debounced disk writes, surfaced CLI errors, and graceful failure modes — making Ansambel actually usable for real multi-hour sessions.
+**Goal:** Close out Phase 1 with no functional regressions, debounced disk
+writes, surfaced CLI errors, and graceful failure modes — making Ansambel
+actually usable for real multi-hour sessions.
 
-**Architecture:** Three priority buckets, executed in order. **P0** fixes the break-points users hit on day one (workspace-switch streaming bug, no stop button, no real-CLI proof of partial streaming). **P1** trades raw correctness for resilience: debounced writes, tail-read pagination, stderr surfacing, schema-version sentinel, graceful reader shutdown. **P2** polishes the UX: DOM virtualization for the chat list and actionable error CTAs for spawn failures. No new features — every task closes a known gap or hardens an existing flow.
+**Architecture:** Three priority buckets, executed in order. **P0** fixes the
+break-points users hit on day one (workspace-switch streaming bug, no stop
+button, no real-CLI proof of partial streaming). **P1** trades raw correctness
+for resilience: debounced writes, tail-read pagination, stderr surfacing,
+schema-version sentinel, graceful reader shutdown. **P2** polishes the UX: DOM
+virtualization for the chat list and actionable error CTAs for spawn failures.
+No new features — every task closes a known gap or hardens an existing flow.
 
-**Tech Stack:** Tauri v2, Svelte 5, Rust 1.75+, Bun, Vitest, Playwright. No new dependencies. The existing `DebouncedWriter` (`src-tauri/src/persistence/debounce.rs`) is wired up; everything else is in-place hardening.
+**Tech Stack:** Tauri v2, Svelte 5, Rust 1.75+, Bun, Vitest, Playwright. No new
+dependencies. The existing `DebouncedWriter`
+(`src-tauri/src/persistence/debounce.rs`) is wired up; everything else is
+in-place hardening.
 
 ---
 
@@ -40,15 +54,22 @@ tests/e2e/phase-1e/
 └── streaming.spec.ts                   # CREATE: real-CLI partial-streaming smoke
 ```
 
-Each agent.rs task ships with both an `_inner` unit test and a wrapper command-existence test (the existing pattern). The frontend tasks add component tests; the streaming verification adds a Playwright spec.
+Each agent.rs task ships with both an `_inner` unit test and a wrapper
+command-existence test (the existing pattern). The frontend tasks add component
+tests; the streaming verification adds a Playwright spec.
 
 ---
 
-## Task 1: Reattach Channel on workspace switch  [P0]
+## Task 1: Reattach Channel on workspace switch [P0]
 
-**Why:** Right now `WorkspaceView.onMount` only spawns the agent when status is `not_started`/`waiting`. If the user switches away from a running workspace and back, no listener is attached — the backend keeps streaming events into a Channel whose handler was GC'd, and the UI freezes until the agent stops or the app restarts.
+**Why:** Right now `WorkspaceView.onMount` only spawns the agent when status is
+`not_started`/`waiting`. If the user switches away from a running workspace and
+back, no listener is attached — the backend keeps streaming events into a
+Channel whose handler was GC'd, and the UI freezes until the agent stops or the
+app restarts.
 
 **Files:**
+
 - Modify: `src-tauri/src/state.rs` (AgentHandle struct)
 - Modify: `src-tauri/src/commands/agent_core.rs` (broadcaster wiring)
 - Modify: `src-tauri/src/commands/agent.rs` (new `reattach_agent` command)
@@ -104,8 +125,10 @@ fn agent_handle_event_broadcaster_delivers_to_multiple_subscribers() {
 
 - [ ] **Step 2: Run test to verify failure**
 
-Run: `cd src-tauri && cargo test --lib commands::agent_core::tests::reattach_agent_inner -- --nocapture`
-Expected: FAIL — `reattach_agent_inner` not defined and `AgentHandle` missing `event_tx`.
+Run:
+`cd src-tauri && cargo test --lib commands::agent_core::tests::reattach_agent_inner -- --nocapture`
+Expected: FAIL — `reattach_agent_inner` not defined and `AgentHandle` missing
+`event_tx`.
 
 - [ ] **Step 3: Add broadcaster field to AgentHandle**
 
@@ -164,7 +187,8 @@ pub fn reattach_agent_inner(
 
 - [ ] **Step 6: Refactor spawn_reader_thread to broadcast**
 
-In `src-tauri/src/commands/agent.rs`, change the closure to use the broadcast sender from the handle:
+In `src-tauri/src/commands/agent.rs`, change the closure to use the broadcast
+sender from the handle:
 
 ```rust
 fn spawn_reader_thread(
@@ -249,12 +273,13 @@ pub async fn reattach_agent(
 }
 ```
 
-Register in `src-tauri/src/lib.rs` invoke_handler list. Update the `all_agent_commands_are_accessible` test to include `reattach_agent`.
+Register in `src-tauri/src/lib.rs` invoke_handler list. Update the
+`all_agent_commands_are_accessible` test to include `reattach_agent`.
 
 - [ ] **Step 8: Run Rust tests**
 
-Run: `cargo test --lib`
-Expected: PASS — all 240+ tests including the three new reattach tests.
+Run: `cargo test --lib` Expected: PASS — all 240+ tests including the three new
+reattach tests.
 
 - [ ] **Step 9: Add the IPC wrapper**
 
@@ -321,7 +346,8 @@ it('routes reattach channel events through messages.apply', async () => {
   let captured: { onmessage?: (ev: unknown) => void } | undefined;
   vi.mocked(invoke).mockImplementation(async (cmd, args) => {
     if (cmd === 'reattach_agent') {
-      captured = (args as { onEvent: { onmessage?: (ev: unknown) => void } }).onEvent;
+      captured = (args as { onEvent: { onmessage?: (ev: unknown) => void } })
+        .onEvent;
     }
     return undefined;
   });
@@ -335,17 +361,19 @@ it('routes reattach channel events through messages.apply', async () => {
     is_partial: false,
   });
   await waitFor(() => {
-    expect(messages.listForWorkspace('ws_a').find((m) => m.id === 'msg_live')?.text).toBe('live');
+    expect(
+      messages.listForWorkspace('ws_a').find((m) => m.id === 'msg_live')?.text
+    ).toBe('live');
   });
 });
 ```
 
-Update existing test "does not spawn_agent when status is running" — keep it but rename to clarify intent.
+Update existing test "does not spawn_agent when status is running" — keep it but
+rename to clarify intent.
 
 - [ ] **Step 12: Run frontend tests**
 
-Run: `bun run test`
-Expected: PASS — 225+ tests including new reattach tests.
+Run: `bun run test` Expected: PASS — 225+ tests including new reattach tests.
 
 - [ ] **Step 13: Commit**
 
@@ -371,11 +399,13 @@ on the next non-partial message anyway."
 
 ---
 
-## Task 2: Stop button + abort UX  [P0]
+## Task 2: Stop button + abort UX [P0]
 
-**Why:** `stop_agent` IPC exists but no UI calls it. The only way to abort a runaway turn is to kill the app.
+**Why:** `stop_agent` IPC exists but no UI calls it. The only way to abort a
+runaway turn is to kill the app.
 
 **Files:**
+
 - Modify: `src/lib/components/workspace/WorkspaceView.svelte`
 - Modify: `src/lib/components/workspace/WorkspaceView.test.ts`
 
@@ -408,7 +438,8 @@ it('Stop button disabled while stop is in flight', async () => {
   messages.apply({ type: 'status', status: 'running' }, 'ws_a');
   let resolveStop!: () => void;
   vi.mocked(invoke).mockImplementation(async (cmd) => {
-    if (cmd === 'stop_agent') return new Promise<void>((r) => (resolveStop = r));
+    if (cmd === 'stop_agent')
+      return new Promise<void>((r) => (resolveStop = r));
     return undefined;
   });
   const { getByRole } = render(WorkspaceView, { props: { workspace: ws() } });
@@ -451,7 +482,9 @@ In `WorkspaceView.svelte`:
   class="flex items-center justify-between px-4 py-2 border-b border-[var(--border)] bg-[var(--bg-sidebar)]"
 >
   <div class="flex flex-col">
-    <h2 class="text-sm font-semibold text-[var(--text-primary)]">{workspace.title}</h2>
+    <h2 class="text-sm font-semibold text-[var(--text-primary)]">
+      {workspace.title}
+    </h2>
     <code class="text-xs text-[var(--text-muted)]">{workspace.branch}</code>
   </div>
   <div class="flex items-center gap-2">
@@ -495,11 +528,15 @@ error channel."
 
 ---
 
-## Task 3: Verify partial-streaming with the real CLI  [P0]
+## Task 3: Verify partial-streaming with the real CLI [P0]
 
-**Why:** All current evidence for token streaming is from unit tests with mocked NDJSON. We don't actually know that Claude's `--include-partial-messages` emits at the granularity our UI needs (per-token vs per-sentence). If the granularity is too coarse the feature is theatrical, not real.
+**Why:** All current evidence for token streaming is from unit tests with mocked
+NDJSON. We don't actually know that Claude's `--include-partial-messages` emits
+at the granularity our UI needs (per-token vs per-sentence). If the granularity
+is too coarse the feature is theatrical, not real.
 
 **Files:**
+
 - Create: `tests/e2e/phase-1e/streaming.spec.ts`
 - Modify: `tests/e2e/tauri-shim.ts` (if needed — record event timing)
 
@@ -549,7 +586,8 @@ test.describe('partial-message streaming', () => {
 
 - [ ] **Step 2: Extend the mock CLI to emit partial messages**
 
-If the existing `ANSAMBEL_MOCK_CLAUDE` mode doesn't already emit `stream_event` lines, add a `streaming` profile. The mock should print:
+If the existing `ANSAMBEL_MOCK_CLAUDE` mode doesn't already emit `stream_event`
+lines, add a `streaming` profile. The mock should print:
 
 ```
 {"type":"system","subtype":"init",...}
@@ -564,12 +602,17 @@ If the existing `ANSAMBEL_MOCK_CLAUDE` mode doesn't already emit `stream_event` 
 
 - [ ] **Step 3: Run the spec**
 
-Run: `bun run test:e2e tests/e2e/phase-1e/streaming.spec.ts`
-Expected: PASS — three monotonically growing text lengths.
+Run: `bun run test:e2e tests/e2e/phase-1e/streaming.spec.ts` Expected: PASS —
+three monotonically growing text lengths.
 
 - [ ] **Step 4: Manual verification with real CLI**
 
-Spin up `bun run tauri dev` against the real Claude CLI, send a prompt that elicits a long response ("explain transformers in 200 words"), confirm by eye that text appears smoothly. If granularity feels chunky (multi-word jumps), file a follow-up issue noting the observed cadence — that informs whether we need to coalesce backend-side. Document the cadence in `docs/superpowers/notes/streaming-cadence.md` (one paragraph).
+Spin up `bun run tauri dev` against the real Claude CLI, send a prompt that
+elicits a long response ("explain transformers in 200 words"), confirm by eye
+that text appears smoothly. If granularity feels chunky (multi-word jumps), file
+a follow-up issue noting the observed cadence — that informs whether we need to
+coalesce backend-side. Document the cadence in
+`docs/superpowers/notes/streaming-cadence.md` (one paragraph).
 
 - [ ] **Step 5: Commit**
 
@@ -591,14 +634,20 @@ docs/superpowers/notes/streaming-cadence.md."
 
 ---
 
-## Task 4: Wire DebouncedWriter to append_message  [P1]
+## Task 4: Wire DebouncedWriter to append_message [P1]
 
-**Why:** Project spec calls for 500ms debounced writes for messages. `DebouncedWriter` exists in `persistence/debounce.rs` but isn't wired up — every event triggers a full file rewrite. With token streaming each turn is one final non-partial write, but tool-heavy turns (5+ tool_use + tool_result) still produce 5–10 sync writes per turn.
+**Why:** Project spec calls for 500ms debounced writes for messages.
+`DebouncedWriter` exists in `persistence/debounce.rs` but isn't wired up — every
+event triggers a full file rewrite. With token streaming each turn is one final
+non-partial write, but tool-heavy turns (5+ tool_use + tool_result) still
+produce 5–10 sync writes per turn.
 
 **Files:**
+
 - Modify: `src-tauri/src/state.rs` (AppState gains writer)
 - Modify: `src-tauri/src/lib.rs` (construct writer at startup)
-- Modify: `src-tauri/src/commands/agent.rs` (use writer instead of direct append)
+- Modify: `src-tauri/src/commands/agent.rs` (use writer instead of direct
+  append)
 - Modify: `src-tauri/src/persistence/messages.rs` (queue helper)
 
 - [ ] **Step 1: Write the failing test**
@@ -634,7 +683,8 @@ async fn debounced_append_collapses_burst_to_single_write() {
 
 - [ ] **Step 2: Run test to verify failure**
 
-Run: `cd src-tauri && cargo test --lib persistence::messages::tests::debounced_append`
+Run:
+`cd src-tauri && cargo test --lib persistence::messages::tests::debounced_append`
 Expected: FAIL — `queue_message_append` not defined.
 
 - [ ] **Step 3: Add queue_message_append**
@@ -709,16 +759,19 @@ process_reader_events(reader, state.clone(), &workspace_id, &|ev: AgentEvent| {
 });
 ```
 
-Also update `send_message_inner_with_persist` to use `queue_message_append` for the user-message path so persistence is uniform.
+Also update `send_message_inner_with_persist` to use `queue_message_append` for
+the user-message path so persistence is uniform.
 
 - [ ] **Step 6: Add app shutdown flush**
 
-In `src-tauri/src/lib.rs` Tauri setup hook, register a `RunEvent::ExitRequested` handler that calls `state.messages_writer.flush_all().await` before exit. This guarantees pending writes are persisted on app close.
+In `src-tauri/src/lib.rs` Tauri setup hook, register a `RunEvent::ExitRequested`
+handler that calls `state.messages_writer.flush_all().await` before exit. This
+guarantees pending writes are persisted on app close.
 
 - [ ] **Step 7: Run all Rust tests**
 
-Run: `cd src-tauri && cargo test --lib`
-Expected: PASS — 240+ including the new debounced_append test.
+Run: `cd src-tauri && cargo test --lib` Expected: PASS — 240+ including the new
+debounced_append test.
 
 - [ ] **Step 8: Commit**
 
@@ -739,11 +792,15 @@ amplification on workspaces with thousands of messages."
 
 ---
 
-## Task 5: Tail-read pagination (JSONL on-disk format)  [P1]
+## Task 5: Tail-read pagination (JSONL on-disk format) [P1]
 
-**Why:** `list_messages_paginated` currently loads the entire JSON file into memory and slices the last 50. For a 5MB workspace history that's 5MB read+parse on every load-earlier click. Switching the on-disk format to JSONL (one Message per line) lets us seek from the end and read only what we need.
+**Why:** `list_messages_paginated` currently loads the entire JSON file into
+memory and slices the last 50. For a 5MB workspace history that's 5MB read+parse
+on every load-earlier click. Switching the on-disk format to JSONL (one Message
+per line) lets us seek from the end and read only what we need.
 
 **Files:**
+
 - Modify: `src-tauri/src/persistence/messages.rs`
 - Test: same file
 - Migration helper: read both formats; write only JSONL going forward.
@@ -794,8 +851,7 @@ fn append_message_writes_jsonl_when_file_is_empty_or_v2() {
 
 - [ ] **Step 2: Run tests to verify failure**
 
-Run: `cargo test --lib persistence::messages::tests::jsonl`
-Expected: FAIL.
+Run: `cargo test --lib persistence::messages::tests::jsonl` Expected: FAIL.
 
 - [ ] **Step 3: Implement format detection**
 
@@ -965,7 +1021,8 @@ pub fn load_messages(data_dir: &Path, workspace_id: &str) -> Result<Vec<Message>
 }
 ```
 
-(Schema-version check covered in Task 8; for now `check_schema_version` can be `Ok(())` and tightened in that task.)
+(Schema-version check covered in Task 8; for now `check_schema_version` can be
+`Ok(())` and tightened in that task.)
 
 - [ ] **Step 7: Update append_message to write JSONL**
 
@@ -1034,12 +1091,13 @@ fn existing_jsonl_contains_id(path: &Path, id: &str) -> Result<bool> {
 }
 ```
 
-`save_messages` is kept for the test fixture path that pre-populates v1 files; it now writes JSONL by default but we keep a `save_legacy_messages` test helper.
+`save_messages` is kept for the test fixture path that pre-populates v1 files;
+it now writes JSONL by default but we keep a `save_legacy_messages` test helper.
 
 - [ ] **Step 8: Run all persistence tests**
 
-Run: `cargo test --lib persistence::messages`
-Expected: PASS — 19+ tests including new JSONL tests, with legacy v1 files still loading.
+Run: `cargo test --lib persistence::messages` Expected: PASS — 19+ tests
+including new JSONL tests, with legacy v1 files still loading.
 
 - [ ] **Step 9: Commit**
 
@@ -1062,12 +1120,16 @@ append converts them to JSONL transparently."
 
 ---
 
-## Task 6: Surface CLI stderr to the UI  [P1]
+## Task 6: Surface CLI stderr to the UI [P1]
 
-**Why:** Right now stderr is drained to `tracing::warn`. If the user's CLI is missing auth, hits a quota limit, or has a network error, they see "Stopped" with no context.
+**Why:** Right now stderr is drained to `tracing::warn`. If the user's CLI is
+missing auth, hits a quota limit, or has a network error, they see "Stopped"
+with no context.
 
 **Files:**
-- Modify: `src-tauri/src/commands/agent_core.rs` (forward stderr through broadcaster)
+
+- Modify: `src-tauri/src/commands/agent_core.rs` (forward stderr through
+  broadcaster)
 - Modify: `src/lib/components/chat/ChatPanel.svelte` (error banner)
 - Modify: `src/lib/components/chat/ChatPanel.test.ts`
 
@@ -1170,8 +1232,7 @@ if let Some(stderr) = stderr_pipe {
 
 - [ ] **Step 4: Run all tests**
 
-Run: `bun run test && cd src-tauri && cargo test --lib`
-Expected: PASS.
+Run: `bun run test && cd src-tauri && cargo test --lib` Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -1188,11 +1249,15 @@ banner so users know why their turn failed instead of just seeing
 
 ---
 
-## Task 7: Graceful reader shutdown via cancel token  [P1]
+## Task 7: Graceful reader shutdown via cancel token [P1]
 
-**Why:** Today the reader thread exits only on EOF. If the child hangs (e.g., CLI deadlock), the reader hangs too. `stop_agent` kills the child, which forces EOF — but doesn't itself signal the reader. Adding a cancel token is a defense-in-depth.
+**Why:** Today the reader thread exits only on EOF. If the child hangs (e.g.,
+CLI deadlock), the reader hangs too. `stop_agent` kills the child, which forces
+EOF — but doesn't itself signal the reader. Adding a cancel token is a
+defense-in-depth.
 
 **Files:**
+
 - Modify: `src-tauri/src/state.rs` (AgentHandle gains cancel)
 - Modify: `src-tauri/src/commands/agent_core.rs` (reader respects cancel)
 - Modify: `src-tauri/src/commands/agent.rs` (stop_agent triggers cancel + kill)
@@ -1299,7 +1364,9 @@ pub struct AgentHandle {
 }
 ```
 
-Initialize in `spawn_agent_inner`, pass to the reader thread, set to true in `stop_agent_inner` *before* dropping the handle (so the reader exits cleanly even if EOF doesn't fire promptly).
+Initialize in `spawn_agent_inner`, pass to the reader thread, set to true in
+`stop_agent_inner` _before_ dropping the handle (so the reader exits cleanly
+even if EOF doesn't fire promptly).
 
 - [ ] **Step 4: Update stop_agent_inner**
 
@@ -1324,8 +1391,7 @@ pub fn stop_agent_inner(state: Arc<Mutex<AppState>>, workspace_id: &str) -> AppR
 
 - [ ] **Step 5: Run all Rust tests**
 
-Run: `cargo test --lib`
-Expected: PASS — including the new cancel test.
+Run: `cargo test --lib` Expected: PASS — including the new cancel test.
 
 - [ ] **Step 6: Commit**
 
@@ -1342,11 +1408,15 @@ process_reader_events_with_cancel does the work."
 
 ---
 
-## Task 8: Schema-version sentinel  [P1]
+## Task 8: Schema-version sentinel [P1]
 
-**Why:** `schema_version` has been written to disk since Phase 1c but never validated. If we change `Message` in a future release and a user opens an old file with the new app, serde will silently default missing fields — risking corruption or wrong defaults. A 10-line check now prevents data loss later.
+**Why:** `schema_version` has been written to disk since Phase 1c but never
+validated. If we change `Message` in a future release and a user opens an old
+file with the new app, serde will silently default missing fields — risking
+corruption or wrong defaults. A 10-line check now prevents data loss later.
 
 **Files:**
+
 - Modify: `src-tauri/src/persistence/messages.rs`
 
 - [ ] **Step 1: Write the failing test**
@@ -1388,12 +1458,12 @@ fn check_schema_version(v: u32) -> Result<()> {
 }
 ```
 
-Wire into both load paths (legacy JSON branch and JSONL header) inside `load_messages` and `list_messages_paginated`.
+Wire into both load paths (legacy JSON branch and JSONL header) inside
+`load_messages` and `list_messages_paginated`.
 
 - [ ] **Step 3: Run tests**
 
-Run: `cargo test --lib persistence::messages`
-Expected: PASS.
+Run: `cargo test --lib persistence::messages` Expected: PASS.
 
 - [ ] **Step 4: Commit**
 
@@ -1410,18 +1480,31 @@ surfaces an actionable error message."
 
 ---
 
-## Task 9: DOM virtualization for the chat list  [P2]
+## Task 9: DOM virtualization for the chat list [P2]
 
-**Why:** Without virtualization, every persisted message renders as a real DOM node. Pagination + lazy-load grow the count by 50 per click; token streaming triggers reactivity that re-renders the active assistant bubble while every sibling is laid out and painted. Variable-height markdown bubbles compound this. Virtualization keeps the DOM bounded to the viewport (~30-50 nodes) regardless of how many messages are in the store, so memory of `Message` objects in the SvelteMap is no longer a concern — eviction becomes unnecessary.
+**Why:** Without virtualization, every persisted message renders as a real DOM
+node. Pagination + lazy-load grow the count by 50 per click; token streaming
+triggers reactivity that re-renders the active assistant bubble while every
+sibling is laid out and painted. Variable-height markdown bubbles compound this.
+Virtualization keeps the DOM bounded to the viewport (~30-50 nodes) regardless
+of how many messages are in the store, so memory of `Message` objects in the
+SvelteMap is no longer a concern — eviction becomes unnecessary.
 
-This task replaces the LRU/FIFO eviction approach considered earlier. Eviction was treating the symptom (memory) rather than the cause (DOM cost); virtualization solves both.
+This task replaces the LRU/FIFO eviction approach considered earlier. Eviction
+was treating the symptom (memory) rather than the cause (DOM cost);
+virtualization solves both.
 
 **Files:**
+
 - Modify: `package.json` (add `@tanstack/svelte-virtual`)
 - Modify: `src/lib/components/chat/ChatPanel.svelte`
 - Modify: `src/lib/components/chat/ChatPanel.test.ts`
 
-> **Library compatibility note:** `@tanstack/svelte-virtual` is the recommended choice. If its current release is incompatible with Svelte 5 runes at implementation time, fall back to a hand-rolled implementation using `IntersectionObserver` + a sentinel above/below the viewport. The behavioral tests below are framework-agnostic and should pass either way.
+> **Library compatibility note:** `@tanstack/svelte-virtual` is the recommended
+> choice. If its current release is incompatible with Svelte 5 runes at
+> implementation time, fall back to a hand-rolled implementation using
+> `IntersectionObserver` + a sentinel above/below the viewport. The behavioral
+> tests below are framework-agnostic and should pass either way.
 
 - [ ] **Step 1: Install the dependency**
 
@@ -1479,7 +1562,9 @@ describe('DOM virtualization', () => {
       expect(updated?.textContent).toContain('streaming...');
     });
     // Same DOM node — Svelte's keyed-each preserved it.
-    expect(container.querySelector('[data-message-id="msg_a"]')).toBe(initialBubble);
+    expect(container.querySelector('[data-message-id="msg_a"]')).toBe(
+      initialBubble
+    );
   });
 
   it('auto-scrolls to bottom when a new non-partial message arrives and user is pinned', async () => {
@@ -1492,9 +1577,19 @@ describe('DOM virtualization', () => {
     });
     const scroll = getByTestId('chat-scroll');
     // Mark as pinned to bottom.
-    Object.defineProperty(scroll, 'scrollHeight', { value: 1000, configurable: true });
-    Object.defineProperty(scroll, 'clientHeight', { value: 500, configurable: true });
-    Object.defineProperty(scroll, 'scrollTop', { value: 500, configurable: true, writable: true });
+    Object.defineProperty(scroll, 'scrollHeight', {
+      value: 1000,
+      configurable: true,
+    });
+    Object.defineProperty(scroll, 'clientHeight', {
+      value: 500,
+      configurable: true,
+    });
+    Object.defineProperty(scroll, 'scrollTop', {
+      value: 500,
+      configurable: true,
+      writable: true,
+    });
     messages.upsert({ ...make('msg_new', wsId), created_at: 100 });
     await vi.waitFor(() => {
       // scrollTop should advance to keep the new message visible.
@@ -1511,9 +1606,19 @@ describe('DOM virtualization', () => {
       props: { workspaceId: wsId, onSend: vi.fn() },
     });
     const scroll = getByTestId('chat-scroll');
-    Object.defineProperty(scroll, 'scrollHeight', { value: 1000, configurable: true });
-    Object.defineProperty(scroll, 'clientHeight', { value: 500, configurable: true });
-    Object.defineProperty(scroll, 'scrollTop', { value: 100, configurable: true, writable: true });
+    Object.defineProperty(scroll, 'scrollHeight', {
+      value: 1000,
+      configurable: true,
+    });
+    Object.defineProperty(scroll, 'clientHeight', {
+      value: 500,
+      configurable: true,
+    });
+    Object.defineProperty(scroll, 'scrollTop', {
+      value: 100,
+      configurable: true,
+      writable: true,
+    });
     const { fireEvent } = await import('@testing-library/svelte');
     await fireEvent.scroll(scroll); // updates pinned-to-bottom flag → false
     messages.upsert({ ...make('msg_late', wsId), created_at: 200 });
@@ -1525,8 +1630,9 @@ describe('DOM virtualization', () => {
 
 - [ ] **Step 3: Run tests to verify failure**
 
-Run: `bun run test --run src/lib/components/chat/ChatPanel.test.ts`
-Expected: the four new tests FAIL — current ChatPanel renders all messages without virtualization or pinned-bottom logic.
+Run: `bun run test --run src/lib/components/chat/ChatPanel.test.ts` Expected:
+the four new tests FAIL — current ChatPanel renders all messages without
+virtualization or pinned-bottom logic.
 
 - [ ] **Step 4: Implement virtualization in ChatPanel.svelte**
 
@@ -1546,7 +1652,12 @@ Expected: the four new tests FAIL — current ChatPanel renders all messages wit
     loadEarlierThreshold?: number;
   }
 
-  const { workspaceId, onSend, onLoadEarlier, loadEarlierThreshold = 80 }: Props = $props();
+  const {
+    workspaceId,
+    onSend,
+    onLoadEarlier,
+    loadEarlierThreshold = 80,
+  }: Props = $props();
 
   const list = $derived(messages.listForWorkspace(workspaceId));
   const status = $derived(messages.statusFor(workspaceId));
@@ -1586,7 +1697,8 @@ Expected: the four new tests FAIL — current ChatPanel renders all messages wit
   // chat — the user is "at the bottom" if within one bubble of it.
   function handleScroll(): void {
     if (!scrollEl) return;
-    const dist = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
+    const dist =
+      scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
     pinnedToBottom = dist < 50;
     if (scrollEl.scrollTop <= loadEarlierThreshold) {
       void loadEarlier();
@@ -1665,7 +1777,9 @@ Expected: the four new tests FAIL — current ChatPanel renders all messages wit
     {/if}
 
     {#if list.length === 0}
-      <div class="flex-1 flex items-center justify-center text-sm text-[var(--text-muted)]">
+      <div
+        class="flex-1 flex items-center justify-center text-sm text-[var(--text-muted)]"
+      >
         Start the conversation — type a message below.
       </div>
     {:else if virtualizer}
@@ -1690,16 +1804,22 @@ Expected: the four new tests FAIL — current ChatPanel renders all messages wit
 
 - [ ] **Step 5: Update existing ChatPanel tests for the new structure**
 
-The existing "renders one bubble per message" test counts `[data-message-id]` nodes; it still works because small lists fit in viewport. The lazy-load tests still pass because the load-earlier button is unchanged. Verify by running the full ChatPanel test file.
+The existing "renders one bubble per message" test counts `[data-message-id]`
+nodes; it still works because small lists fit in viewport. The lazy-load tests
+still pass because the load-earlier button is unchanged. Verify by running the
+full ChatPanel test file.
 
 - [ ] **Step 6: Run tests**
 
-Run: `bun run test --run src/lib/components/chat/ChatPanel.test.ts`
-Expected: PASS — 20+ tests including the four new virtualization tests.
+Run: `bun run test --run src/lib/components/chat/ChatPanel.test.ts` Expected:
+PASS — 20+ tests including the four new virtualization tests.
 
 - [ ] **Step 7: Manual smoke**
 
-`bun run tauri dev`. Generate a workspace with 500+ messages (use the `seed-messages` helper or paste a long history fixture). Scroll through; verify no jank. Trigger a long token-streamed reply with auto-scroll pinned; verify the bubble grows smoothly without other bubbles repainting.
+`bun run tauri dev`. Generate a workspace with 500+ messages (use the
+`seed-messages` helper or paste a long history fixture). Scroll through; verify
+no jank. Trigger a long token-streamed reply with auto-scroll pinned; verify the
+bubble grows smoothly without other bubbles repainting.
 
 - [ ] **Step 8: Commit**
 
@@ -1726,11 +1846,14 @@ the cause (DOM cost). Memory of Message objects in the SvelteMap is
 
 ---
 
-## Task 10: Actionable spawn error  [P2]
+## Task 10: Actionable spawn error [P2]
 
-**Why:** When `spawn_agent` fails (CLI not found, auth issue), the error currently lands in `messages.error` as a generic toast. Make it actionable: "Set Claude binary path in Settings" with a link.
+**Why:** When `spawn_agent` fails (CLI not found, auth issue), the error
+currently lands in `messages.error` as a generic toast. Make it actionable: "Set
+Claude binary path in Settings" with a link.
 
 **Files:**
+
 - Modify: `src/lib/components/workspace/WorkspaceView.svelte`
 - Modify: `src/lib/components/workspace/WorkspaceView.test.ts`
 
@@ -1764,15 +1887,20 @@ it('does not render Settings link for unrelated errors', async () => {
 
 - [ ] **Step 2: Implement the actionable banner**
 
-In `WorkspaceView.svelte`, after the existing error handling logic, add a derived flag:
+In `WorkspaceView.svelte`, after the existing error handling logic, add a
+derived flag:
 
 ```typescript
 const showSettingsCta = $derived(
-  (messages.errorFor(workspace.id) ?? '').toLowerCase().includes('claude binary not found')
+  (messages.errorFor(workspace.id) ?? '')
+    .toLowerCase()
+    .includes('claude binary not found')
 );
 ```
 
-Render alongside the error banner (this lives inside ChatPanel but the CTA can be passed in as a slot or a prop). Simpler: put a settings link directly inside ChatPanel's error banner when the error string contains "claude binary":
+Render alongside the error banner (this lives inside ChatPanel but the CTA can
+be passed in as a slot or a prop). Simpler: put a settings link directly inside
+ChatPanel's error banner when the error string contains "claude binary":
 
 ```svelte
 {#if error && !errorDismissed}
@@ -1781,7 +1909,9 @@ Render alongside the error banner (this lives inside ChatPanel but the CTA can b
     {#if /claude binary/i.test(error)}
       <a href="#/settings" class="underline">Settings</a>
     {/if}
-    <button onclick={() => (errorDismissed = true)} aria-label="Dismiss">×</button>
+    <button onclick={() => (errorDismissed = true)} aria-label="Dismiss"
+      >×</button
+    >
   </div>
 {/if}
 ```
@@ -1814,27 +1944,40 @@ Before considering Phase 1e complete, the implementer should verify:
 - [ ] `bun run check` passes (svelte-check + tsc).
 - [ ] `cd src-tauri && cargo clippy --lib --all-targets -- -D warnings` clean.
 - [ ] `bun run lint` clean.
-- [ ] Manual smoke: open the app, switch between two running workspaces, confirm both stream live (Task 1).
-- [ ] Manual smoke: send a long prompt, click Stop mid-turn, confirm input re-enables (Task 2).
-- [ ] Manual smoke: verify token streaming visible to the eye against real CLI (Task 3).
-- [ ] Manual smoke: kill auth temporarily, send a message, confirm error banner with CLI text (Task 6).
-- [ ] Manual smoke: rename `claude` binary on PATH, open a workspace, confirm Settings link appears (Task 10).
+- [ ] Manual smoke: open the app, switch between two running workspaces, confirm
+      both stream live (Task 1).
+- [ ] Manual smoke: send a long prompt, click Stop mid-turn, confirm input
+      re-enables (Task 2).
+- [ ] Manual smoke: verify token streaming visible to the eye against real CLI
+      (Task 3).
+- [ ] Manual smoke: kill auth temporarily, send a message, confirm error banner
+      with CLI text (Task 6).
+- [ ] Manual smoke: rename `claude` binary on PATH, open a workspace, confirm
+      Settings link appears (Task 10).
 - [ ] CHANGELOG entry under "## [Unreleased]" listing the 10 task headlines.
 
 ## Triggers for items intentionally deferred to a future phase
 
-| Item | Trigger to revisit |
-|---|---|
-| Auto-restart on CLI crash | After a classifier for exit reasons exists + backoff design reviewed |
-| Channel backpressure / event coalescing | Token streaming feels laggy under real usage measurement |
-| Multi-mutex decomposition | > 50 simultaneous workspaces or lock-wait > 10ms profiled |
-| Schema migration framework (full) | A breaking change to `Message` or another persisted struct is actually planned. The Task 8 sentinel covers the immediate data-loss risk. |
+| Item                                    | Trigger to revisit                                                                                                                       |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Auto-restart on CLI crash               | After a classifier for exit reasons exists + backoff design reviewed                                                                     |
+| Channel backpressure / event coalescing | Token streaming feels laggy under real usage measurement                                                                                 |
+| Multi-mutex decomposition               | > 50 simultaneous workspaces or lock-wait > 10ms profiled                                                                                |
+| Schema migration framework (full)       | A breaking change to `Message` or another persisted struct is actually planned. The Task 8 sentinel covers the immediate data-loss risk. |
 
 ## Execution Handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-04-30-ansambel-phase-1e.md`. Two execution options:
+Plan complete and saved to
+`docs/superpowers/plans/2026-04-30-ansambel-phase-1e.md`. Two execution options:
 
-1. **Subagent-Driven (recommended)** — fresh subagent per task, two-stage review (spec compliance + code quality) between tasks, fast iteration in this session.
-2. **Inline Execution** — execute tasks in this session using superpowers:executing-plans, batch execution with checkpoints for human review.
+1. **Subagent-Driven (recommended)** — fresh subagent per task, two-stage review
+   (spec compliance + code quality) between tasks, fast iteration in this
+   session.
+2. **Inline Execution** — execute tasks in this session using
+   superpowers:executing-plans, batch execution with checkpoints for human
+   review.
 
-Phase 1e has no inter-task dependencies *between* P0/P1/P2 buckets, but there are dependencies *within* tasks (e.g. Task 4 depends on Task 1's broadcaster shape; Task 5's tail-read assumes the schema-version sentinel from Task 8 will land). Recommended order: 1 → 2 → 3 → 8 → 5 → 4 → 6 → 7 → 9 → 10.
+Phase 1e has no inter-task dependencies _between_ P0/P1/P2 buckets, but there
+are dependencies _within_ tasks (e.g. Task 4 depends on Task 1's broadcaster
+shape; Task 5's tail-read assumes the schema-version sentinel from Task 8 will
+land). Recommended order: 1 → 2 → 3 → 8 → 5 → 4 → 6 → 7 → 9 → 10.

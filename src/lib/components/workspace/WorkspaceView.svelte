@@ -53,6 +53,19 @@
     return await api.messages.list(workspace.id, { beforeId });
   }
 
+  let stopping = $state(false);
+  async function handleStop() {
+    if (stopping) return;
+    stopping = true;
+    try {
+      await api.agent.stop(workspace.id);
+    } catch (err) {
+      messages.apply({ type: 'error', message: String(err) }, workspace.id);
+    } finally {
+      stopping = false;
+    }
+  }
+
   async function handleSend(text: string) {
     // Echo the user's own message into the store immediately so the bubble
     // renders without waiting for the backend. The backend's send_message
@@ -95,13 +108,25 @@
       </h2>
       <code class="text-xs text-[var(--text-muted)]">{workspace.branch}</code>
     </div>
-    <span
-      class="text-xs px-2 py-0.5 rounded bg-[var(--bg-card)] text-[var(--text-secondary)]"
-      data-status={status}
-      aria-label="Agent status"
-    >
-      {statusLabel(status)}
-    </span>
+    <div class="flex items-center gap-2">
+      {#if status === 'running'}
+        <button
+          type="button"
+          onclick={handleStop}
+          disabled={stopping}
+          class="text-xs px-2 py-0.5 rounded border border-[var(--border)] hover:bg-[var(--bg-card)] disabled:opacity-50"
+        >
+          Stop
+        </button>
+      {/if}
+      <span
+        class="text-xs px-2 py-0.5 rounded bg-[var(--bg-card)] text-[var(--text-secondary)]"
+        data-status={status}
+        aria-label="Agent status"
+      >
+        {statusLabel(status)}
+      </span>
+    </div>
   </header>
 
   <div class="flex-1 overflow-hidden">

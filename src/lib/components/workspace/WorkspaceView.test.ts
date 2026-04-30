@@ -105,9 +105,7 @@ describe('WorkspaceView', () => {
       is_partial: false,
     });
     await waitFor(() => {
-      expect(messages.listForWorkspace('ws_a').find((m) => m.id === 'msg_live')?.text).toBe(
-        'live'
-      );
+      expect(messages.listForWorkspace('ws_a').find((m) => m.id === 'msg_live')?.text).toBe('live');
     });
   });
 
@@ -119,6 +117,66 @@ describe('WorkspaceView', () => {
     render(WorkspaceView, { props: { workspace: ws({ status: 'running' }) } });
     await waitFor(() => {
       expect(messages.errorFor('ws_a')).toBe('no agent for workspace ws_a');
+    });
+  });
+
+  describe('Stop button', () => {
+    it('renders Stop button when status is running', () => {
+      messages.apply({ type: 'status', status: 'running' }, 'ws_a');
+      const { getByRole } = render(WorkspaceView, { props: { workspace: ws() } });
+      expect(getByRole('button', { name: /stop/i })).toBeTruthy();
+    });
+
+    it('does not render Stop button when status is waiting', async () => {
+      messages.apply({ type: 'status', status: 'waiting' }, 'ws_a');
+      const { queryByRole } = render(WorkspaceView, {
+        props: { workspace: ws({ status: 'waiting' }) },
+      });
+      await new Promise((r) => setTimeout(r, 5));
+      expect(queryByRole('button', { name: /stop/i })).toBeNull();
+    });
+
+    it('clicking Stop calls stop_agent', async () => {
+      messages.apply({ type: 'status', status: 'running' }, 'ws_a');
+      const { getByRole } = render(WorkspaceView, { props: { workspace: ws() } });
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(getByRole('button', { name: /stop/i }));
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith('stop_agent', { workspaceId: 'ws_a' });
+      });
+    });
+
+    it('disables Stop button while stop_agent is in flight', async () => {
+      messages.apply({ type: 'status', status: 'running' }, 'ws_a');
+      let resolveStop!: () => void;
+      vi.mocked(invoke).mockImplementation(async (cmd) => {
+        if (cmd === 'stop_agent') {
+          return new Promise<void>((r) => {
+            resolveStop = r as () => void;
+          });
+        }
+        return undefined;
+      });
+      const { getByRole } = render(WorkspaceView, { props: { workspace: ws() } });
+      const { fireEvent } = await import('@testing-library/svelte');
+      const btn = getByRole('button', { name: /stop/i }) as HTMLButtonElement;
+      await fireEvent.click(btn);
+      await waitFor(() => expect(btn.disabled).toBe(true));
+      resolveStop();
+    });
+
+    it('captures stop_agent rejection as error in messages store', async () => {
+      messages.apply({ type: 'status', status: 'running' }, 'ws_a');
+      vi.mocked(invoke).mockImplementation(async (cmd) => {
+        if (cmd === 'stop_agent') throw 'stop failed';
+        return undefined;
+      });
+      const { getByRole } = render(WorkspaceView, { props: { workspace: ws() } });
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(getByRole('button', { name: /stop/i }));
+      await waitFor(() => {
+        expect(messages.errorFor('ws_a')).toBe('stop failed');
+      });
     });
   });
 
