@@ -16,9 +16,23 @@
     /** Distance from the top (in px) at which lazy load fires. Exposed
      * for tests; production code uses the default. */
     loadEarlierThreshold?: number;
+    /** Initial render window — chat shows the most recent N messages.
+     * Older messages still live in the store but stay out of the DOM
+     * until the user scrolls up. Tunable for tests. */
+    initialRenderCount?: number;
+    /** Pixels from the bottom within which auto-scroll stays active.
+     * One bubble of slack feels natural for chat. */
+    pinnedBottomThreshold?: number;
   }
 
-  const { workspaceId, onSend, onLoadEarlier, loadEarlierThreshold = 80 }: Props = $props();
+  const {
+    workspaceId,
+    onSend,
+    onLoadEarlier,
+    loadEarlierThreshold = 80,
+    initialRenderCount = 100,
+    pinnedBottomThreshold = 50,
+  }: Props = $props();
 
   const list = $derived(messages.listForWorkspace(workspaceId));
   const status = $derived(messages.statusFor(workspaceId));
@@ -33,6 +47,23 @@
   // error message resets dismissal so subsequent failures still surface.
   const errorVisible = $derived(error !== undefined && error !== dismissedError);
 
+  // Bounded-render window. We always show the last `effectiveWindow`
+  // messages — older ones stay in the SvelteMap but out of the DOM.
+  // Scrolling near the top extends the window upward in 50-message
+  // increments. `windowExtension` tracks just the user-driven extra
+  // beyond the prop-supplied baseline so we don't hold a reactive ref
+  // to the prop itself (Svelte's state-ref-prop warning).
+  let windowExtension = $state(0);
+  const effectiveWindow = $derived(initialRenderCount + windowExtension);
+  const visibleList = $derived(
+    list.length <= effectiveWindow ? list : list.slice(list.length - effectiveWindow)
+  );
+
+  // Auto-scroll only when the user is anchored near the bottom. The
+  // pinned flag flips false when they scroll up to read history so a
+  // streamed reply doesn't yank their viewport.
+  let pinnedToBottom = $state(true);
+
   async function loadEarlier(): Promise<void> {
     if (!onLoadEarlier || loading || exhausted) return;
     if (list.length === 0) return;
@@ -45,6 +76,10 @@
         exhausted = true;
       } else {
         messages.hydrate(workspaceId, batch);
+        // Hydrating older messages grows the upstream list; expand the
+        // render window so the newly fetched batch is in the DOM and the
+        // anchor adjustment below points at a real node.
+        windowExtension = Math.max(windowExtension, list.length - initialRenderCount);
         // Preserve scroll position so the user stays anchored to the
         // message they were reading instead of jumping to the new top.
         await tick();
@@ -65,10 +100,52 @@
 
   function handleScroll(): void {
     if (!scrollEl) return;
+    const dist = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
+    pinnedToBottom = dist <= pinnedBottomThreshold;
     if (scrollEl.scrollTop <= loadEarlierThreshold) {
-      void loadEarlier();
+      // First, expand the in-memory window — there may be older messages
+      // already in the SvelteMap from prior load-earlier calls. Only when
+      // the window already covers the full list do we hit the disk.
+      if (effectiveWindow < list.length) {
+        windowExtension = Math.min(list.length - initialRenderCount, windowExtension + 50);
+      } else {
+        void loadEarlier();
+      }
     }
   }
+
+  // Auto-scroll on new messages when pinned. Anchor on list.length so
+  // token-streaming partials within an existing bubble (same id) don't
+  // re-trigger; only fresh ids do. The first effect run snapshots the
+  // initial length without scrolling — we only react to *changes* after
+  // mount, otherwise the initial render would always jump to bottom and
+  // override scroll positions (including those set up in tests).
+  let lastLength = $state<number | null>(null);
+  $effect(() => {
+    const len = list.length;
+    if (lastLength === null) {
+      lastLength = len;
+      return;
+    }
+    if (len !== lastLength) {
+      const grew = len > lastLength;
+      lastLength = len;
+      if (grew && pinnedToBottom && scrollEl) {
+        // Defer to after layout so the new bubble's height is known.
+        queueMicrotask(() => {
+          if (!scrollEl) return;
+          // scrollTop may be non-writable in test harnesses that stub it
+          // with Object.defineProperty(value: ...). Swallow that case so
+          // unrelated tests don't observe an exception in the effect.
+          try {
+            scrollEl.scrollTop = scrollEl.scrollHeight;
+          } catch {
+            /* noop — scrollTop unwritable in this harness */
+          }
+        });
+      }
+    }
+  });
 </script>
 
 <section class="flex flex-col h-full bg-[var(--bg-base)]">
@@ -120,7 +197,7 @@
         Start the conversation — type a message below.
       </div>
     {:else}
-      {#each list as msg (msg.id)}
+      {#each visibleList as msg (msg.id)}
         <MessageBubble message={msg} />
       {/each}
     {/if}

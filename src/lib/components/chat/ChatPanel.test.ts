@@ -261,4 +261,158 @@ describe('ChatPanel', () => {
       expect(onLoadEarlier).toHaveBeenCalledTimes(2);
     });
   });
+
+  describe('DOM virtualization (bounded render window)', () => {
+    it('caps DOM at the render window when the list is large', () => {
+      const wsId = 'ws_v';
+      for (let i = 0; i < 1000; i++) {
+        messages.upsert({ ...make(`msg_${i}`, wsId), created_at: i });
+      }
+      const { container } = render(ChatPanel, {
+        props: { workspaceId: wsId, onSend: vi.fn(), initialRenderCount: 100 },
+      });
+      const rendered = container.querySelectorAll('[data-message-id]').length;
+      expect(rendered).toBe(100);
+      // The visible window is the *most recent* 100 messages.
+      expect(container.querySelector('[data-message-id="msg_999"]')).toBeTruthy();
+      expect(container.querySelector('[data-message-id="msg_900"]')).toBeTruthy();
+      // Anything older is NOT in the DOM.
+      expect(container.querySelector('[data-message-id="msg_0"]')).toBeNull();
+      expect(container.querySelector('[data-message-id="msg_500"]')).toBeNull();
+    });
+
+    it('renders all messages when the list fits inside the window', () => {
+      const wsId = 'ws_small';
+      for (let i = 0; i < 5; i++) {
+        messages.upsert({ ...make(`msg_${i}`, wsId), created_at: i });
+      }
+      const { container } = render(ChatPanel, {
+        props: { workspaceId: wsId, onSend: vi.fn(), initialRenderCount: 100 },
+      });
+      expect(container.querySelectorAll('[data-message-id]').length).toBe(5);
+    });
+
+    it('streams partial updates to the active bubble in place (same DOM node)', async () => {
+      const wsId = 'ws_s';
+      messages.upsert({ ...make('msg_a', wsId), created_at: 1 });
+      const { container } = render(ChatPanel, {
+        props: { workspaceId: wsId, onSend: vi.fn() },
+      });
+      const initial = container.querySelector('[data-message-id="msg_a"]');
+      expect(initial).toBeTruthy();
+      messages.apply(
+        {
+          type: 'message',
+          id: 'msg_a',
+          role: 'assistant',
+          text: 'streaming...',
+          is_partial: true,
+        },
+        wsId
+      );
+      await vi.waitFor(() => {
+        const updated = container.querySelector('[data-message-id="msg_a"]');
+        expect(updated?.textContent).toContain('streaming...');
+      });
+      // Keyed-each preserves the DOM node — it's the same reference,
+      // not a remount. Sibling bubbles don't repaint.
+      expect(container.querySelector('[data-message-id="msg_a"]')).toBe(initial);
+    });
+
+    it('auto-scrolls to bottom on a new message when pinned', async () => {
+      const wsId = 'ws_p';
+      for (let i = 0; i < 5; i++) {
+        messages.upsert({ ...make(`msg_${i}`, wsId), created_at: i });
+      }
+      const { getByTestId } = render(ChatPanel, {
+        props: { workspaceId: wsId, onSend: vi.fn() },
+      });
+      const scroll = getByTestId('chat-scroll');
+      Object.defineProperty(scroll, 'scrollHeight', {
+        value: 1000,
+        configurable: true,
+      });
+      Object.defineProperty(scroll, 'clientHeight', {
+        value: 500,
+        configurable: true,
+      });
+      Object.defineProperty(scroll, 'scrollTop', {
+        value: 500,
+        configurable: true,
+        writable: true,
+      });
+      // Pinned by default; just verify the new-message effect bumps
+      // scrollTop to the (new) scrollHeight.
+      Object.defineProperty(scroll, 'scrollHeight', {
+        value: 1200,
+        configurable: true,
+      });
+      messages.upsert({ ...make('msg_new', wsId), created_at: 100 });
+      await vi.waitFor(() => {
+        expect((scroll as HTMLElement).scrollTop).toBe(1200);
+      });
+    });
+
+    it('does NOT auto-scroll when the user has scrolled up', async () => {
+      const wsId = 'ws_u';
+      for (let i = 0; i < 5; i++) {
+        messages.upsert({ ...make(`msg_${i}`, wsId), created_at: i });
+      }
+      const { getByTestId } = render(ChatPanel, {
+        props: { workspaceId: wsId, onSend: vi.fn() },
+      });
+      const scroll = getByTestId('chat-scroll');
+      Object.defineProperty(scroll, 'scrollHeight', {
+        value: 1000,
+        configurable: true,
+      });
+      Object.defineProperty(scroll, 'clientHeight', {
+        value: 500,
+        configurable: true,
+      });
+      Object.defineProperty(scroll, 'scrollTop', {
+        value: 100,
+        configurable: true,
+        writable: true,
+      });
+      const { fireEvent } = await import('@testing-library/svelte');
+      // Scrolling up far from the bottom flips the pinned flag false.
+      await fireEvent.scroll(scroll);
+      messages.upsert({ ...make('msg_late', wsId), created_at: 200 });
+      // Wait long enough for the queueMicrotask handler to have fired.
+      await new Promise((r) => setTimeout(r, 30));
+      expect((scroll as HTMLElement).scrollTop).toBe(100);
+    });
+
+    it('expands the render window when the user scrolls to the top', async () => {
+      const wsId = 'ws_w';
+      for (let i = 0; i < 200; i++) {
+        messages.upsert({ ...make(`msg_${i}`, wsId), created_at: i });
+      }
+      const { container, getByTestId } = render(ChatPanel, {
+        props: { workspaceId: wsId, onSend: vi.fn(), initialRenderCount: 100 },
+      });
+      expect(container.querySelectorAll('[data-message-id]').length).toBe(100);
+      const scroll = getByTestId('chat-scroll');
+      Object.defineProperty(scroll, 'scrollTop', {
+        value: 0,
+        configurable: true,
+        writable: true,
+      });
+      Object.defineProperty(scroll, 'scrollHeight', {
+        value: 1000,
+        configurable: true,
+      });
+      Object.defineProperty(scroll, 'clientHeight', {
+        value: 500,
+        configurable: true,
+      });
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.scroll(scroll);
+      // First scroll-to-top expands by 50 → 150 messages in DOM.
+      await vi.waitFor(() => {
+        expect(container.querySelectorAll('[data-message-id]').length).toBe(150);
+      });
+    });
+  });
 });
