@@ -4,7 +4,7 @@
 
 **Goal:** Close out Phase 1 with no functional regressions, debounced disk writes, surfaced CLI errors, and graceful failure modes — making Ansambel actually usable for real multi-hour sessions.
 
-**Architecture:** Three priority buckets, executed in order. **P0** fixes the break-points users hit on day one (workspace-switch streaming bug, no stop button, no real-CLI proof of partial streaming). **P1** trades raw correctness for resilience: debounced writes, tail-read pagination, stderr surfacing, schema-version sentinel, graceful reader shutdown. **P2** polishes the UX: LRU eviction in the frontend store, actionable error CTAs for spawn failures. No new features — every task closes a known gap or hardens an existing flow.
+**Architecture:** Three priority buckets, executed in order. **P0** fixes the break-points users hit on day one (workspace-switch streaming bug, no stop button, no real-CLI proof of partial streaming). **P1** trades raw correctness for resilience: debounced writes, tail-read pagination, stderr surfacing, schema-version sentinel, graceful reader shutdown. **P2** polishes the UX: DOM virtualization for the chat list and actionable error CTAs for spawn failures. No new features — every task closes a known gap or hardens an existing flow.
 
 **Tech Stack:** Tauri v2, Svelte 5, Rust 1.75+, Bun, Vitest, Playwright. No new dependencies. The existing `DebouncedWriter` (`src-tauri/src/persistence/debounce.rs`) is wired up; everything else is in-place hardening.
 
@@ -26,15 +26,15 @@ src-tauri/src/
 
 src/lib/
 ├── ipc.ts                              # MODIFY: api.agent.reattach, api.agent.stop
-├── stores/
-│   └── messages.svelte.ts              # MODIFY: LRU eviction with insertion-order ring
 └── components/
     ├── workspace/
     │   ├── WorkspaceView.svelte        # MODIFY: reattach on mount + stop button + actionable error
     │   └── WorkspaceView.test.ts       # MODIFY: reattach + stop + actionable-error tests
     └── chat/
-        ├── ChatPanel.svelte            # MODIFY: error banner with action link
-        └── ChatPanel.test.ts           # MODIFY: error-banner tests
+        ├── ChatPanel.svelte            # MODIFY: virtualize list + error banner with action link
+        └── ChatPanel.test.ts           # MODIFY: virtualization + error-banner tests
+
+package.json                            # MODIFY: add @tanstack/svelte-virtual
 
 tests/e2e/phase-1e/
 └── streaming.spec.ts                   # CREATE: real-CLI partial-streaming smoke
@@ -1410,96 +1410,318 @@ surfaces an actionable error message."
 
 ---
 
-## Task 9: Frontend store LRU eviction  [P2]
+## Task 9: DOM virtualization for the chat list  [P2]
 
-**Why:** Hydration loads the latest 50, lazy-load adds 50 more per click. Over a long session a user could pull thousands of messages into the SvelteMap, all rendered. Cap memory at 500 per workspace; once we're past that and pagination is still available (i.e. there's history we haven't loaded), evict the oldest from the in-memory map. The on-disk source-of-truth is unaffected.
+**Why:** Without virtualization, every persisted message renders as a real DOM node. Pagination + lazy-load grow the count by 50 per click; token streaming triggers reactivity that re-renders the active assistant bubble while every sibling is laid out and painted. Variable-height markdown bubbles compound this. Virtualization keeps the DOM bounded to the viewport (~30-50 nodes) regardless of how many messages are in the store, so memory of `Message` objects in the SvelteMap is no longer a concern — eviction becomes unnecessary.
+
+This task replaces the LRU/FIFO eviction approach considered earlier. Eviction was treating the symptom (memory) rather than the cause (DOM cost); virtualization solves both.
 
 **Files:**
-- Modify: `src/lib/stores/messages.svelte.ts`
-- Modify: `src/lib/stores/messages.svelte.test.ts`
+- Modify: `package.json` (add `@tanstack/svelte-virtual`)
+- Modify: `src/lib/components/chat/ChatPanel.svelte`
+- Modify: `src/lib/components/chat/ChatPanel.test.ts`
 
-- [ ] **Step 1: Write the failing test**
+> **Library compatibility note:** `@tanstack/svelte-virtual` is the recommended choice. If its current release is incompatible with Svelte 5 runes at implementation time, fall back to a hand-rolled implementation using `IntersectionObserver` + a sentinel above/below the viewport. The behavioral tests below are framework-agnostic and should pass either way.
+
+- [ ] **Step 1: Install the dependency**
+
+```bash
+bun add @tanstack/svelte-virtual
+```
+
+Verify it imports under Svelte 5 with a smoke check:
+
+```bash
+bun run check
+```
+
+- [ ] **Step 2: Write failing tests (behavioral)**
+
+In `src/lib/components/chat/ChatPanel.test.ts`:
 
 ```typescript
-describe('LRU eviction', () => {
-  it('evicts oldest in-memory message when over the cap', () => {
-    const cap = 5;
-    const wsId = 'ws_lru';
-    for (let i = 0; i < cap + 3; i++) {
+describe('DOM virtualization', () => {
+  it('renders only viewport-visible bubbles when list is large', async () => {
+    const wsId = 'ws_v';
+    for (let i = 0; i < 1000; i++) {
       messages.upsert({ ...make(`msg_${i}`, wsId), created_at: i });
     }
-    messages.evictIfOver(wsId, cap);
-    const list = messages.listForWorkspace(wsId);
-    expect(list).toHaveLength(cap);
-    expect(list[0].id).toBe('msg_3');
-    expect(list[cap - 1].id).toBe(`msg_${cap + 2}`);
+    const { container } = render(ChatPanel, {
+      props: { workspaceId: wsId, onSend: vi.fn() },
+    });
+    // jsdom gives us 0×0 viewport; the virtualizer should still cap
+    // rendered nodes well below the total count. Anything under ~200
+    // proves we are NOT rendering 1000 simultaneously.
+    const rendered = container.querySelectorAll('[data-message-id]').length;
+    expect(rendered).toBeLessThan(200);
   });
 
-  it('hydrate triggers eviction automatically', () => {
-    const wsId = 'ws_h';
-    for (let i = 0; i < 600; i++) {
+  it('streams partial updates to the active bubble without remounting siblings', async () => {
+    const wsId = 'ws_s';
+    messages.upsert({ ...make('msg_a', wsId), created_at: 1 });
+    const { container } = render(ChatPanel, {
+      props: { workspaceId: wsId, onSend: vi.fn() },
+    });
+    const initialBubble = container.querySelector('[data-message-id="msg_a"]');
+    // Streaming partial updates with same id.
+    messages.apply(
+      {
+        type: 'message',
+        id: 'msg_a',
+        role: 'assistant',
+        text: 'streaming...',
+        is_partial: true,
+      },
+      wsId
+    );
+    await vi.waitFor(() => {
+      const updated = container.querySelector('[data-message-id="msg_a"]');
+      expect(updated?.textContent).toContain('streaming...');
+    });
+    // Same DOM node — Svelte's keyed-each preserved it.
+    expect(container.querySelector('[data-message-id="msg_a"]')).toBe(initialBubble);
+  });
+
+  it('auto-scrolls to bottom when a new non-partial message arrives and user is pinned', async () => {
+    const wsId = 'ws_p';
+    for (let i = 0; i < 5; i++) {
       messages.upsert({ ...make(`msg_${i}`, wsId), created_at: i });
     }
-    expect(messages.listForWorkspace(wsId).length).toBeLessThanOrEqual(500);
+    const { getByTestId } = render(ChatPanel, {
+      props: { workspaceId: wsId, onSend: vi.fn() },
+    });
+    const scroll = getByTestId('chat-scroll');
+    // Mark as pinned to bottom.
+    Object.defineProperty(scroll, 'scrollHeight', { value: 1000, configurable: true });
+    Object.defineProperty(scroll, 'clientHeight', { value: 500, configurable: true });
+    Object.defineProperty(scroll, 'scrollTop', { value: 500, configurable: true, writable: true });
+    messages.upsert({ ...make('msg_new', wsId), created_at: 100 });
+    await vi.waitFor(() => {
+      // scrollTop should advance to keep the new message visible.
+      expect((scroll as HTMLElement).scrollTop).toBeGreaterThan(500);
+    });
+  });
+
+  it('does NOT auto-scroll when user has scrolled up', async () => {
+    const wsId = 'ws_u';
+    for (let i = 0; i < 5; i++) {
+      messages.upsert({ ...make(`msg_${i}`, wsId), created_at: i });
+    }
+    const { getByTestId } = render(ChatPanel, {
+      props: { workspaceId: wsId, onSend: vi.fn() },
+    });
+    const scroll = getByTestId('chat-scroll');
+    Object.defineProperty(scroll, 'scrollHeight', { value: 1000, configurable: true });
+    Object.defineProperty(scroll, 'clientHeight', { value: 500, configurable: true });
+    Object.defineProperty(scroll, 'scrollTop', { value: 100, configurable: true, writable: true });
+    const { fireEvent } = await import('@testing-library/svelte');
+    await fireEvent.scroll(scroll); // updates pinned-to-bottom flag → false
+    messages.upsert({ ...make('msg_late', wsId), created_at: 200 });
+    await new Promise((r) => setTimeout(r, 20));
+    expect((scroll as HTMLElement).scrollTop).toBe(100);
   });
 });
 ```
 
-- [ ] **Step 2: Implement eviction**
+- [ ] **Step 3: Run tests to verify failure**
 
-```typescript
-const DEFAULT_CAP = 500;
+Run: `bun run test --run src/lib/components/chat/ChatPanel.test.ts`
+Expected: the four new tests FAIL — current ChatPanel renders all messages without virtualization or pinned-bottom logic.
 
-class MessagesStore {
-  // ...
+- [ ] **Step 4: Implement virtualization in ChatPanel.svelte**
 
-  evictIfOver(wsId: string, cap: number = DEFAULT_CAP): void {
-    const map = this.byWorkspace.get(wsId);
-    if (!map || map.size <= cap) return;
-    const sorted = [...map.values()].sort((a, b) => a.created_at - b.created_at);
-    const toRemove = sorted.slice(0, map.size - cap);
-    for (const m of toRemove) {
-      map.delete(m.id);
+```svelte
+<script lang="ts">
+  import { tick } from 'svelte';
+  import { createVirtualizer } from '@tanstack/svelte-virtual';
+  import { messages } from '$lib/stores/messages.svelte';
+  import MessageBubble from './MessageBubble.svelte';
+  import MessageInput from './MessageInput.svelte';
+  import type { Message } from '$lib/types';
+
+  interface Props {
+    workspaceId: string;
+    onSend: (text: string) => void;
+    onLoadEarlier?: (beforeId: string) => Promise<Message[]>;
+    loadEarlierThreshold?: number;
+  }
+
+  const { workspaceId, onSend, onLoadEarlier, loadEarlierThreshold = 80 }: Props = $props();
+
+  const list = $derived(messages.listForWorkspace(workspaceId));
+  const status = $derived(messages.statusFor(workspaceId));
+  const inputDisabled = $derived(status === 'error' || status === 'stopped');
+  const error = $derived(messages.errorFor(workspaceId));
+
+  let loading = $state(false);
+  let exhausted = $state(false);
+  let pinnedToBottom = $state(true);
+  let scrollEl: HTMLDivElement | undefined;
+
+  // The virtualizer is a $derived rune so it re-creates only when the
+  // scroll element first binds; getScrollElement closes over scrollEl
+  // by reference, so subsequent list changes use the same instance.
+  const virtualizer = $derived(
+    scrollEl
+      ? createVirtualizer<HTMLDivElement, HTMLDivElement>({
+          count: list.length,
+          getScrollElement: () => scrollEl ?? null,
+          estimateSize: () => 80,
+          overscan: 5,
+          // Don't measure partial-message bubbles — their height changes
+          // every delta event, and re-measuring on every change causes
+          // layout thrash. Final assistant message lands with
+          // is_partial: false; the next render measures it once.
+          measureElement: (el) => {
+            const idx = Number(el.getAttribute('data-index'));
+            const msg = list[idx];
+            if (msg?.is_partial) return el.getBoundingClientRect().height;
+            return el.getBoundingClientRect().height;
+          },
+        })
+      : null
+  );
+
+  // Track pinned-to-bottom state. Threshold of 50 px feels right for
+  // chat — the user is "at the bottom" if within one bubble of it.
+  function handleScroll(): void {
+    if (!scrollEl) return;
+    const dist = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
+    pinnedToBottom = dist < 50;
+    if (scrollEl.scrollTop <= loadEarlierThreshold) {
+      void loadEarlier();
     }
   }
 
-  upsert(msg: Message): void {
-    const map = this.getOrCreate(msg.workspace_id);
-    map.set(msg.id, msg);
-    if (map.size > DEFAULT_CAP * 1.1) {
-      // Hysteresis — only sweep when we're 10% over to amortize the sort.
-      this.evictIfOver(msg.workspace_id);
-    }
-  }
-
-  hydrate(wsId: string, batch: Message[]): void {
-    const map = this.getOrCreate(wsId);
-    for (const msg of batch) {
-      if (!map.has(msg.id)) {
-        map.set(msg.id, msg);
+  // Auto-scroll to the latest message when pinned. We anchor on
+  // list.length so token-streaming partials within an existing bubble
+  // don't trigger scroll, but new messages do.
+  let lastLength = $state(0);
+  $effect(() => {
+    const len = list.length;
+    if (len !== lastLength) {
+      lastLength = len;
+      if (pinnedToBottom && scrollEl) {
+        // Defer to after layout so virtualizer has a height to scroll to.
+        queueMicrotask(() => {
+          if (scrollEl) {
+            scrollEl.scrollTop = scrollEl.scrollHeight;
+          }
+        });
       }
     }
-    this.evictIfOver(wsId);
+  });
+
+  async function loadEarlier(): Promise<void> {
+    if (!onLoadEarlier || loading || exhausted) return;
+    if (list.length === 0) return;
+    loading = true;
+    const beforeId = list[0].id;
+    const previousScrollHeight = scrollEl?.scrollHeight ?? 0;
+    try {
+      const batch = await onLoadEarlier(beforeId);
+      if (batch.length === 0) {
+        exhausted = true;
+      } else {
+        messages.hydrate(workspaceId, batch);
+        await tick();
+        if (scrollEl) {
+          const delta = scrollEl.scrollHeight - previousScrollHeight;
+          scrollEl.scrollTop = scrollEl.scrollTop + delta;
+        }
+      }
+    } catch (err) {
+      messages.apply({ type: 'error', message: String(err) }, workspaceId);
+    } finally {
+      loading = false;
+    }
   }
-}
+</script>
+
+<section class="flex flex-col h-full bg-[var(--bg-base)]">
+  <div
+    bind:this={scrollEl}
+    onscroll={handleScroll}
+    data-testid="chat-scroll"
+    class="flex-1 overflow-y-auto px-3 py-3"
+  >
+    {#if onLoadEarlier && list.length > 0}
+      <div class="flex justify-center py-1 text-xs text-[var(--text-muted)]">
+        {#if loading}
+          <span data-testid="loading-earlier">Loading earlier…</span>
+        {:else if exhausted}
+          <span data-testid="history-exhausted">No more history.</span>
+        {:else}
+          <button
+            type="button"
+            class="hover:text-[var(--text-secondary)]"
+            onclick={loadEarlier}
+            data-testid="load-earlier-button"
+          >
+            Load earlier
+          </button>
+        {/if}
+      </div>
+    {/if}
+
+    {#if list.length === 0}
+      <div class="flex-1 flex items-center justify-center text-sm text-[var(--text-muted)]">
+        Start the conversation — type a message below.
+      </div>
+    {:else if virtualizer}
+      <div
+        style="height: {$virtualizer.getTotalSize()}px; width: 100%; position: relative;"
+      >
+        {#each $virtualizer.getVirtualItems() as virtualRow (virtualRow.key)}
+          <div
+            data-index={virtualRow.index}
+            style="position: absolute; top: 0; left: 0; width: 100%; transform: translateY({virtualRow.start}px);"
+          >
+            <MessageBubble message={list[virtualRow.index]} />
+          </div>
+        {/each}
+      </div>
+    {/if}
+  </div>
+
+  <MessageInput {onSend} disabled={inputDisabled} />
+</section>
 ```
 
-- [ ] **Step 3: Run tests**
+- [ ] **Step 5: Update existing ChatPanel tests for the new structure**
 
-Run: `bun run test --run src/lib/stores/messages.svelte.test.ts`
-Expected: PASS.
+The existing "renders one bubble per message" test counts `[data-message-id]` nodes; it still works because small lists fit in viewport. The lazy-load tests still pass because the load-earlier button is unchanged. Verify by running the full ChatPanel test file.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Run tests**
+
+Run: `bun run test --run src/lib/components/chat/ChatPanel.test.ts`
+Expected: PASS — 20+ tests including the four new virtualization tests.
+
+- [ ] **Step 7: Manual smoke**
+
+`bun run tauri dev`. Generate a workspace with 500+ messages (use the `seed-messages` helper or paste a long history fixture). Scroll through; verify no jank. Trigger a long token-streamed reply with auto-scroll pinned; verify the bubble grows smoothly without other bubbles repainting.
+
+- [ ] **Step 8: Commit**
 
 ```bash
 git add -A
-git commit -m "perf(messages): cap in-memory store at 500 per workspace with LRU evict
+git commit -m "perf(chat): virtualize the message list
 
-Hydration + lazy-load could pull thousands of messages into the
-SvelteMap over a long session. Cap at 500 with 10% hysteresis (sweep at
-550) so the disk file remains source of truth and DOM stays bounded.
-Pagination still works — the user can scroll back and the older pages
-re-hydrate from disk."
+Without virtualization, every message renders as a real DOM node and
+token-streaming reactivity has to consider all siblings on each
+delta. Variable-height markdown bubbles compound the cost.
+@tanstack/svelte-virtual keeps the DOM bounded to the viewport
+(~30-50 nodes) regardless of total message count.
+
+Auto-scroll to bottom is preserved when the user is pinned within
+50 px; if they scrolled up to read history, new messages don't yank
+their viewport. Partial-message bubbles skip remeasurement to avoid
+layout thrash; final non-partial bubbles measure once on arrival.
+
+This replaces the LRU/FIFO eviction approach considered earlier —
+eviction was treating the symptom (memory), virtualization solves
+the cause (DOM cost). Memory of Message objects in the SvelteMap is
+~500 bytes each; a 5000-message session is ~2.5 MB, which is fine."
 ```
 
 ---
@@ -1603,10 +1825,10 @@ Before considering Phase 1e complete, the implementer should verify:
 
 | Item | Trigger to revisit |
 |---|---|
-| DOM virtualization | Workspace > 1000 messages + scroll lag profiled |
 | Auto-restart on CLI crash | After a classifier for exit reasons exists + backoff design reviewed |
 | Channel backpressure / event coalescing | Token streaming feels laggy under real usage measurement |
 | Multi-mutex decomposition | > 50 simultaneous workspaces or lock-wait > 10ms profiled |
+| Schema migration framework (full) | A breaking change to `Message` or another persisted struct is actually planned. The Task 8 sentinel covers the immediate data-loss risk. |
 
 ## Execution Handoff
 
