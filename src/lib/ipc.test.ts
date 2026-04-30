@@ -302,12 +302,35 @@ describe('api.agent', () => {
     });
   });
 
-  it('send passes workspaceId and text', async () => {
+  it('send passes workspaceId and text (no attachments → null)', async () => {
     vi.mocked(invoke).mockResolvedValue(undefined);
     await api.agent.send('ws_a', 'Hello world');
     expect(invoke).toHaveBeenCalledWith('send_message', {
       workspaceId: 'ws_a',
       text: 'Hello world',
+      attachments: null,
+    });
+  });
+
+  it('send passes attachments mapped to camelCase backend shape', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.agent.send('ws_a', 'check', [
+      { sourcePath: '/u/p.png', mediaType: 'image/png', filename: 'p.png' },
+    ]);
+    expect(invoke).toHaveBeenCalledWith('send_message', {
+      workspaceId: 'ws_a',
+      text: 'check',
+      attachments: [{ sourcePath: '/u/p.png', mediaType: 'image/png', filename: 'p.png' }],
+    });
+  });
+
+  it('send sends attachments=null when an empty array is provided', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.agent.send('ws_a', 'plain', []);
+    expect(invoke).toHaveBeenCalledWith('send_message', {
+      workspaceId: 'ws_a',
+      text: 'plain',
+      attachments: null,
     });
   });
 

@@ -3,11 +3,12 @@
   import { messages } from '$lib/stores/messages.svelte';
   import MessageBubble from './MessageBubble.svelte';
   import MessageInput from './MessageInput.svelte';
-  import type { Message } from '$lib/types';
+  import TurnStatusBar from './TurnStatusBar.svelte';
+  import type { AttachmentDraft, Message } from '$lib/types';
 
   interface Props {
     workspaceId: string;
-    onSend: (text: string) => void;
+    onSend: (text: string, attachments: AttachmentDraft[]) => void;
     /** Optional loader for older messages. Receives the id of the oldest
      * message currently in view; should return the next page in
      * chronological order (oldest first). An empty result marks the
@@ -16,17 +17,56 @@
     /** Distance from the top (in px) at which lazy load fires. Exposed
      * for tests; production code uses the default. */
     loadEarlierThreshold?: number;
+    /** Initial render window — chat shows the most recent N messages.
+     * Older messages still live in the store but stay out of the DOM
+     * until the user scrolls up. Tunable for tests. */
+    initialRenderCount?: number;
+    /** Pixels from the bottom within which auto-scroll stays active.
+     * One bubble of slack feels natural for chat. */
+    pinnedBottomThreshold?: number;
   }
 
-  const { workspaceId, onSend, onLoadEarlier, loadEarlierThreshold = 80 }: Props = $props();
+  const {
+    workspaceId,
+    onSend,
+    onLoadEarlier,
+    loadEarlierThreshold = 80,
+    initialRenderCount = 100,
+    pinnedBottomThreshold = 50,
+  }: Props = $props();
 
   const list = $derived(messages.listForWorkspace(workspaceId));
   const status = $derived(messages.statusFor(workspaceId));
-  const inputDisabled = $derived(status === 'error' || status === 'stopped');
+  // Only hard errors disable input. After Stop the user should still be
+  // able to type the next prompt — the workspace re-spawns the agent on
+  // send, mirroring the chat-web pattern of "Stop → type → continue".
+  const inputDisabled = $derived(status === 'error');
+  const error = $derived(messages.errorFor(workspaceId));
 
   let loading = $state(false);
   let exhausted = $state(false);
   let scrollEl: HTMLDivElement | undefined;
+  let dismissedError = $state<string | undefined>(undefined);
+  // Track whether the user has dismissed the *current* error string. A new
+  // error message resets dismissal so subsequent failures still surface.
+  const errorVisible = $derived(error !== undefined && error !== dismissedError);
+
+  // Bounded-render window. We always show the last `effectiveWindow`
+  // messages — older ones stay in the SvelteMap but out of the DOM.
+  // Scrolling near the top extends the window upward in 50-message
+  // increments. `windowExtension` tracks just the user-driven extra
+  // beyond the prop-supplied baseline so we don't hold a reactive ref
+  // to the prop itself (Svelte's state-ref-prop warning).
+  let windowExtension = $state(0);
+  const effectiveWindow = $derived(initialRenderCount + windowExtension);
+  const visibleList = $derived(
+    list.length <= effectiveWindow ? list : list.slice(list.length - effectiveWindow)
+  );
+
+  // Auto-scroll only when the user is anchored near the bottom. The
+  // pinned flag flips false when they scroll up to read history so a
+  // streamed reply doesn't yank their viewport.
+  let pinnedToBottom = $state(true);
 
   async function loadEarlier(): Promise<void> {
     if (!onLoadEarlier || loading || exhausted) return;
@@ -40,6 +80,10 @@
         exhausted = true;
       } else {
         messages.hydrate(workspaceId, batch);
+        // Hydrating older messages grows the upstream list; expand the
+        // render window so the newly fetched batch is in the DOM and the
+        // anchor adjustment below points at a real node.
+        windowExtension = Math.max(windowExtension, list.length - initialRenderCount);
         // Preserve scroll position so the user stays anchored to the
         // message they were reading instead of jumping to the new top.
         await tick();
@@ -60,13 +104,84 @@
 
   function handleScroll(): void {
     if (!scrollEl) return;
+    const dist = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
+    pinnedToBottom = dist <= pinnedBottomThreshold;
     if (scrollEl.scrollTop <= loadEarlierThreshold) {
-      void loadEarlier();
+      // First, expand the in-memory window — there may be older messages
+      // already in the SvelteMap from prior load-earlier calls. Only when
+      // the window already covers the full list do we hit the disk.
+      if (effectiveWindow < list.length) {
+        windowExtension = Math.min(list.length - initialRenderCount, windowExtension + 50);
+      } else {
+        void loadEarlier();
+      }
     }
   }
+
+  // Auto-scroll on new messages when pinned. Anchor on list.length so
+  // token-streaming partials within an existing bubble (same id) don't
+  // re-trigger; only fresh ids do. The first effect run snapshots the
+  // initial length without scrolling — we only react to *changes* after
+  // mount, otherwise the initial render would always jump to bottom and
+  // override scroll positions (including those set up in tests).
+  let lastLength = $state<number | null>(null);
+  $effect(() => {
+    const len = list.length;
+    if (lastLength === null) {
+      lastLength = len;
+      return;
+    }
+    if (len !== lastLength) {
+      const grew = len > lastLength;
+      lastLength = len;
+      if (grew && pinnedToBottom && scrollEl) {
+        // Defer to after layout so the new bubble's height is known.
+        queueMicrotask(() => {
+          if (!scrollEl) return;
+          // scrollTop may be non-writable in test harnesses that stub it
+          // with Object.defineProperty(value: ...). Swallow that case so
+          // unrelated tests don't observe an exception in the effect.
+          try {
+            scrollEl.scrollTop = scrollEl.scrollHeight;
+          } catch {
+            /* noop — scrollTop unwritable in this harness */
+          }
+        });
+      }
+    }
+  });
 </script>
 
 <section class="flex flex-col h-full bg-[var(--bg-base)]">
+  {#if errorVisible}
+    <div
+      role="alert"
+      data-testid="error-banner"
+      class="px-3 py-2 bg-[var(--error-bg,rgba(239,68,68,0.15))] text-[var(--error,#ef4444)] text-sm flex items-start justify-between gap-2 border-b border-[var(--border)]"
+    >
+      <div class="flex-1 break-words">
+        <span>{error}</span>
+        {#if error && /claude binary/i.test(error)}
+          <a
+            href="#/settings"
+            data-testid="settings-cta"
+            class="ml-2 underline font-medium hover:opacity-80"
+          >
+            Open Settings
+          </a>
+        {/if}
+      </div>
+      <button
+        type="button"
+        aria-label="Dismiss error"
+        onclick={() => (dismissedError = error)}
+        class="shrink-0 px-1 hover:opacity-70"
+      >
+        ×
+      </button>
+    </div>
+  {/if}
+
   <div
     bind:this={scrollEl}
     onscroll={handleScroll}
@@ -97,11 +212,12 @@
         Start the conversation — type a message below.
       </div>
     {:else}
-      {#each list as msg (msg.id)}
+      {#each visibleList as msg (msg.id)}
         <MessageBubble message={msg} />
       {/each}
     {/if}
   </div>
 
+  <TurnStatusBar {workspaceId} />
   <MessageInput {onSend} disabled={inputDisabled} />
 </section>

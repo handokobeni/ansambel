@@ -11,8 +11,17 @@ vi.mock('@tauri-apps/api/core', () => {
   return {
     invoke: vi.fn(),
     Channel: MockChannel,
+    // MessageInput's attachment chip uses convertFileSrc — stub it so the
+    // <img src=…> preview doesn't crash in jsdom.
+    convertFileSrc: (path: string) => `mock-asset://${path}`,
   };
 });
+
+// MessageInput pulls in @tauri-apps/plugin-dialog for the file picker. The
+// real plugin requires the Tauri runtime, so stub it.
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  open: vi.fn(),
+}));
 
 import { invoke } from '@tauri-apps/api/core';
 import WorkspaceView from './WorkspaceView.svelte';
@@ -77,6 +86,109 @@ describe('WorkspaceView', () => {
     expect(invoke).not.toHaveBeenCalledWith('spawn_agent', expect.any(Object));
   });
 
+  it('calls reattach_agent on mount when status is running', async () => {
+    render(WorkspaceView, { props: { workspace: ws({ status: 'running' }) } });
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        'reattach_agent',
+        expect.objectContaining({ workspaceId: 'ws_a' })
+      );
+    });
+  });
+
+  it('routes reattach channel events through messages.apply', async () => {
+    let captured: { onmessage?: (ev: unknown) => void } | undefined;
+    vi.mocked(invoke).mockImplementation(async (cmd, args) => {
+      if (cmd === 'reattach_agent') {
+        captured = (args as { onEvent: { onmessage?: (ev: unknown) => void } }).onEvent;
+      }
+      return undefined;
+    });
+    render(WorkspaceView, { props: { workspace: ws({ status: 'running' }) } });
+    await waitFor(() => expect(captured).toBeDefined());
+    captured?.onmessage?.({
+      type: 'message',
+      id: 'msg_live',
+      role: 'assistant',
+      text: 'live',
+      is_partial: false,
+    });
+    await waitFor(() => {
+      expect(messages.listForWorkspace('ws_a').find((m) => m.id === 'msg_live')?.text).toBe('live');
+    });
+  });
+
+  it('captures reattach rejection as error in messages store', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === 'reattach_agent') throw 'no agent for workspace ws_a';
+      return undefined;
+    });
+    render(WorkspaceView, { props: { workspace: ws({ status: 'running' }) } });
+    await waitFor(() => {
+      expect(messages.errorFor('ws_a')).toBe('no agent for workspace ws_a');
+    });
+  });
+
+  describe('Stop button', () => {
+    it('renders Stop button when status is running', () => {
+      messages.apply({ type: 'status', status: 'running' }, 'ws_a');
+      const { getByRole } = render(WorkspaceView, { props: { workspace: ws() } });
+      expect(getByRole('button', { name: /stop/i })).toBeTruthy();
+    });
+
+    it('does not render Stop button when status is waiting', async () => {
+      messages.apply({ type: 'status', status: 'waiting' }, 'ws_a');
+      const { queryByRole } = render(WorkspaceView, {
+        props: { workspace: ws({ status: 'waiting' }) },
+      });
+      await new Promise((r) => setTimeout(r, 5));
+      expect(queryByRole('button', { name: /stop/i })).toBeNull();
+    });
+
+    it('clicking Stop calls stop_agent', async () => {
+      messages.apply({ type: 'status', status: 'running' }, 'ws_a');
+      const { getByRole } = render(WorkspaceView, { props: { workspace: ws() } });
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(getByRole('button', { name: /stop/i }));
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith('stop_agent', { workspaceId: 'ws_a' });
+      });
+    });
+
+    it('disables Stop button while stop_agent is in flight', async () => {
+      messages.apply({ type: 'status', status: 'running' }, 'ws_a');
+      let resolveStop!: () => void;
+      vi.mocked(invoke).mockImplementation(async (cmd) => {
+        if (cmd === 'stop_agent') {
+          return new Promise<void>((r) => {
+            resolveStop = r as () => void;
+          });
+        }
+        return undefined;
+      });
+      const { getByRole } = render(WorkspaceView, { props: { workspace: ws() } });
+      const { fireEvent } = await import('@testing-library/svelte');
+      const btn = getByRole('button', { name: /stop/i }) as HTMLButtonElement;
+      await fireEvent.click(btn);
+      await waitFor(() => expect(btn.disabled).toBe(true));
+      resolveStop();
+    });
+
+    it('captures stop_agent rejection as error in messages store', async () => {
+      messages.apply({ type: 'status', status: 'running' }, 'ws_a');
+      vi.mocked(invoke).mockImplementation(async (cmd) => {
+        if (cmd === 'stop_agent') throw 'stop failed';
+        return undefined;
+      });
+      const { getByRole } = render(WorkspaceView, { props: { workspace: ws() } });
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(getByRole('button', { name: /stop/i }));
+      await waitFor(() => {
+        expect(messages.errorFor('ws_a')).toBe('stop failed');
+      });
+    });
+  });
+
   it('renders ChatPanel', () => {
     const { getByLabelText } = render(WorkspaceView, {
       props: { workspace: ws() },
@@ -93,11 +205,64 @@ describe('WorkspaceView', () => {
     const { fireEvent } = await import('@testing-library/svelte');
     await fireEvent.input(ta, { target: { value: 'Hello' } });
     await fireEvent.click(getByRole('button', { name: /send/i }));
+    // Plain text turns get attachments=null on the wire (the backend treats
+    // null and an empty list the same way).
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('send_message', {
         workspaceId: 'ws_a',
         text: 'Hello',
+        attachments: null,
       });
+    });
+  });
+
+  it('echoes user message with preview attachments when drafts are provided', async () => {
+    // Drive ChatPanel by calling api.agent.send through the WorkspaceView's
+    // handleSend pathway. The MessageInput is exercised in its own suite —
+    // here we hand a fake draft straight to the wired-up handler by
+    // instrumenting invoke. We intercept the send_message call to confirm
+    // attachments flow through, and verify the echoed user Message in the
+    // store carries the preview attachment rendered before the backend reply.
+    const sentArgs: Record<string, unknown> = {};
+    vi.mocked(invoke).mockImplementation(async (cmd, args) => {
+      if (cmd === 'send_message') {
+        Object.assign(sentArgs, args);
+      }
+      if (cmd === 'list_messages') return [];
+      return undefined;
+    });
+    // Force a draft into MessageInput by stubbing its file picker.
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    vi.mocked(open).mockResolvedValue('/home/u/pic.png');
+
+    const { getByLabelText, getByRole, getByTestId, findByTestId } = render(WorkspaceView, {
+      props: { workspace: ws() },
+    });
+    await waitFor(() => expect(invoke).toHaveBeenCalled());
+    const { fireEvent } = await import('@testing-library/svelte');
+    await fireEvent.click(getByTestId('attach-button'));
+    // chip appears once the picker resolves.
+    await findByTestId('attachment-chip');
+    const ta = getByLabelText(/message/i) as HTMLTextAreaElement;
+    await fireEvent.input(ta, { target: { value: 'see this' } });
+    await fireEvent.click(getByRole('button', { name: /send/i }));
+
+    await waitFor(() => {
+      expect(sentArgs.text).toBe('see this');
+      expect(Array.isArray(sentArgs.attachments)).toBe(true);
+      expect((sentArgs.attachments as Array<unknown>).length).toBe(1);
+      expect(sentArgs.attachments).toEqual([
+        { sourcePath: '/home/u/pic.png', mediaType: 'image/png', filename: 'pic.png' },
+      ]);
+    });
+
+    const userEcho = messages.listForWorkspace('ws_a').find((m) => m.role === 'user');
+    expect(userEcho?.text).toBe('see this');
+    expect(userEcho?.attachments?.[0]).toEqual({
+      kind: 'image',
+      media_type: 'image/png',
+      path: '/home/u/pic.png',
+      filename: 'pic.png',
     });
   });
 
@@ -134,6 +299,85 @@ describe('WorkspaceView', () => {
     await waitFor(() => {
       expect(messages.errorFor('ws_a')).toBe('spawn failed');
     });
+  });
+
+  it('renders Settings CTA when spawn fails with claude-binary-not-found', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === 'spawn_agent') throw 'spawn_agent: claude binary not found';
+      return undefined;
+    });
+    const { findByTestId } = render(WorkspaceView, {
+      props: { workspace: ws({ status: 'not_started' }) },
+    });
+    const cta = await findByTestId('settings-cta');
+    expect(cta).toBeTruthy();
+    expect((cta as HTMLAnchorElement).getAttribute('href')).toContain('settings');
+  });
+
+  it('does NOT render Settings CTA for unrelated spawn errors', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === 'spawn_agent') throw 'spawn_agent: random unrelated thing';
+      return undefined;
+    });
+    const { queryByTestId } = render(WorkspaceView, {
+      props: { workspace: ws({ status: 'not_started' }) },
+    });
+    // Wait for the rejection to flow into messages store and re-render.
+    await waitFor(() => {
+      expect(messages.errorFor('ws_a')).toContain('random unrelated thing');
+    });
+    expect(queryByTestId('settings-cta')).toBeNull();
+  });
+
+  it('re-spawns the agent before sending when status is stopped', async () => {
+    const calls: string[] = [];
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      calls.push(cmd);
+      if (cmd === 'list_messages') return [];
+      return undefined;
+    });
+    const { getByLabelText, getByRole } = render(WorkspaceView, {
+      props: { workspace: ws({ status: 'running' }) },
+    });
+    await waitFor(() => expect(calls).toContain('reattach_agent'));
+    // Simulate Stop arriving via the channel.
+    messages.apply({ type: 'status', status: 'stopped' }, 'ws_a');
+    // User types the next prompt. Send should re-spawn first, then send.
+    const ta = getByLabelText(/message/i) as HTMLTextAreaElement;
+    const { fireEvent } = await import('@testing-library/svelte');
+    await fireEvent.input(ta, { target: { value: 'next turn' } });
+    await fireEvent.click(getByRole('button', { name: /send/i }));
+    await waitFor(() => {
+      expect(calls).toContain('spawn_agent');
+      expect(calls).toContain('send_message');
+    });
+    const spawnIdx = calls.lastIndexOf('spawn_agent');
+    const sendIdx = calls.lastIndexOf('send_message');
+    expect(spawnIdx).toBeLessThan(sendIdx);
+  });
+
+  it('does not re-spawn when status is already running', async () => {
+    let spawnCalls = 0;
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === 'list_messages') return [];
+      if (cmd === 'spawn_agent') spawnCalls += 1;
+      return undefined;
+    });
+    const { getByLabelText, getByRole } = render(WorkspaceView, {
+      props: { workspace: ws({ status: 'running' }) },
+    });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('reattach_agent', expect.any(Object)));
+    const ta = getByLabelText(/message/i) as HTMLTextAreaElement;
+    const { fireEvent } = await import('@testing-library/svelte');
+    await fireEvent.input(ta, { target: { value: 'live turn' } });
+    await fireEvent.click(getByRole('button', { name: /send/i }));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        'send_message',
+        expect.objectContaining({ text: 'live turn' })
+      )
+    );
+    expect(spawnCalls).toBe(0);
   });
 
   it('captures send_message rejection as error in messages store', async () => {

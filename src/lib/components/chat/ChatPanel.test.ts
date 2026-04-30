@@ -51,7 +51,7 @@ describe('ChatPanel', () => {
     expect(container.querySelector('textarea')).toBeTruthy();
   });
 
-  it('forwards send to onSend prop', async () => {
+  it('forwards send to onSend prop with empty attachments by default', async () => {
     const onSend = vi.fn();
     const { container, getByRole } = render(ChatPanel, {
       props: { workspaceId: 'ws_a', onSend },
@@ -60,7 +60,9 @@ describe('ChatPanel', () => {
     const { fireEvent } = await import('@testing-library/svelte');
     await fireEvent.input(ta, { target: { value: 'hi' } });
     await fireEvent.click(getByRole('button', { name: /send/i }));
-    expect(onSend).toHaveBeenCalledWith('hi');
+    // MessageInput now passes the (possibly empty) attachments list as a
+    // second argument so multimodal turns flow through unchanged.
+    expect(onSend).toHaveBeenCalledWith('hi', []);
   });
 
   it('disables input when status is not running and not waiting', () => {
@@ -70,6 +72,71 @@ describe('ChatPanel', () => {
     });
     const btn = getByRole('button', { name: /send/i }) as HTMLButtonElement;
     expect(btn.disabled).toBe(true);
+  });
+
+  it('keeps input enabled when status is stopped (so the user can re-prompt)', async () => {
+    messages.apply({ type: 'status', status: 'stopped' }, 'ws_a');
+    const { container, getByRole } = render(ChatPanel, {
+      props: { workspaceId: 'ws_a', onSend: vi.fn() },
+    });
+    const ta = container.querySelector('textarea') as HTMLTextAreaElement;
+    expect(ta.disabled).toBe(false);
+    const { fireEvent } = await import('@testing-library/svelte');
+    await fireEvent.input(ta, { target: { value: 'continue' } });
+    const btn = getByRole('button', { name: /send/i }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+  });
+
+  describe('error banner', () => {
+    it('renders an error banner when messages.error is set for the workspace', () => {
+      messages.apply({ type: 'error', message: 'CLI: invalid auth token' }, 'ws_a');
+      const { getByRole, getByText } = render(ChatPanel, {
+        props: { workspaceId: 'ws_a', onSend: vi.fn() },
+      });
+      const banner = getByRole('alert');
+      expect(banner).toBeTruthy();
+      expect(getByText(/cli: invalid auth token/i)).toBeTruthy();
+    });
+
+    it('does not render the banner when no error is set', () => {
+      const { queryByRole } = render(ChatPanel, {
+        props: { workspaceId: 'ws_a', onSend: vi.fn() },
+      });
+      expect(queryByRole('alert')).toBeNull();
+    });
+
+    it('does not surface errors from a different workspace', () => {
+      messages.apply({ type: 'error', message: 'wrong workspace' }, 'ws_other');
+      const { queryByRole } = render(ChatPanel, {
+        props: { workspaceId: 'ws_a', onSend: vi.fn() },
+      });
+      expect(queryByRole('alert')).toBeNull();
+    });
+
+    it('hides the banner after the dismiss button is clicked', async () => {
+      messages.apply({ type: 'error', message: 'oops' }, 'ws_a');
+      const { getByLabelText, queryByRole } = render(ChatPanel, {
+        props: { workspaceId: 'ws_a', onSend: vi.fn() },
+      });
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(getByLabelText(/dismiss error/i));
+      expect(queryByRole('alert')).toBeNull();
+    });
+
+    it('resurfaces a fresh error after a previous one was dismissed', async () => {
+      messages.apply({ type: 'error', message: 'first' }, 'ws_a');
+      const { getByLabelText, queryByRole, findByText } = render(ChatPanel, {
+        props: { workspaceId: 'ws_a', onSend: vi.fn() },
+      });
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(getByLabelText(/dismiss error/i));
+      expect(queryByRole('alert')).toBeNull();
+      messages.apply({ type: 'error', message: 'second' }, 'ws_a');
+      // findByText awaits the next render tick — Svelte's $derived
+      // re-evaluates synchronously in a microtask, so the new error
+      // string should appear by the next macrotask.
+      expect(await findByText(/second/i)).toBeTruthy();
+    });
   });
 
   describe('lazy load', () => {
@@ -207,6 +274,160 @@ describe('ChatPanel', () => {
       });
       await fireEvent.click(getByTestId('load-earlier-button'));
       expect(onLoadEarlier).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('DOM virtualization (bounded render window)', () => {
+    it('caps DOM at the render window when the list is large', () => {
+      const wsId = 'ws_v';
+      for (let i = 0; i < 1000; i++) {
+        messages.upsert({ ...make(`msg_${i}`, wsId), created_at: i });
+      }
+      const { container } = render(ChatPanel, {
+        props: { workspaceId: wsId, onSend: vi.fn(), initialRenderCount: 100 },
+      });
+      const rendered = container.querySelectorAll('[data-message-id]').length;
+      expect(rendered).toBe(100);
+      // The visible window is the *most recent* 100 messages.
+      expect(container.querySelector('[data-message-id="msg_999"]')).toBeTruthy();
+      expect(container.querySelector('[data-message-id="msg_900"]')).toBeTruthy();
+      // Anything older is NOT in the DOM.
+      expect(container.querySelector('[data-message-id="msg_0"]')).toBeNull();
+      expect(container.querySelector('[data-message-id="msg_500"]')).toBeNull();
+    });
+
+    it('renders all messages when the list fits inside the window', () => {
+      const wsId = 'ws_small';
+      for (let i = 0; i < 5; i++) {
+        messages.upsert({ ...make(`msg_${i}`, wsId), created_at: i });
+      }
+      const { container } = render(ChatPanel, {
+        props: { workspaceId: wsId, onSend: vi.fn(), initialRenderCount: 100 },
+      });
+      expect(container.querySelectorAll('[data-message-id]').length).toBe(5);
+    });
+
+    it('streams partial updates to the active bubble in place (same DOM node)', async () => {
+      const wsId = 'ws_s';
+      messages.upsert({ ...make('msg_a', wsId), created_at: 1 });
+      const { container } = render(ChatPanel, {
+        props: { workspaceId: wsId, onSend: vi.fn() },
+      });
+      const initial = container.querySelector('[data-message-id="msg_a"]');
+      expect(initial).toBeTruthy();
+      messages.apply(
+        {
+          type: 'message',
+          id: 'msg_a',
+          role: 'assistant',
+          text: 'streaming...',
+          is_partial: true,
+        },
+        wsId
+      );
+      await vi.waitFor(() => {
+        const updated = container.querySelector('[data-message-id="msg_a"]');
+        expect(updated?.textContent).toContain('streaming...');
+      });
+      // Keyed-each preserves the DOM node — it's the same reference,
+      // not a remount. Sibling bubbles don't repaint.
+      expect(container.querySelector('[data-message-id="msg_a"]')).toBe(initial);
+    });
+
+    it('auto-scrolls to bottom on a new message when pinned', async () => {
+      const wsId = 'ws_p';
+      for (let i = 0; i < 5; i++) {
+        messages.upsert({ ...make(`msg_${i}`, wsId), created_at: i });
+      }
+      const { getByTestId } = render(ChatPanel, {
+        props: { workspaceId: wsId, onSend: vi.fn() },
+      });
+      const scroll = getByTestId('chat-scroll');
+      Object.defineProperty(scroll, 'scrollHeight', {
+        value: 1000,
+        configurable: true,
+      });
+      Object.defineProperty(scroll, 'clientHeight', {
+        value: 500,
+        configurable: true,
+      });
+      Object.defineProperty(scroll, 'scrollTop', {
+        value: 500,
+        configurable: true,
+        writable: true,
+      });
+      // Pinned by default; just verify the new-message effect bumps
+      // scrollTop to the (new) scrollHeight.
+      Object.defineProperty(scroll, 'scrollHeight', {
+        value: 1200,
+        configurable: true,
+      });
+      messages.upsert({ ...make('msg_new', wsId), created_at: 100 });
+      await vi.waitFor(() => {
+        expect((scroll as HTMLElement).scrollTop).toBe(1200);
+      });
+    });
+
+    it('does NOT auto-scroll when the user has scrolled up', async () => {
+      const wsId = 'ws_u';
+      for (let i = 0; i < 5; i++) {
+        messages.upsert({ ...make(`msg_${i}`, wsId), created_at: i });
+      }
+      const { getByTestId } = render(ChatPanel, {
+        props: { workspaceId: wsId, onSend: vi.fn() },
+      });
+      const scroll = getByTestId('chat-scroll');
+      Object.defineProperty(scroll, 'scrollHeight', {
+        value: 1000,
+        configurable: true,
+      });
+      Object.defineProperty(scroll, 'clientHeight', {
+        value: 500,
+        configurable: true,
+      });
+      Object.defineProperty(scroll, 'scrollTop', {
+        value: 100,
+        configurable: true,
+        writable: true,
+      });
+      const { fireEvent } = await import('@testing-library/svelte');
+      // Scrolling up far from the bottom flips the pinned flag false.
+      await fireEvent.scroll(scroll);
+      messages.upsert({ ...make('msg_late', wsId), created_at: 200 });
+      // Wait long enough for the queueMicrotask handler to have fired.
+      await new Promise((r) => setTimeout(r, 30));
+      expect((scroll as HTMLElement).scrollTop).toBe(100);
+    });
+
+    it('expands the render window when the user scrolls to the top', async () => {
+      const wsId = 'ws_w';
+      for (let i = 0; i < 200; i++) {
+        messages.upsert({ ...make(`msg_${i}`, wsId), created_at: i });
+      }
+      const { container, getByTestId } = render(ChatPanel, {
+        props: { workspaceId: wsId, onSend: vi.fn(), initialRenderCount: 100 },
+      });
+      expect(container.querySelectorAll('[data-message-id]').length).toBe(100);
+      const scroll = getByTestId('chat-scroll');
+      Object.defineProperty(scroll, 'scrollTop', {
+        value: 0,
+        configurable: true,
+        writable: true,
+      });
+      Object.defineProperty(scroll, 'scrollHeight', {
+        value: 1000,
+        configurable: true,
+      });
+      Object.defineProperty(scroll, 'clientHeight', {
+        value: 500,
+        configurable: true,
+      });
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.scroll(scroll);
+      // First scroll-to-top expands by 50 → 150 messages in DOM.
+      await vi.waitFor(() => {
+        expect(container.querySelectorAll('[data-message-id]').length).toBe(150);
+      });
     });
   });
 });
