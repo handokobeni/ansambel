@@ -24,6 +24,19 @@ pub fn save_messages(data_dir: &Path, workspace_id: &str, messages: &[Message]) 
     write_atomic(&messages_file(data_dir, workspace_id), &file)
 }
 
+/// Loads existing messages, appends one, and saves. Skips the append when a
+/// message with the same id is already present so duplicate streaming events
+/// (e.g. assistant text deduplication on the frontend echo path) don't
+/// produce duplicate disk rows.
+pub fn append_message(data_dir: &Path, workspace_id: &str, msg: &Message) -> Result<()> {
+    let mut current = load_messages(data_dir, workspace_id).unwrap_or_default();
+    if current.iter().any(|m| m.id == msg.id) {
+        return Ok(());
+    }
+    current.push(msg.clone());
+    save_messages(data_dir, workspace_id, &current)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,5 +116,36 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].id, "msg_1");
         assert_eq!(loaded[1].id, "msg_2");
+    }
+
+    #[test]
+    fn append_message_appends_to_empty_workspace() {
+        let tmp = TempDir::new().unwrap();
+        let m = make_msg("msg_a", "ws_new");
+        append_message(tmp.path(), "ws_new", &m).unwrap();
+        let loaded = load_messages(tmp.path(), "ws_new").unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0], m);
+    }
+
+    #[test]
+    fn append_message_appends_to_existing_history() {
+        let tmp = TempDir::new().unwrap();
+        save_messages(tmp.path(), "ws_q", &[make_msg("msg_a", "ws_q")]).unwrap();
+        append_message(tmp.path(), "ws_q", &make_msg("msg_b", "ws_q")).unwrap();
+        let loaded = load_messages(tmp.path(), "ws_q").unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].id, "msg_a");
+        assert_eq!(loaded[1].id, "msg_b");
+    }
+
+    #[test]
+    fn append_message_skips_duplicate_id() {
+        let tmp = TempDir::new().unwrap();
+        let m = make_msg("msg_dup", "ws_d");
+        append_message(tmp.path(), "ws_d", &m).unwrap();
+        append_message(tmp.path(), "ws_d", &m).unwrap();
+        let loaded = load_messages(tmp.path(), "ws_d").unwrap();
+        assert_eq!(loaded.len(), 1);
     }
 }

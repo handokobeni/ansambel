@@ -2,11 +2,14 @@
 // require a live Tauri AppHandle / Channel, which cannot be constructed in unit
 // tests.  All business logic lives in `agent_core.rs` (fully covered).
 pub use crate::commands::agent_core::{
-    build_system_prompt_prefix, process_reader_events, send_message_inner,
-    send_message_inner_with_persist, spawn_agent_inner, stop_agent_inner, AgentProcess,
+    build_system_prompt_prefix, event_to_persisted_message, process_reader_events,
+    send_message_inner, send_message_inner_with_persist, spawn_agent_inner, stop_agent_inner,
+    AgentProcess,
 };
 
+use crate::persistence::messages::append_message;
 use crate::state::{AgentEvent, AgentStatus, AppState};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
 use tauri::Manager;
@@ -30,7 +33,13 @@ pub async fn spawn_agent(
         .clone();
     let session = spawn_agent_inner(state.inner().clone(), &data_dir, &workspace_id, claude_path)
         .map_err(|e| e.to_string())?;
-    spawn_reader_thread(session, on_event, state.inner().clone(), workspace_id);
+    spawn_reader_thread(
+        session,
+        on_event,
+        state.inner().clone(),
+        workspace_id,
+        data_dir,
+    );
     Ok(())
 }
 
@@ -62,6 +71,7 @@ fn spawn_reader_thread(
     on_event: Channel<AgentEvent>,
     state: Arc<Mutex<AppState>>,
     workspace_id: String,
+    data_dir: PathBuf,
 ) {
     let _ = on_event.send(AgentEvent::Status {
         status: AgentStatus::Running,
@@ -77,6 +87,19 @@ fn spawn_reader_thread(
             }
         };
         process_reader_events(reader, state, &workspace_id, &|ev: AgentEvent| {
+            // Persist assistant + tool events to disk so reopening the
+            // workspace later rehydrates the history. User messages are
+            // already saved by send_message_inner_with_persist on the
+            // inbound path.
+            if let Some(msg) = event_to_persisted_message(&ev, &workspace_id) {
+                if let Err(e) = append_message(&data_dir, &workspace_id, &msg) {
+                    tracing::warn!(
+                        workspace_id = %workspace_id,
+                        error = %e,
+                        "agent reader: persist failed"
+                    );
+                }
+            }
             let _ = on_event.send(ev);
         });
         let _ = process.try_wait();

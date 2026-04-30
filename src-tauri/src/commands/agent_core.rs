@@ -284,6 +284,67 @@ pub fn send_message_inner(
     Ok(())
 }
 
+/// Converts a streaming `AgentEvent` to a persistable `Message`, returning
+/// `None` for events that should not be saved (init, status, error, partial
+/// message chunks). Tool events are persisted as separate `Tool`-role
+/// messages so the on-disk shape mirrors what the frontend store renders.
+pub fn event_to_persisted_message(
+    event: &AgentEvent,
+    workspace_id: &str,
+) -> Option<crate::state::Message> {
+    use crate::state::{Message, MessageRole};
+    let now = now_unix();
+    match event {
+        AgentEvent::Message {
+            id,
+            role,
+            text,
+            is_partial,
+        } => {
+            if *is_partial {
+                return None;
+            }
+            Some(Message {
+                id: id.clone(),
+                workspace_id: workspace_id.into(),
+                role: role.clone(),
+                text: text.clone(),
+                is_partial: false,
+                tool_use: None,
+                tool_result: None,
+                created_at: now,
+            })
+        }
+        AgentEvent::ToolUse {
+            message_id,
+            tool_use,
+        } => Some(Message {
+            id: format!("{message_id}/tool_use/{}", tool_use.id),
+            workspace_id: workspace_id.into(),
+            role: MessageRole::Tool,
+            text: String::new(),
+            is_partial: false,
+            tool_use: Some(tool_use.clone()),
+            tool_result: None,
+            created_at: now,
+        }),
+        AgentEvent::ToolResult {
+            message_id,
+            tool_result,
+        } => Some(Message {
+            id: format!("{message_id}/tool_result/{}", tool_result.tool_use_id),
+            workspace_id: workspace_id.into(),
+            role: MessageRole::Tool,
+            text: String::new(),
+            is_partial: false,
+            tool_use: None,
+            tool_result: Some(tool_result.clone()),
+            created_at: now,
+        }),
+        AgentEvent::Init { .. } | AgentEvent::Status { .. } | AgentEvent::Error { .. } => None,
+    }
+}
+
 pub fn stop_agent_inner(state: Arc<Mutex<AppState>>, workspace_id: &str) -> AppResult<()> {
     use crate::error::AppError;
     let mut s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
@@ -941,5 +1002,88 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.err().unwrap().to_string();
         assert!(err_msg.contains("already running"), "got: {err_msg}");
+    }
+
+    // ── event_to_persisted_message tests ──────────────────────────────────────
+    #[test]
+    fn event_to_persisted_message_converts_assistant_text() {
+        use crate::state::MessageRole;
+        let ev = AgentEvent::Message {
+            id: "msg_1".into(),
+            role: MessageRole::Assistant,
+            text: "Hello!".into(),
+            is_partial: false,
+        };
+        let msg = event_to_persisted_message(&ev, "ws_a").expect("should persist");
+        assert_eq!(msg.id, "msg_1");
+        assert_eq!(msg.workspace_id, "ws_a");
+        assert_eq!(msg.role, MessageRole::Assistant);
+        assert_eq!(msg.text, "Hello!");
+        assert!(!msg.is_partial);
+    }
+
+    #[test]
+    fn event_to_persisted_message_skips_partial_messages() {
+        use crate::state::MessageRole;
+        let ev = AgentEvent::Message {
+            id: "msg_2".into(),
+            role: MessageRole::Assistant,
+            text: "streaming...".into(),
+            is_partial: true,
+        };
+        assert!(event_to_persisted_message(&ev, "ws_a").is_none());
+    }
+
+    #[test]
+    fn event_to_persisted_message_converts_tool_use() {
+        use crate::state::{MessageRole, ToolUse};
+        let tu = ToolUse {
+            id: "toolu_1".into(),
+            name: "Read".into(),
+            input: serde_json::json!({"path": "/etc/hosts"}),
+        };
+        let ev = AgentEvent::ToolUse {
+            message_id: "msg_3".into(),
+            tool_use: tu.clone(),
+        };
+        let msg = event_to_persisted_message(&ev, "ws_b").expect("should persist");
+        assert_eq!(msg.role, MessageRole::Tool);
+        assert_eq!(msg.tool_use, Some(tu));
+        assert!(msg.tool_result.is_none());
+    }
+
+    #[test]
+    fn event_to_persisted_message_converts_tool_result() {
+        use crate::state::{MessageRole, ToolResult};
+        let tr = ToolResult {
+            tool_use_id: "toolu_1".into(),
+            content: "127.0.0.1 localhost".into(),
+            is_error: false,
+        };
+        let ev = AgentEvent::ToolResult {
+            message_id: "msg_4".into(),
+            tool_result: tr.clone(),
+        };
+        let msg = event_to_persisted_message(&ev, "ws_c").expect("should persist");
+        assert_eq!(msg.role, MessageRole::Tool);
+        assert_eq!(msg.tool_result, Some(tr));
+        assert!(msg.tool_use.is_none());
+    }
+
+    #[test]
+    fn event_to_persisted_message_skips_init_status_error() {
+        let init = AgentEvent::Init {
+            session_id: "ses".into(),
+            model: "claude-sonnet-4-6".into(),
+        };
+        let status = AgentEvent::Status {
+            status: crate::state::AgentStatus::Running,
+        };
+        let err = AgentEvent::Error {
+            message: "boom".into(),
+        };
+        assert!(event_to_persisted_message(&init, "ws").is_none());
+        assert!(event_to_persisted_message(&status, "ws").is_none());
+        assert!(event_to_persisted_message(&err, "ws").is_none());
     }
 }
