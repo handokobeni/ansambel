@@ -67,13 +67,17 @@ pub fn spawn_agent_inner(
 
     let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<String>();
     let mut writer = session.writer()?;
+    let writer_workspace_id = workspace_id.to_string();
     std::thread::spawn(move || {
         use std::io::Write;
         while let Some(line) = stdin_rx.blocking_recv() {
+            tracing::debug!(workspace_id = %writer_workspace_id, line = %line, "agent writer: stdin");
             if writeln!(writer, "{line}").is_err() || writer.flush().is_err() {
+                tracing::warn!(workspace_id = %writer_workspace_id, "agent writer: stdin write failed");
                 break;
             }
         }
+        tracing::info!(workspace_id = %writer_workspace_id, "agent writer: stdin channel closed");
     });
 
     {
@@ -130,27 +134,36 @@ pub fn process_reader_events<F>(
     loop {
         line.clear();
         match br.read_line(&mut line) {
-            Ok(0) => break, // EOF
-            Ok(_) => match parse_line(&line) {
-                Ok(events) => {
-                    for ev in events {
-                        if let AgentEvent::Init { session_id, .. } = &ev {
-                            if let Ok(mut s) = state.lock() {
-                                if let Some(handle) = s.agents.get_mut(workspace_id) {
-                                    handle.session_id = Some(session_id.clone());
+            Ok(0) => {
+                tracing::info!(workspace_id, "agent reader: EOF");
+                break;
+            }
+            Ok(_) => {
+                tracing::debug!(workspace_id, line = %line.trim_end(), "agent reader: line");
+                match parse_line(&line) {
+                    Ok(events) => {
+                        for ev in events {
+                            tracing::debug!(workspace_id, event = ?ev, "agent reader: event");
+                            if let AgentEvent::Init { session_id, .. } = &ev {
+                                if let Ok(mut s) = state.lock() {
+                                    if let Some(handle) = s.agents.get_mut(workspace_id) {
+                                        handle.session_id = Some(session_id.clone());
+                                    }
                                 }
                             }
+                            send_event(ev);
                         }
-                        send_event(ev);
+                    }
+                    Err(e) => {
+                        tracing::warn!(workspace_id, error = %e, "agent reader: parse failed");
+                        send_event(AgentEvent::Error {
+                            message: format!("parse: {e}"),
+                        });
                     }
                 }
-                Err(e) => {
-                    send_event(AgentEvent::Error {
-                        message: format!("parse: {e}"),
-                    });
-                }
-            },
+            }
             Err(e) => {
+                tracing::warn!(workspace_id, error = %e, "agent reader: read failed");
                 send_event(AgentEvent::Error {
                     message: format!("read: {e}"),
                 });
