@@ -176,7 +176,12 @@ pub enum AgentStatus {
 /// All variants use struct form so JSON is uniform:
 /// {"type":"status","status":"running"}, {"type":"error","message":"..."}.
 #[derive(Serialize, Clone, Debug, PartialEq)]
-#[serde(tag = "type", rename_all = "lowercase")]
+// snake_case (NOT lowercase) — `lowercase` would serialise the `ToolUse`
+// variant as `tooluse` without an underscore, and the TypeScript discriminant
+// would silently miss every tool event coming over the channel. The
+// `agent_event_wire_shape_*` tests below pin this so a future rename can't
+// regress it.
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     Init {
         session_id: String,
@@ -237,6 +242,117 @@ pub fn app_version() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AgentEvent variants serialise with their `type` field exactly matching
+    /// the TypeScript discriminants in `src/lib/types.ts`. A mismatch here
+    /// (e.g. lowercase vs snake_case) causes the JS dispatcher to silently
+    /// drop events — the kind of bug that ships fine in tests and breaks in
+    /// production. Each variant gets its own test rather than a table-driven
+    /// loop so a regression names exactly which variant broke.
+    fn type_field(value: &serde_json::Value) -> &str {
+        value
+            .as_object()
+            .and_then(|m| m.get("type"))
+            .and_then(|v| v.as_str())
+            .expect("AgentEvent must serialise as an object with a `type` discriminant")
+    }
+
+    fn to_value(ev: AgentEvent) -> serde_json::Value {
+        serde_json::to_value(&ev).expect("AgentEvent must serialise to JSON")
+    }
+
+    #[test]
+    fn agent_event_wire_shape_init_is_init() {
+        let v = to_value(AgentEvent::Init {
+            session_id: "ses_a".into(),
+            model: "claude-sonnet-4-6".into(),
+        });
+        assert_eq!(type_field(&v), "init");
+    }
+
+    #[test]
+    fn agent_event_wire_shape_message_is_message() {
+        let v = to_value(AgentEvent::Message {
+            id: "msg_a".into(),
+            role: MessageRole::Assistant,
+            text: "hi".into(),
+            is_partial: false,
+        });
+        assert_eq!(type_field(&v), "message");
+    }
+
+    #[test]
+    fn agent_event_wire_shape_tool_use_is_tool_use_with_underscore() {
+        // Regression: previously serialised as "tooluse" with no underscore
+        // because `rename_all = "lowercase"` collapses the variant name.
+        // Frontend expected `tool_use` and silently dropped every event.
+        let v = to_value(AgentEvent::ToolUse {
+            message_id: "msg_a".into(),
+            tool_use: ToolUse {
+                id: "toolu_a".into(),
+                name: "Read".into(),
+                input: serde_json::Value::Null,
+            },
+        });
+        assert_eq!(type_field(&v), "tool_use");
+        // Field names also matter — the frontend reads `message_id` and
+        // `tool_use` keys. Pin them.
+        assert!(v.get("message_id").is_some());
+        assert!(v.get("tool_use").is_some());
+    }
+
+    #[test]
+    fn agent_event_wire_shape_tool_result_is_tool_result_with_underscore() {
+        let v = to_value(AgentEvent::ToolResult {
+            message_id: "msg_a".into(),
+            tool_result: ToolResult {
+                tool_use_id: "toolu_a".into(),
+                content: "ok".into(),
+                is_error: false,
+            },
+        });
+        assert_eq!(type_field(&v), "tool_result");
+        assert!(v.get("tool_result").is_some());
+    }
+
+    #[test]
+    fn agent_event_wire_shape_status_is_status() {
+        let v = to_value(AgentEvent::Status {
+            status: AgentStatus::Running,
+        });
+        assert_eq!(type_field(&v), "status");
+    }
+
+    #[test]
+    fn agent_event_wire_shape_error_is_error() {
+        let v = to_value(AgentEvent::Error {
+            message: "boom".into(),
+        });
+        assert_eq!(type_field(&v), "error");
+    }
+
+    #[test]
+    fn agent_event_wire_shape_compact_is_compact() {
+        let v = to_value(AgentEvent::Compact {
+            trigger: "auto".into(),
+            pre_tokens: Some(45_000),
+        });
+        assert_eq!(type_field(&v), "compact");
+        assert!(v.get("trigger").is_some());
+        assert!(v.get("pre_tokens").is_some());
+    }
+
+    #[test]
+    fn agent_event_wire_shape_thinking_is_thinking() {
+        let v = to_value(AgentEvent::Thinking {
+            message_id: "msg_a".into(),
+            text: "considering".into(),
+            is_partial: true,
+        });
+        assert_eq!(type_field(&v), "thinking");
+        assert!(v.get("message_id").is_some());
+        assert!(v.get("is_partial").is_some());
+    }
 
     #[test]
     fn app_state_default_is_empty() {
