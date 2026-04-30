@@ -38,6 +38,110 @@ pub fn parse_line(line: &str) -> Result<Vec<AgentEvent>> {
     }
 }
 
+/// Stateful parser for Claude's `--include-partial-messages` stream. The
+/// CLI emits Anthropic-API-style `stream_event` lines that need cross-line
+/// state to accumulate text deltas into partial Message events.
+///
+/// Non-stream_event lines (system init, assistant, result) are forwarded
+/// to `parse_line` unchanged so this is a strict superset of the pure
+/// parser. The frontend store de-dupes by message id, so the final
+/// non-partial assistant line cleanly overwrites the last partial.
+pub struct StreamParser {
+    /// Id of the currently-streaming message (set on `message_start`,
+    /// cleared on `message_stop`). Delta events are no-ops when this is
+    /// `None`, which keeps the parser robust against truncated streams.
+    current_message_id: Option<String>,
+    /// Accumulated text for the current message id.
+    accumulated: String,
+}
+
+impl Default for StreamParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StreamParser {
+    pub fn new() -> Self {
+        Self {
+            current_message_id: None,
+            accumulated: String::new(),
+        }
+    }
+
+    pub fn parse_line(&mut self, line: &str) -> Result<Vec<AgentEvent>> {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let v: Value = serde_json::from_str(trimmed).map_err(|e| AppError::ParseFailed {
+            what: "stream-json line".into(),
+            msg: e.to_string(),
+        })?;
+        if v.get("type").and_then(|t| t.as_str()) == Some("stream_event") {
+            return self.parse_stream_event(&v);
+        }
+        // Fall back to the pure parser for non-streaming wire shapes.
+        parse_line(trimmed)
+    }
+
+    fn parse_stream_event(&mut self, v: &Value) -> Result<Vec<AgentEvent>> {
+        let event = match v.get("event") {
+            Some(e) => e,
+            None => return Ok(Vec::new()),
+        };
+        let etype = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match etype {
+            "message_start" => {
+                if let Some(id) = event
+                    .get("message")
+                    .and_then(|m| m.get("id"))
+                    .and_then(|s| s.as_str())
+                {
+                    self.current_message_id = Some(id.to_string());
+                    self.accumulated.clear();
+                }
+                Ok(Vec::new())
+            }
+            "content_block_delta" => {
+                let dtype = event
+                    .get("delta")
+                    .and_then(|d| d.get("type"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
+                if dtype != "text_delta" {
+                    // input_json_delta and other non-text deltas have no
+                    // partial UI representation; the final assistant line
+                    // will carry the completed tool_use input.
+                    return Ok(Vec::new());
+                }
+                let id = match self.current_message_id.as_ref() {
+                    Some(id) => id.clone(),
+                    None => return Ok(Vec::new()),
+                };
+                let chunk = event
+                    .get("delta")
+                    .and_then(|d| d.get("text"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("");
+                self.accumulated.push_str(chunk);
+                Ok(vec![AgentEvent::Message {
+                    id,
+                    role: MessageRole::Assistant,
+                    text: self.accumulated.clone(),
+                    is_partial: true,
+                }])
+            }
+            "message_stop" => {
+                self.current_message_id = None;
+                self.accumulated.clear();
+                Ok(Vec::new())
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+}
+
 fn parse_message(v: &Value, kind: &str) -> Result<Vec<AgentEvent>> {
     let msg = v.get("message").ok_or_else(|| AppError::ParseFailed {
         what: "stream-json message".into(),
@@ -261,5 +365,172 @@ mod tests {
     fn parse_line_returns_err_on_invalid_json() {
         let result = parse_line("not json {{{");
         assert!(result.is_err());
+    }
+
+    // ── StreamParser tests (stateful, for --include-partial-messages) ─────────
+    #[test]
+    fn stream_parser_passes_through_non_stream_event_lines() {
+        let mut p = StreamParser::new();
+        let line = r#"{"type":"system","subtype":"init","session_id":"s","model":"m","tools":[],"cwd":"/"}"#;
+        let evs = p.parse_line(line).unwrap();
+        assert!(matches!(evs[0], AgentEvent::Init { .. }));
+    }
+
+    #[test]
+    fn stream_parser_message_start_emits_no_event_but_tracks_id() {
+        let mut p = StreamParser::new();
+        let line = r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_99","role":"assistant","content":[]}},"session_id":"s","parent_tool_use_id":null}"#;
+        let evs = p.parse_line(line).unwrap();
+        assert!(evs.is_empty());
+    }
+
+    #[test]
+    fn stream_parser_emits_partial_message_on_text_delta() {
+        let mut p = StreamParser::new();
+        p.parse_line(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[]}}}"#,
+        )
+        .unwrap();
+        let evs = p
+            .parse_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}}"#,
+            )
+            .unwrap();
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            AgentEvent::Message {
+                id,
+                role,
+                text,
+                is_partial,
+            } => {
+                assert_eq!(id, "msg_1");
+                assert_eq!(role, &MessageRole::Assistant);
+                assert_eq!(text, "Hello");
+                assert!(*is_partial);
+            }
+            other => panic!("expected partial Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_parser_accumulates_multiple_text_deltas() {
+        let mut p = StreamParser::new();
+        p.parse_line(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_2","role":"assistant","content":[]}}}"#,
+        )
+        .unwrap();
+        p.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}}"#,
+        )
+        .unwrap();
+        let evs = p
+            .parse_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}}"#,
+            )
+            .unwrap();
+        match &evs[0] {
+            AgentEvent::Message { text, .. } => assert_eq!(text, "Hello world"),
+            other => panic!("expected partial Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_parser_message_stop_clears_state_and_emits_nothing() {
+        let mut p = StreamParser::new();
+        p.parse_line(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_3","role":"assistant","content":[]}}}"#,
+        )
+        .unwrap();
+        p.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}}"#,
+        )
+        .unwrap();
+        let evs = p
+            .parse_line(r#"{"type":"stream_event","event":{"type":"message_stop"}}"#)
+            .unwrap();
+        assert!(evs.is_empty());
+
+        // After message_stop, a new message_start with a different id starts
+        // fresh — no leakage from the previous message's accumulated text.
+        p.parse_line(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_4","role":"assistant","content":[]}}}"#,
+        )
+        .unwrap();
+        let evs = p
+            .parse_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"new"}}}"#,
+            )
+            .unwrap();
+        match &evs[0] {
+            AgentEvent::Message { text, .. } => assert_eq!(text, "new"),
+            other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_parser_ignores_delta_without_prior_message_start() {
+        let mut p = StreamParser::new();
+        // Spurious delta arrives without context; should be a no-op rather
+        // than crashing or producing a Message with an empty id.
+        let evs = p
+            .parse_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"orphan"}}}"#,
+            )
+            .unwrap();
+        assert!(evs.is_empty());
+    }
+
+    #[test]
+    fn stream_parser_ignores_non_text_delta_types() {
+        // input_json_delta (for tool_use blocks) currently has no UI
+        // representation; verify it doesn't get rendered as text.
+        let mut p = StreamParser::new();
+        p.parse_line(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_5","role":"assistant","content":[]}}}"#,
+        )
+        .unwrap();
+        let evs = p
+            .parse_line(
+                r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}}"#,
+            )
+            .unwrap();
+        assert!(evs.is_empty());
+    }
+
+    #[test]
+    fn stream_parser_passes_through_final_assistant_message() {
+        // After all the partial events, Claude still emits a regular
+        // "assistant" line with the full content. That must still produce a
+        // non-partial Message so the frontend can flip is_partial off.
+        let mut p = StreamParser::new();
+        p.parse_line(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_6","role":"assistant","content":[]}}}"#,
+        )
+        .unwrap();
+        p.parse_line(
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}}"#,
+        )
+        .unwrap();
+        p.parse_line(r#"{"type":"stream_event","event":{"type":"message_stop"}}"#)
+            .unwrap();
+        let evs = p
+            .parse_line(
+                r#"{"type":"assistant","message":{"id":"msg_6","role":"assistant","content":[{"type":"text","text":"Hi"}]}}"#,
+            )
+            .unwrap();
+        match &evs[0] {
+            AgentEvent::Message {
+                id,
+                text,
+                is_partial,
+                ..
+            } => {
+                assert_eq!(id, "msg_6");
+                assert_eq!(text, "Hi");
+                assert!(!is_partial);
+            }
+            other => panic!("expected final Message, got {other:?}"),
+        }
     }
 }

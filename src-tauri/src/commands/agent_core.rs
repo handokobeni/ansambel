@@ -1,4 +1,4 @@
-use crate::commands::agent_stream::parse_line;
+use crate::commands::agent_stream::StreamParser;
 use crate::commands::helpers::now_unix;
 use crate::error::{AppError, AppResult};
 use crate::state::{AgentEvent, AgentHandle, AppState, WorkspaceStatus};
@@ -75,6 +75,11 @@ pub fn spawn_agent_inner(
         "--output-format",
         "stream-json",
         "--verbose",
+        // Surface content_block_delta events so the chat UI can render
+        // assistant text token-by-token instead of waiting for the whole
+        // turn. The trailing non-partial assistant line still arrives and
+        // overwrites the last partial via the message-id upsert.
+        "--include-partial-messages",
         "--permission-mode",
         "bypassPermissions",
         "--disallowedTools",
@@ -188,6 +193,7 @@ pub fn process_reader_events<F>(
 {
     let mut br = BufReader::new(reader);
     let mut line = String::new();
+    let mut parser = StreamParser::new();
     loop {
         line.clear();
         match br.read_line(&mut line) {
@@ -197,7 +203,7 @@ pub fn process_reader_events<F>(
             }
             Ok(_) => {
                 tracing::debug!(workspace_id, line = %line.trim_end(), "agent reader: line");
-                match parse_line(&line) {
+                match parser.parse_line(&line) {
                     Ok(events) => {
                         for ev in events {
                             tracing::debug!(workspace_id, event = ?ev, "agent reader: event");
@@ -847,6 +853,49 @@ mod tests {
         // so only the assistant message produces an event.
         assert_eq!(evs.len(), 1);
         assert!(matches!(&evs[0], crate::state::AgentEvent::Message { .. }));
+    }
+
+    #[test]
+    fn process_reader_events_streams_partial_then_final_assistant_message() {
+        use std::io::Cursor;
+        let state = make_state();
+        // Realistic --include-partial-messages stream: message_start →
+        // two text deltas → message_stop → final assistant message.
+        let ndjson = concat!(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_s","role":"assistant","content":[]}}}"#,
+            "\n",
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}}"#,
+            "\n",
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}}}"#,
+            "\n",
+            r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"id":"msg_s","role":"assistant","content":[{"type":"text","text":"Hello"}]}}"#,
+            "\n",
+        );
+        let reader: Box<dyn std::io::Read + Send> =
+            Box::new(Cursor::new(ndjson.as_bytes().to_vec()));
+        let events =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::<crate::state::AgentEvent>::new()));
+        let events_clone = events.clone();
+        process_reader_events(reader, state, "ws_stream", &|ev| {
+            events_clone.lock().unwrap().push(ev);
+        });
+        let evs = events.lock().unwrap();
+        // Two partials + one final = three Message events with id "msg_s".
+        assert_eq!(evs.len(), 3);
+        let texts: Vec<(&str, bool)> = evs
+            .iter()
+            .map(|e| match e {
+                crate::state::AgentEvent::Message {
+                    text, is_partial, ..
+                } => (text.as_str(), *is_partial),
+                _ => panic!("expected Message events only"),
+            })
+            .collect();
+        assert_eq!(texts[0], ("Hel", true));
+        assert_eq!(texts[1], ("Hello", true));
+        assert_eq!(texts[2], ("Hello", false));
     }
 
     #[test]
