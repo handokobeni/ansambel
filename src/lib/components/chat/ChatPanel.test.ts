@@ -72,6 +72,19 @@ describe('ChatPanel', () => {
     expect(btn.disabled).toBe(true);
   });
 
+  it('keeps input enabled when status is stopped (so the user can re-prompt)', async () => {
+    messages.apply({ type: 'status', status: 'stopped' }, 'ws_a');
+    const { container, getByRole } = render(ChatPanel, {
+      props: { workspaceId: 'ws_a', onSend: vi.fn() },
+    });
+    const ta = container.querySelector('textarea') as HTMLTextAreaElement;
+    expect(ta.disabled).toBe(false);
+    const { fireEvent } = await import('@testing-library/svelte');
+    await fireEvent.input(ta, { target: { value: 'continue' } });
+    const btn = getByRole('button', { name: /send/i }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+  });
+
   describe('error banner', () => {
     it('renders an error banner when messages.error is set for the workspace', () => {
       messages.apply({ type: 'error', message: 'CLI: invalid auth token' }, 'ws_a');

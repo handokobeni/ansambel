@@ -83,6 +83,19 @@
       workspace.id
     );
     try {
+      // After Stop the agent process is dead, but the user can still type
+      // their next prompt. Re-spawn before sending so the conversation
+      // continues seamlessly — same UX as Claude/ChatGPT web.
+      const current = messages.statusFor(workspace.id) ?? workspace.status;
+      if (current === 'stopped' || current === 'not_started') {
+        if (!channel) {
+          channel = agentChannel();
+          channel.onmessage = (ev: AgentEvent) => {
+            messages.apply(ev, workspace.id);
+          };
+        }
+        await api.agent.spawn(workspace.id, channel);
+      }
       await api.agent.send(workspace.id, text);
     } catch (err) {
       messages.apply({ type: 'error', message: String(err) }, workspace.id);

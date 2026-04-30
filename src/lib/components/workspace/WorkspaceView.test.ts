@@ -267,6 +267,57 @@ describe('WorkspaceView', () => {
     expect(queryByTestId('settings-cta')).toBeNull();
   });
 
+  it('re-spawns the agent before sending when status is stopped', async () => {
+    const calls: string[] = [];
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      calls.push(cmd);
+      if (cmd === 'list_messages') return [];
+      return undefined;
+    });
+    const { getByLabelText, getByRole } = render(WorkspaceView, {
+      props: { workspace: ws({ status: 'running' }) },
+    });
+    await waitFor(() => expect(calls).toContain('reattach_agent'));
+    // Simulate Stop arriving via the channel.
+    messages.apply({ type: 'status', status: 'stopped' }, 'ws_a');
+    // User types the next prompt. Send should re-spawn first, then send.
+    const ta = getByLabelText(/message/i) as HTMLTextAreaElement;
+    const { fireEvent } = await import('@testing-library/svelte');
+    await fireEvent.input(ta, { target: { value: 'next turn' } });
+    await fireEvent.click(getByRole('button', { name: /send/i }));
+    await waitFor(() => {
+      expect(calls).toContain('spawn_agent');
+      expect(calls).toContain('send_message');
+    });
+    const spawnIdx = calls.lastIndexOf('spawn_agent');
+    const sendIdx = calls.lastIndexOf('send_message');
+    expect(spawnIdx).toBeLessThan(sendIdx);
+  });
+
+  it('does not re-spawn when status is already running', async () => {
+    let spawnCalls = 0;
+    vi.mocked(invoke).mockImplementation(async (cmd) => {
+      if (cmd === 'list_messages') return [];
+      if (cmd === 'spawn_agent') spawnCalls += 1;
+      return undefined;
+    });
+    const { getByLabelText, getByRole } = render(WorkspaceView, {
+      props: { workspace: ws({ status: 'running' }) },
+    });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('reattach_agent', expect.any(Object)));
+    const ta = getByLabelText(/message/i) as HTMLTextAreaElement;
+    const { fireEvent } = await import('@testing-library/svelte');
+    await fireEvent.input(ta, { target: { value: 'live turn' } });
+    await fireEvent.click(getByRole('button', { name: /send/i }));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(
+        'send_message',
+        expect.objectContaining({ text: 'live turn' })
+      )
+    );
+    expect(spawnCalls).toBe(0);
+  });
+
   it('captures send_message rejection as error in messages store', async () => {
     vi.mocked(invoke).mockImplementation(async (cmd) => {
       if (cmd === 'send_message') throw 'send failed';

@@ -36,7 +36,10 @@
 
   const list = $derived(messages.listForWorkspace(workspaceId));
   const status = $derived(messages.statusFor(workspaceId));
-  const inputDisabled = $derived(status === 'error' || status === 'stopped');
+  // Only hard errors disable input. After Stop the user should still be
+  // able to type the next prompt — the workspace re-spawns the agent on
+  // send, mirroring the chat-web pattern of "Stop → type → continue".
+  const inputDisabled = $derived(status === 'error');
   const error = $derived(messages.errorFor(workspaceId));
 
   let loading = $state(false);
