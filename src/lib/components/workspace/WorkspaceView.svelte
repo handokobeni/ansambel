@@ -114,7 +114,7 @@
           type="button"
           onclick={handleStop}
           disabled={stopping}
-          class="text-xs px-2 py-0.5 rounded border border-[var(--border)] hover:bg-[var(--bg-card)] disabled:opacity-50"
+          class="text-xs px-2 py-0.5 rounded border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--bg-card)] disabled:opacity-50"
         >
           Stop
         </button>
