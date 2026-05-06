@@ -80,6 +80,37 @@ test('Streaming: assistant bubble length grows monotonically as partials arrive'
   });
   await expect(page.getByText(/running/i)).toBeVisible({ timeout: 5000 });
 
+  // Install a MutationObserver BEFORE Send. The streaming profile completes in
+  // ~150 ms; on a slow CI runner, by the time Playwright sees the bubble as
+  // visible the stream has already collapsed into its final text, so polling
+  // afterwards captures one length and the test fails. The observer fires on
+  // every <p> text mutation regardless of poll cadence.
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      __streamingLengths__?: number[];
+      __streamingObserver__?: MutationObserver;
+    };
+    const captured: number[] = [];
+    w.__streamingLengths__ = captured;
+    const observer = new MutationObserver(() => {
+      const p = document.querySelector(
+        'article[data-role="assistant"][data-message-id^="msg_stream_"] p'
+      ) as HTMLElement | null;
+      if (!p) return;
+      const len = p.innerText.length;
+      if (len === 0) return;
+      if (captured.length === 0 || captured[captured.length - 1] !== len) {
+        captured.push(len);
+      }
+    });
+    observer.observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+    w.__streamingObserver__ = observer;
+  });
+
   // Send the message that triggers the streaming reply profile.
   const textarea = page.getByLabel(/message/i);
   await textarea.fill('hello claude');
@@ -87,32 +118,12 @@ test('Streaming: assistant bubble length grows monotonically as partials arrive'
 
   // The streaming profile emits 4 partial deltas at 30, 60, 90, 120 ms with a
   // final non-partial at 150 ms — a single same-id assistant bubble whose text
-  // grows on each delta. Identify it as the assistant bubble that is NOT the
-  // user echo bubble.
+  // grows on each delta. Wait until it resolves to the final form before
+  // pulling the captured trace out of the page.
   const assistantBubble = page
     .locator('article[data-role="assistant"][data-message-id^="msg_stream_"]')
     .first();
-
-  // Wait until the bubble appears at all — the very first partial creates it.
   await expect(assistantBubble).toBeVisible({ timeout: 5000 });
-
-  // Capture growth snapshots while the reply streams. We poll faster than the
-  // 30 ms emit cadence so each delta is observed at least once.
-  const lengths: number[] = [];
-  for (let i = 0; i < 12; i++) {
-    const text =
-      (await assistantBubble
-        .locator('p')
-        .first()
-        .innerText()
-        .catch(() => '')) ?? '';
-    if (text.length > 0) lengths.push(text.length);
-    await page.waitForTimeout(20);
-  }
-
-  // The bubble must end on the final, non-partial form. Wait for it before
-  // asserting on growth so we know the stream completed within the budget.
-  await expect(assistantBubble).toHaveAttribute('data-role', 'assistant');
   await expect(assistantBubble.locator('p').first()).toHaveText(
     'Streaming reply to: hello claude',
     {
@@ -124,15 +135,22 @@ test('Streaming: assistant bubble length grows monotonically as partials arrive'
   // arrives, signalling the bubble has closed.
   await expect(assistantBubble.locator('[aria-label="streaming"]')).toHaveCount(0);
 
-  // Growth must be monotonic — never regresses. We only check non-empty
-  // snapshots; the very first poll might land before the first delta.
-  expect(lengths.length).toBeGreaterThan(0);
+  const lengths = await page.evaluate(() => {
+    const w = window as unknown as {
+      __streamingObserver__?: MutationObserver;
+      __streamingLengths__?: number[];
+    };
+    w.__streamingObserver__?.disconnect();
+    return w.__streamingLengths__ ?? [];
+  });
+
+  // Growth must be monotonic — never regresses.
   for (let i = 1; i < lengths.length; i++) {
     expect(lengths[i]).toBeGreaterThanOrEqual(lengths[i - 1]);
   }
 
-  // We must observe at least 2 distinct growth points — proves it actually
-  // streamed rather than appearing in one shot.
-  const distinct = new Set(lengths);
-  expect(distinct.size).toBeGreaterThanOrEqual(2);
+  // The observer only pushes when length changes, so array length equals the
+  // distinct-growth-point count. ≥2 proves the bubble actually streamed rather
+  // than appearing in one shot.
+  expect(lengths.length).toBeGreaterThanOrEqual(2);
 });
