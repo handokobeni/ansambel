@@ -1,6 +1,6 @@
 [package]
 name = "ansambel"
-version = "0.1.0-pre"
+version = "0.1.0"
 description = "Orchestrate your AI ensemble"
 authors = ["Handoko Beni <benihandoko@student.upi.edu>"]
 edition = "2021"

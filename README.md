@@ -7,7 +7,8 @@ Claude Code agents in isolated git worktrees. Modeled after
 [korlap](https://github.com/ariaghora/korlap) (macOS-only) and
 [Conductor](https://www.conductor.build).
 
-**Status:** Phase 0 — Foundation (pre-alpha).
+**Status:** Phase 1 shipped (v0.1.0) — MVP orchestrator. Phase 2 (Work Mode
+Complete) in progress.
 
 ## Stack
 
