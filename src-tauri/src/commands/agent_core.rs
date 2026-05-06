@@ -108,10 +108,21 @@ pub fn spawn_agent_inner(
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
-    // Drain stderr to tracing so the CLI's complaints land in the logs instead
-    // of being silently buffered until the pipe fills and the child blocks.
+    // Construct the event broadcaster up-front so the stderr-pump thread
+    // (spawned below) can forward CLI stderr lines as Error events. Buffer
+    // of 256 absorbs partial-message bursts; slow consumers drop oldest
+    // with `Lagged`, which is acceptable for a UI that re-renders on the
+    // next message.
+    let (event_tx, _) = tokio::sync::broadcast::channel::<AgentEvent>(256);
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // Forward stderr to both `tracing::warn` (logs) and the broadcaster
+    // (chat error banner). When Claude's CLI complains about auth, quota,
+    // or network errors, the user sees the actual reason instead of just
+    // "Stopped".
     if let Some(stderr) = stderr_pipe {
         let stderr_workspace_id = workspace_id.to_string();
+        let stderr_tx = event_tx.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
@@ -120,6 +131,7 @@ pub fn spawn_agent_inner(
                     line = %line,
                     "agent stderr"
                 );
+                let _ = stderr_tx.send(stderr_line_to_event(&line));
             }
         });
     }
@@ -157,6 +169,8 @@ pub fn spawn_agent_inner(
                 workspace_id: workspace_id.into(),
                 stdin_tx,
                 session_id: None,
+                event_tx,
+                cancel,
             },
         );
     } // lock dropped here
@@ -165,6 +179,16 @@ pub fn spawn_agent_inner(
         child,
         stdout: stdout_pipe,
     })
+}
+
+/// Maps a single line of agent CLI stderr to a chat-visible Error event.
+/// The `CLI:` prefix tells users the message originated from the agent
+/// process, not from Ansambel itself — useful for distinguishing auth
+/// errors from app bugs.
+pub fn stderr_line_to_event(line: &str) -> AgentEvent {
+    AgentEvent::Error {
+        message: format!("CLI: {}", line.trim_end()),
+    }
 }
 
 pub fn build_system_prompt_prefix(data_dir: &Path, repo_id: &str) -> String {
@@ -181,20 +205,26 @@ pub fn build_system_prompt_prefix(data_dir: &Path, repo_id: &str) -> String {
 
 /// Inner reader loop extracted for testability — does not require a Tauri Channel.
 /// Reads NDJSON lines from `reader`, parses each into `AgentEvent`s, and calls
-/// `send_event` for every event. On EOF, resets workspace status to `Waiting`
-/// and removes the agent handle from state.
-pub fn process_reader_events<F>(
+/// `send_event` for every event. On EOF (or cancel), resets workspace status
+/// to `Waiting` and removes the agent handle from state.
+///
+/// `cancel` is checked between reads. `stop_agent` flips it to `true` before
+/// dropping the handle so the loop exits even if the child stdout doesn't
+/// EOF promptly (defense-in-depth — closing stdin usually forces EOF).
+pub fn process_reader_events_with_cancel<F>(
     reader: Box<dyn std::io::Read + Send>,
     state: Arc<Mutex<AppState>>,
     workspace_id: &str,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     send_event: &F,
 ) where
     F: Fn(AgentEvent),
 {
+    use std::sync::atomic::Ordering;
     let mut br = BufReader::new(reader);
     let mut line = String::new();
     let mut parser = StreamParser::new();
-    loop {
+    while !cancel.load(Ordering::Relaxed) {
         line.clear();
         match br.read_line(&mut line) {
             Ok(0) => {
@@ -239,19 +269,69 @@ pub fn process_reader_events<F>(
             }
         }
     }
-    // EOF cleanup — reset workspace status and drop the agent handle.
-    if let Ok(mut s) = state.lock() {
-        if let Some(ws) = s.workspaces.get_mut(workspace_id) {
-            ws.status = WorkspaceStatus::Waiting;
-        }
-        s.agents.remove(workspace_id);
+    if cancel.load(Ordering::Relaxed) {
+        tracing::info!(workspace_id, "agent reader: cancelled");
     }
+    // EOF / cancel cleanup — reset workspace status and drop the agent handle.
+    // Use Arc::ptr_eq on the cancel token to verify the handle in state is
+    // still ours: after a user-initiated Stop+respawn, a fresh handle (with a
+    // different cancel Arc) may already occupy the slot, and blindly removing
+    // would orphan the new agent and break the user's next send.
+    if let Ok(mut s) = state.lock() {
+        let still_ours = s
+            .agents
+            .get(workspace_id)
+            .map(|h| std::sync::Arc::ptr_eq(&h.cancel, &cancel))
+            .unwrap_or(false);
+        if still_ours {
+            if let Some(ws) = s.workspaces.get_mut(workspace_id) {
+                ws.status = WorkspaceStatus::Waiting;
+            }
+            s.agents.remove(workspace_id);
+        }
+    }
+}
+
+/// Backwards-compatible thin wrapper for tests and callers that don't need
+/// to drive cancellation themselves. Adopts the existing handle's cancel
+/// Arc as the ownership token so EOF cleanup still removes the handle —
+/// without that adoption, the ptr_eq check in
+/// `process_reader_events_with_cancel` would always fail on a freshly-made
+/// "never-fire" Arc and leave the handle stranded in state.
+pub fn process_reader_events<F>(
+    reader: Box<dyn std::io::Read + Send>,
+    state: Arc<Mutex<AppState>>,
+    workspace_id: &str,
+    send_event: &F,
+) where
+    F: Fn(AgentEvent),
+{
+    let cancel = state
+        .lock()
+        .ok()
+        .and_then(|s| s.agents.get(workspace_id).map(|h| h.cancel.clone()))
+        .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    process_reader_events_with_cancel(reader, state, workspace_id, cancel, send_event)
 }
 
 pub fn send_message_inner(
     state: Arc<Mutex<AppState>>,
     workspace_id: &str,
     text: &str,
+) -> AppResult<()> {
+    send_message_inner_with_attachments(state, workspace_id, text, &[])
+}
+
+/// Send a user message to the agent with optional attached image files.
+/// Each Attachment must already exist on disk at its `path`; this function
+/// reads + base64-encodes the bytes inline and pushes them as `image`
+/// content blocks BEFORE the trailing text block, matching how the
+/// Anthropic API wants multimodal turns ordered.
+pub fn send_message_inner_with_attachments(
+    state: Arc<Mutex<AppState>>,
+    workspace_id: &str,
+    text: &str,
+    attachments: &[crate::state::Attachment],
 ) -> AppResult<()> {
     use crate::error::AppError;
     let s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
@@ -270,12 +350,33 @@ pub fn send_message_inner(
         .session_id
         .clone()
         .unwrap_or_else(|| workspace_id.to_string());
+
+    let mut content: Vec<serde_json::Value> = Vec::with_capacity(attachments.len() + 1);
+    for att in attachments {
+        let bytes = std::fs::read(&att.path).map_err(|e| AppError::Command {
+            cmd: "send_message".into(),
+            msg: format!("read attachment {}: {e}", att.path),
+        })?;
+        let encoded = base64_encode(&bytes);
+        content.push(serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": att.media_type,
+                "data": encoded,
+            }
+        }));
+    }
+    // Text always comes last — ordering matters for Claude's multimodal
+    // attention, the prompt should reference the images preceding it.
+    content.push(serde_json::json!({ "type": "text", "text": text }));
+
     let envelope = serde_json::json!({
         "type": "user",
         "session_id": session_id,
         "message": {
             "role": "user",
-            "content": [{ "type": "text", "text": text }],
+            "content": content,
         },
         "parent_tool_use_id": serde_json::Value::Null,
     })
@@ -287,7 +388,50 @@ pub fn send_message_inner(
             cmd: "send_message".into(),
             msg: format!("stdin closed: {e}"),
         })?;
+    // Mark the turn as in-flight. The CLI streams content blocks back over
+    // many milliseconds before the `result` line arrives — Status::Running
+    // here lets the UI's TurnStatusBar appear immediately on send rather
+    // than only once the first assistant token shows up. The matching
+    // Waiting transition is emitted by the parser on `result`.
+    let _ = handle.event_tx.send(crate::state::AgentEvent::Status {
+        status: crate::state::AgentStatus::Running,
+    });
     Ok(())
+}
+
+/// Minimal base64 encoder for image bytes — keeps us off the `base64`
+/// crate which would be a fresh dependency for this single use case.
+/// Standard alphabet, padded.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut chunks = bytes.chunks_exact(3);
+    for chunk in &mut chunks {
+        let b = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | chunk[2] as u32;
+        out.push(ALPHA[((b >> 18) & 0x3F) as usize] as char);
+        out.push(ALPHA[((b >> 12) & 0x3F) as usize] as char);
+        out.push(ALPHA[((b >> 6) & 0x3F) as usize] as char);
+        out.push(ALPHA[(b & 0x3F) as usize] as char);
+    }
+    let rem = chunks.remainder();
+    match rem.len() {
+        1 => {
+            let b = (rem[0] as u32) << 16;
+            out.push(ALPHA[((b >> 18) & 0x3F) as usize] as char);
+            out.push(ALPHA[((b >> 12) & 0x3F) as usize] as char);
+            out.push('=');
+            out.push('=');
+        }
+        2 => {
+            let b = ((rem[0] as u32) << 16) | ((rem[1] as u32) << 8);
+            out.push(ALPHA[((b >> 18) & 0x3F) as usize] as char);
+            out.push(ALPHA[((b >> 12) & 0x3F) as usize] as char);
+            out.push(ALPHA[((b >> 6) & 0x3F) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
 }
 
 /// Converts a streaming `AgentEvent` to a persistable `Message`, returning
@@ -319,6 +463,7 @@ pub fn event_to_persisted_message(
                 tool_use: None,
                 tool_result: None,
                 created_at: now,
+                attachments: Vec::new(),
             })
         }
         AgentEvent::ToolUse {
@@ -333,6 +478,7 @@ pub fn event_to_persisted_message(
             tool_use: Some(tool_use.clone()),
             tool_result: None,
             created_at: now,
+            attachments: Vec::new(),
         }),
         AgentEvent::ToolResult {
             message_id,
@@ -346,15 +492,30 @@ pub fn event_to_persisted_message(
             tool_use: None,
             tool_result: Some(tool_result.clone()),
             created_at: now,
+            attachments: Vec::new(),
         }),
-        AgentEvent::Init { .. } | AgentEvent::Status { .. } | AgentEvent::Error { .. } => None,
+        AgentEvent::Init { .. }
+        | AgentEvent::Status { .. }
+        | AgentEvent::Error { .. }
+        | AgentEvent::Compact { .. }
+        | AgentEvent::Thinking { .. }
+        | AgentEvent::Usage { .. } => None,
     }
 }
 
 pub fn stop_agent_inner(state: Arc<Mutex<AppState>>, workspace_id: &str) -> AppResult<()> {
     use crate::error::AppError;
     let mut s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
-    // Remove handle — drops stdin_tx sender, which closes the PTY writer thread.
+    // Flip the cancel token *before* removing the handle so the reader
+    // thread observes it on its next read_line check and exits cleanly,
+    // even if the child stdout doesn't EOF promptly.
+    if let Some(handle) = s.agents.get(workspace_id) {
+        handle
+            .cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    // Remove handle — drops stdin_tx sender, which closes the child's
+    // stdin and (usually) forces EOF on stdout.
     s.agents.remove(workspace_id);
     if let Some(ws) = s.workspaces.get_mut(workspace_id) {
         ws.status = WorkspaceStatus::Waiting;
@@ -362,21 +523,109 @@ pub fn stop_agent_inner(state: Arc<Mutex<AppState>>, workspace_id: &str) -> AppR
     Ok(())
 }
 
+/// Subscribes to a running agent's event broadcaster. Returns an error if no
+/// agent is registered for the workspace. Called when the user navigates back
+/// to a workspace that's still running and we need a fresh receiver to pump
+/// events to a new Tauri Channel — the original Channel handler is GC'd on
+/// component unmount, so without re-subscribing the UI would stall.
+pub fn reattach_agent_inner(
+    state: Arc<Mutex<AppState>>,
+    workspace_id: &str,
+) -> AppResult<tokio::sync::broadcast::Receiver<AgentEvent>> {
+    let s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+    let handle = s
+        .agents
+        .get(workspace_id)
+        .ok_or_else(|| AppError::Command {
+            cmd: "reattach_agent".into(),
+            msg: format!("no agent for workspace {workspace_id}"),
+        })?;
+    Ok(handle.event_tx.subscribe())
+}
+
 pub fn send_message_inner_with_persist(
     state: Arc<Mutex<AppState>>,
+    message_writer: &crate::persistence::message_writer::MessageWriter,
     data_dir: &Path,
     workspace_id: &str,
     text: &str,
 ) -> AppResult<()> {
+    send_message_inner_with_persist_and_attachments(
+        state,
+        message_writer,
+        data_dir,
+        workspace_id,
+        text,
+        &[],
+    )
+}
+
+/// Like `send_message_inner_with_persist` but also handles file attachments:
+/// each `AttachmentInput` (a path the user picked + media_type) is copied
+/// into `<data_dir>/attachments/<ws>/<msg>/` so the chat survives the user
+/// later moving or deleting the source file, then base64-encoded into the
+/// CLI envelope and stamped onto the persisted user `Message`.
+pub fn send_message_inner_with_persist_and_attachments(
+    state: Arc<Mutex<AppState>>,
+    message_writer: &crate::persistence::message_writer::MessageWriter,
+    data_dir: &Path,
+    workspace_id: &str,
+    text: &str,
+    attachments: &[crate::commands::agent::AttachmentInput],
+) -> AppResult<()> {
+    use crate::error::AppError;
     use crate::ids::message_id;
-    use crate::persistence::messages::{load_messages, save_messages};
-    use crate::state::{Message, MessageRole};
+    use crate::state::{Attachment, AttachmentKind, Message, MessageRole};
 
-    send_message_inner(state, workspace_id, text)?;
+    let user_id = message_id();
 
-    let mut current = load_messages(data_dir, workspace_id).unwrap_or_default();
-    current.push(Message {
-        id: message_id(),
+    // Copy each attachment into a dedicated directory for this message so
+    // the persisted `Message` references stable paths under the app data
+    // dir rather than the user's downloads folder.
+    let mut copied: Vec<Attachment> = Vec::with_capacity(attachments.len());
+    if !attachments.is_empty() {
+        let dest_dir = data_dir
+            .join("attachments")
+            .join(workspace_id)
+            .join(&user_id);
+        std::fs::create_dir_all(&dest_dir).map_err(|e| AppError::Command {
+            cmd: "send_message".into(),
+            msg: format!("create attachments dir {}: {e}", dest_dir.display()),
+        })?;
+        for input in attachments {
+            if !input.media_type.starts_with("image/") {
+                return Err(AppError::Command {
+                    cmd: "send_message".into(),
+                    msg: format!("unsupported media_type {:?}", input.media_type),
+                });
+            }
+            let source = std::path::Path::new(&input.source_path);
+            let basename = source
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+                .or_else(|| input.filename.clone())
+                .unwrap_or_else(|| format!("attachment-{}", copied.len()));
+            let dest = dest_dir.join(&basename);
+            std::fs::copy(source, &dest).map_err(|e| AppError::Command {
+                cmd: "send_message".into(),
+                msg: format!("copy attachment {}: {e}", input.source_path),
+            })?;
+            copied.push(Attachment {
+                kind: AttachmentKind::Image,
+                media_type: input.media_type.clone(),
+                path: dest.to_string_lossy().into_owned(),
+                filename: input.filename.clone().or(Some(basename)),
+            });
+        }
+    }
+
+    // Send to the CLI using the *copied* paths so a successful send proves
+    // the files are in their final home.
+    send_message_inner_with_attachments(state, workspace_id, text, &copied)?;
+
+    let user_msg = Message {
+        id: user_id,
         workspace_id: workspace_id.into(),
         role: MessageRole::User,
         text: text.into(),
@@ -384,9 +633,9 @@ pub fn send_message_inner_with_persist(
         tool_use: None,
         tool_result: None,
         created_at: now_unix(),
-    });
-    save_messages(data_dir, workspace_id, &current)?;
-    Ok(())
+        attachments: copied,
+    };
+    message_writer.queue(data_dir, workspace_id, user_msg)
 }
 
 #[cfg(test)]
@@ -462,6 +711,8 @@ mod tests {
                 workspace_id: "ws_a".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         let result = spawn_agent_inner(state, tmp.path(), "ws_a", None);
@@ -556,6 +807,8 @@ mod tests {
                 workspace_id: "ws_send_a".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         send_message_inner(state, "ws_send_a", "Hello!").unwrap();
@@ -582,12 +835,190 @@ mod tests {
                 workspace_id: "ws_session".into(),
                 stdin_tx: tx,
                 session_id: Some("ses_authoritative".into()),
+                event_tx: tokio::sync::broadcast::channel::<AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         send_message_inner(state, "ws_session", "hi").unwrap();
         let received = rx.try_recv().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&received).unwrap();
         assert_eq!(parsed["session_id"], "ses_authoritative");
+    }
+
+    #[test]
+    fn base64_encode_matches_known_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"hello world"), "aGVsbG8gd29ybGQ=");
+    }
+
+    #[test]
+    fn send_message_with_attachments_builds_image_blocks_before_text() {
+        use tokio::sync::mpsc;
+        let tmp = make_data_dir();
+        // Tiny "image" — content doesn't have to be valid PNG; the encoder
+        // just round-trips bytes.
+        let img_path = tmp.path().join("smol.png");
+        std::fs::write(&img_path, b"\x89PNG\x0d\x0a\x1a\x0a fake bytes").unwrap();
+
+        let state = make_state();
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_att".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_att".into(),
+                stdin_tx: tx,
+                session_id: Some("ses_x".into()),
+                event_tx: tokio::sync::broadcast::channel::<AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+
+        let attachments = [crate::state::Attachment {
+            kind: crate::state::AttachmentKind::Image,
+            media_type: "image/png".into(),
+            path: img_path.to_string_lossy().into_owned(),
+            filename: Some("smol.png".into()),
+        }];
+        send_message_inner_with_attachments(state, "ws_att", "look", &attachments).unwrap();
+
+        let received = rx.try_recv().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&received).expect("valid NDJSON");
+        let content = parsed["message"]["content"].as_array().unwrap();
+        // Image must come BEFORE the text block.
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["type"], "base64");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert!(!content[0]["source"]["data"].as_str().unwrap().is_empty());
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "look");
+    }
+
+    #[test]
+    fn send_message_with_attachments_returns_err_when_file_missing() {
+        use tokio::sync::mpsc;
+        let state = make_state();
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_missing_att".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_missing_att".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        let bogus = [crate::state::Attachment {
+            kind: crate::state::AttachmentKind::Image,
+            media_type: "image/png".into(),
+            path: "/nonexistent/foo.png".into(),
+            filename: None,
+        }];
+        let result = send_message_inner_with_attachments(state, "ws_missing_att", "x", &bogus);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("read attachment"));
+    }
+
+    #[tokio::test]
+    async fn send_message_with_persist_copies_attachment_into_data_dir() {
+        use crate::persistence::message_writer::MessageWriter;
+        use crate::persistence::messages::load_messages;
+        let tmp = make_data_dir();
+        // Source file lives outside the app data dir to mirror the real
+        // case where the user picks something from ~/Downloads.
+        let outside = TempDir::new().unwrap();
+        let src = outside.path().join("design.png");
+        std::fs::write(&src, b"\x89PNGsmol").unwrap();
+
+        let state = make_state();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_copy".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_copy".into(),
+                stdin_tx: tx,
+                session_id: Some("ses_y".into()),
+                event_tx: tokio::sync::broadcast::channel::<AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        let writer = MessageWriter::new(std::time::Duration::from_millis(20));
+        let inputs = [crate::commands::agent::AttachmentInput {
+            source_path: src.to_string_lossy().into_owned(),
+            media_type: "image/png".into(),
+            filename: Some("design.png".into()),
+        }];
+        send_message_inner_with_persist_and_attachments(
+            state,
+            &writer,
+            tmp.path(),
+            "ws_copy",
+            "see this",
+            &inputs,
+        )
+        .unwrap();
+        writer.flush_all().await;
+
+        // Source file untouched.
+        assert!(src.exists(), "source file must not be moved");
+
+        // Persisted Message references a path inside the data dir, and the
+        // file actually lives there now.
+        let on_disk = load_messages(tmp.path(), "ws_copy").unwrap();
+        assert_eq!(on_disk.len(), 1);
+        assert_eq!(on_disk[0].attachments.len(), 1);
+        let att = &on_disk[0].attachments[0];
+        assert_eq!(att.media_type, "image/png");
+        assert!(
+            att.path.starts_with(tmp.path().to_string_lossy().as_ref()),
+            "attachment path {} should live under data dir {}",
+            att.path,
+            tmp.path().display()
+        );
+        assert!(std::path::Path::new(&att.path).exists());
+    }
+
+    #[tokio::test]
+    async fn send_message_with_persist_rejects_non_image_media_types() {
+        use tokio::sync::mpsc;
+        let tmp = make_data_dir();
+        let outside = TempDir::new().unwrap();
+        let src = outside.path().join("note.txt");
+        std::fs::write(&src, b"hello").unwrap();
+
+        let state = make_state();
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_reject".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_reject".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        let writer = crate::persistence::message_writer::MessageWriter::new(
+            std::time::Duration::from_millis(20),
+        );
+        let inputs = [crate::commands::agent::AttachmentInput {
+            source_path: src.to_string_lossy().into_owned(),
+            media_type: "text/plain".into(),
+            filename: None,
+        }];
+        let result = send_message_inner_with_persist_and_attachments(
+            state,
+            &writer,
+            tmp.path(),
+            "ws_reject",
+            "x",
+            &inputs,
+        );
+        assert!(result.is_err(), "non-image media_type must be rejected");
     }
 
     #[test]
@@ -598,8 +1029,9 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("no agent"));
     }
 
-    #[test]
-    fn send_message_inner_appends_message_to_disk() {
+    #[tokio::test]
+    async fn send_message_inner_appends_message_to_disk() {
+        use crate::persistence::message_writer::MessageWriter;
         use crate::persistence::messages::load_messages;
         let tmp = make_data_dir();
         let state = make_state();
@@ -610,17 +1042,23 @@ mod tests {
                 workspace_id: "ws_send_b".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
-        send_message_inner_with_persist(state, tmp.path(), "ws_send_b", "Persist me").unwrap();
+        let writer = MessageWriter::new(std::time::Duration::from_millis(50));
+        send_message_inner_with_persist(state, &writer, tmp.path(), "ws_send_b", "Persist me")
+            .unwrap();
+        writer.flush_all().await;
         let on_disk = load_messages(tmp.path(), "ws_send_b").unwrap();
         assert_eq!(on_disk.len(), 1);
         assert_eq!(on_disk[0].text, "Persist me");
         assert_eq!(on_disk[0].role, crate::state::MessageRole::User);
     }
 
-    #[test]
-    fn send_message_inner_persist_handles_existing_messages() {
+    #[tokio::test]
+    async fn send_message_inner_persist_handles_existing_messages() {
+        use crate::persistence::message_writer::MessageWriter;
         use crate::persistence::messages::{load_messages, save_messages};
         use crate::state::{Message, MessageRole};
         let tmp = make_data_dir();
@@ -637,6 +1075,7 @@ mod tests {
                 tool_use: None,
                 tool_result: None,
                 created_at: 0,
+                attachments: Vec::new(),
             }],
         )
         .unwrap();
@@ -647,9 +1086,13 @@ mod tests {
                 workspace_id: "ws_send_c".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
-        send_message_inner_with_persist(state, tmp.path(), "ws_send_c", "next").unwrap();
+        let writer = MessageWriter::new(std::time::Duration::from_millis(50));
+        send_message_inner_with_persist(state, &writer, tmp.path(), "ws_send_c", "next").unwrap();
+        writer.flush_all().await;
         let on_disk = load_messages(tmp.path(), "ws_send_c").unwrap();
         assert_eq!(on_disk.len(), 2);
         assert_eq!(on_disk[0].text, "previous");
@@ -675,6 +1118,8 @@ mod tests {
                 workspace_id: "ws_stop_a".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         stop_agent_inner(state.clone(), "ws_stop_a").unwrap();
@@ -696,6 +1141,8 @@ mod tests {
                 workspace_id: "ws_stop_b".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         stop_agent_inner(state.clone(), "ws_stop_b").unwrap();
@@ -725,6 +1172,8 @@ mod tests {
                 workspace_id: "ws_stop_c".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         stop_agent_inner(state.clone(), "ws_stop_c").unwrap();
@@ -770,6 +1219,20 @@ mod tests {
             .get_mut("ws_reader_c")
             .unwrap()
             .status = WorkspaceStatus::Running;
+        // Insert an agent handle so the EOF cleanup recognises this run as
+        // its own and flips the workspace status (the post-Stop+respawn
+        // race protection now requires Arc::ptr_eq on the cancel token).
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_reader_c".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_reader_c".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(8).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
         // Empty reader = immediate EOF
         let reader: Box<dyn std::io::Read + Send> = Box::new(Cursor::new(b"".to_vec()));
         process_reader_events(reader, state.clone(), "ws_reader_c", &|_| {});
@@ -796,6 +1259,8 @@ mod tests {
                 workspace_id: "ws_reader_eof".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         let reader: Box<dyn std::io::Read + Send> = Box::new(Cursor::new(b"".to_vec()));
@@ -820,6 +1285,8 @@ mod tests {
                 workspace_id: "ws_reader_a".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         process_reader_events(reader, state.clone(), "ws_reader_a", &|ev| {
@@ -849,10 +1316,17 @@ mod tests {
             events_clone.lock().unwrap().push(ev);
         });
         let evs = events.lock().unwrap();
-        // The "result" line is a no-op end-of-turn marker in stream-json mode,
-        // so only the assistant message produces an event.
-        assert_eq!(evs.len(), 1);
+        // The assistant line produces a Message; the "result" line now
+        // emits a trailing Status::Waiting so the live turn indicator can
+        // close out cleanly when the turn finishes.
+        assert_eq!(evs.len(), 2);
         assert!(matches!(&evs[0], crate::state::AgentEvent::Message { .. }));
+        match &evs[1] {
+            crate::state::AgentEvent::Status { status } => {
+                assert_eq!(*status, crate::state::AgentStatus::Waiting);
+            }
+            other => panic!("expected Status::Waiting trailer, got {other:?}"),
+        }
     }
 
     #[test]
@@ -954,6 +1428,8 @@ mod tests {
                 workspace_id: "ws_closed".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         let result = send_message_inner(state, "ws_closed", "hello");
@@ -1040,6 +1516,8 @@ mod tests {
                 workspace_id: "ws_race".into(),
                 stdin_tx: tx,
                 session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
         let echo_path = if cfg!(windows) {
@@ -1134,5 +1612,364 @@ mod tests {
         assert!(event_to_persisted_message(&init, "ws").is_none());
         assert!(event_to_persisted_message(&status, "ws").is_none());
         assert!(event_to_persisted_message(&err, "ws").is_none());
+    }
+
+    // ── reattach_agent_inner tests ────────────────────────────────────────────
+    #[test]
+    fn reattach_agent_inner_returns_err_when_no_agent() {
+        let state = make_state();
+        let result = reattach_agent_inner(state, "ws_missing");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no agent"));
+    }
+
+    #[test]
+    fn reattach_agent_inner_returns_subscriber_when_agent_running() {
+        let state = make_state();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (event_tx, _) = tokio::sync::broadcast::channel::<AgentEvent>(64);
+        state.lock().unwrap().agents.insert(
+            "ws_re".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_re".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        let result = reattach_agent_inner(state, "ws_re");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn reattach_subscriber_receives_events_emitted_after_subscription() {
+        let state = make_state();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (event_tx, _) = tokio::sync::broadcast::channel::<AgentEvent>(64);
+        let event_tx_for_handle = event_tx.clone();
+        state.lock().unwrap().agents.insert(
+            "ws_sub".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_sub".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx: event_tx_for_handle,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        let mut sub = reattach_agent_inner(state, "ws_sub").unwrap();
+        event_tx
+            .send(AgentEvent::Status {
+                status: crate::state::AgentStatus::Running,
+            })
+            .unwrap();
+        let received = sub.try_recv().unwrap();
+        assert!(matches!(received, AgentEvent::Status { .. }));
+    }
+
+    #[test]
+    fn stderr_line_to_event_wraps_with_cli_prefix() {
+        let ev = stderr_line_to_event("invalid_request_error: bad token");
+        match ev {
+            AgentEvent::Error { message } => {
+                assert!(message.starts_with("CLI: "));
+                assert!(message.contains("invalid_request_error"));
+                assert!(message.contains("bad token"));
+            }
+            _ => panic!("expected Error event"),
+        }
+    }
+
+    #[test]
+    fn stderr_line_to_event_trims_trailing_newline() {
+        let ev = stderr_line_to_event("oops\n");
+        match ev {
+            AgentEvent::Error { message } => {
+                assert_eq!(message, "CLI: oops");
+                assert!(!message.ends_with('\n'));
+            }
+            _ => panic!("expected Error event"),
+        }
+    }
+
+    #[test]
+    fn stderr_line_to_event_handles_blank_lines() {
+        let ev = stderr_line_to_event("");
+        match ev {
+            AgentEvent::Error { message } => assert_eq!(message, "CLI: "),
+            _ => panic!("expected Error event"),
+        }
+    }
+
+    #[test]
+    fn process_reader_events_exits_when_cancel_token_set() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        // Reader that yields a short init line on every read with a
+        // 10 ms sleep, capped at 100 reads. The cancel must cut the
+        // loop short well before the cap so we observe < cap events.
+        struct CountingReader {
+            count: Arc<AtomicUsize>,
+            cap: usize,
+        }
+        impl std::io::Read for CountingReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                let n = self.count.fetch_add(1, Ordering::Relaxed);
+                if n >= self.cap {
+                    return Ok(0);
+                }
+                let line = b"{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\",\"model\":\"m\"}\n";
+                let len = line.len().min(buf.len());
+                buf[..len].copy_from_slice(&line[..len]);
+                Ok(len)
+            }
+        }
+
+        let cap = 200usize; // Without cancel, the test would take ~2s.
+        let read_count = Arc::new(AtomicUsize::new(0));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let state = make_state();
+        write_workspace(
+            &state,
+            "ws_cx",
+            "repo_x",
+            std::path::PathBuf::from("/tmp/x"),
+        );
+        // Insert an agent handle whose cancel Arc *is* the same one we'll
+        // pass to process_reader_events_with_cancel — that's what the
+        // ptr_eq ownership check uses to authorize EOF cleanup.
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_cx".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_cx".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(8).0,
+                cancel: cancel.clone(),
+            },
+        );
+        let cancel_for_thread = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            cancel_for_thread.store(true, Ordering::Relaxed);
+        });
+
+        let event_count = Arc::new(AtomicUsize::new(0));
+        let event_count_for_cb = event_count.clone();
+        let start = std::time::Instant::now();
+        process_reader_events_with_cancel(
+            Box::new(CountingReader {
+                count: read_count.clone(),
+                cap,
+            }),
+            state.clone(),
+            "ws_cx",
+            cancel.clone(),
+            &|_| {
+                event_count_for_cb.fetch_add(1, Ordering::Relaxed);
+            },
+        );
+
+        // The loop must exit well before the natural EOF. With a 10 ms
+        // per-read latency, ~5 reads should land inside the 50 ms cancel
+        // window — generously cap the upper bound at half the reader cap.
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "cancel did not abort reader: elapsed={:?}",
+            start.elapsed()
+        );
+        assert!(cancel.load(Ordering::Relaxed));
+        let observed = event_count.load(Ordering::Relaxed);
+        assert!(
+            observed < cap,
+            "cancel must cut loop short: observed {observed} events out of cap {cap}"
+        );
+        // EOF/cancel cleanup must still run — workspace flips to Waiting.
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.workspaces.get("ws_cx").unwrap().status,
+            crate::state::WorkspaceStatus::Waiting
+        );
+    }
+
+    #[test]
+    fn reader_cleanup_does_not_remove_handle_after_respawn() {
+        // After a Stop+respawn race, the OLD reader thread's cleanup must
+        // not blow away the NEW agent handle that has just been inserted by
+        // spawn_agent_inner. Each handle carries its own cancel Arc; the
+        // cleanup verifies ownership via Arc::ptr_eq.
+        use std::sync::atomic::Ordering;
+        use tokio::sync::mpsc;
+        let state = make_state();
+        write_workspace(
+            &state,
+            "ws_resp",
+            "repo_resp",
+            PathBuf::from("/tmp/ws_resp"),
+        );
+
+        // Pretend we are the *old* reader thread: hold a cancel Arc that
+        // matches a handle that was already removed by stop_agent.
+        let old_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        // Now simulate respawn: insert a fresh handle with a *different*
+        // cancel Arc.
+        let (new_tx, _new_rx) = mpsc::unbounded_channel::<String>();
+        let new_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state.lock().unwrap().agents.insert(
+            "ws_resp".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_resp".into(),
+                stdin_tx: new_tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(8).0,
+                cancel: new_cancel.clone(),
+            },
+        );
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .get_mut("ws_resp")
+            .unwrap()
+            .status = crate::state::WorkspaceStatus::Running;
+
+        // Run the old reader's tail-end cleanup with an empty reader (immediate
+        // EOF). The cleanup must NOT remove the new handle.
+        let empty: &[u8] = &[];
+        process_reader_events_with_cancel(
+            Box::new(empty),
+            state.clone(),
+            "ws_resp",
+            old_cancel,
+            &|_| {},
+        );
+
+        let s = state.lock().unwrap();
+        assert!(
+            s.agents.contains_key("ws_resp"),
+            "old reader cleanup must not remove the freshly-respawned handle"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&s.agents.get("ws_resp").unwrap().cancel, &new_cancel),
+            "the surviving handle must be the new one, not a leftover from the old reader"
+        );
+        assert_eq!(
+            s.workspaces.get("ws_resp").unwrap().status,
+            crate::state::WorkspaceStatus::Running,
+            "the new spawn's Running status must not be reset to Waiting by the old reader"
+        );
+        // sanity: cancel state untouched
+        assert!(!new_cancel.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn reader_cleanup_removes_handle_when_still_ours() {
+        // The "process died on its own" path: same cancel Arc still owns the
+        // handle in state, so cleanup proceeds (drop handle, flip workspace
+        // to Waiting). This guards against accidentally widening the ptr_eq
+        // check into a no-op for the EOF case.
+        use tokio::sync::mpsc;
+        let state = make_state();
+        write_workspace(&state, "ws_eof", "repo_eof", PathBuf::from("/tmp/ws_eof"));
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state.lock().unwrap().agents.insert(
+            "ws_eof".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_eof".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(8).0,
+                cancel: cancel.clone(),
+            },
+        );
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .get_mut("ws_eof")
+            .unwrap()
+            .status = crate::state::WorkspaceStatus::Running;
+
+        let empty: &[u8] = &[];
+        process_reader_events_with_cancel(
+            Box::new(empty),
+            state.clone(),
+            "ws_eof",
+            cancel,
+            &|_| {},
+        );
+
+        let s = state.lock().unwrap();
+        assert!(
+            !s.agents.contains_key("ws_eof"),
+            "EOF cleanup must drop the owning handle"
+        );
+        assert_eq!(
+            s.workspaces.get("ws_eof").unwrap().status,
+            crate::state::WorkspaceStatus::Waiting
+        );
+    }
+
+    #[test]
+    fn agent_process_reader_returns_stdout_pipe_then_errors_on_repeat() {
+        // AgentProcess::reader takes ownership of the stdout pipe so the
+        // reader thread can stream lines without holding the Child. A second
+        // call after the take must return AppError::Command rather than
+        // panicking on an Option::take of None.
+        let mut child = Command::new(if cfg!(windows) { "cmd" } else { "sh" })
+            .args::<&[&str], _>(if cfg!(windows) {
+                &["/C", "echo hi"]
+            } else {
+                &["-c", "echo hi"]
+            })
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn helper for AgentProcess test");
+        let stdout = child.stdout.take();
+        let mut proc = AgentProcess { child, stdout };
+        // First call hands out the stdout reader.
+        let reader = proc.reader();
+        assert!(reader.is_ok(), "first reader() must succeed");
+        // Drain so the child can exit cleanly.
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut reader.unwrap(), &mut buf);
+        // Second call must surface a structured error, not a panic.
+        let again = proc.reader();
+        assert!(again.is_err(), "second reader() must error after take");
+        assert!(
+            proc.try_wait().is_ok(),
+            "try_wait must surface Ok even after exit"
+        );
+    }
+
+    #[test]
+    fn stop_agent_inner_flips_cancel_token() {
+        use std::sync::atomic::Ordering;
+        use tokio::sync::mpsc;
+        let state = make_state();
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        state.lock().unwrap().agents.insert(
+            "ws_cancel".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_cancel".into(),
+                stdin_tx: tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: cancel.clone(),
+            },
+        );
+        assert!(!cancel.load(Ordering::Relaxed));
+        stop_agent_inner(state, "ws_cancel").unwrap();
+        assert!(
+            cancel.load(Ordering::Relaxed),
+            "stop_agent must flip the cancel token before dropping the handle"
+        );
     }
 }

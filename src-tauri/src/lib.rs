@@ -37,6 +37,20 @@ pub fn run() {
             };
 
             app.manage(std::sync::Arc::new(std::sync::Mutex::new(state)));
+
+            // Debounced message writer — collapses bursts of stream events
+            // into a single disk write per workspace per ~500 ms window.
+            // Construction calls `tokio::spawn` for the debouncer worker,
+            // so it must run inside the Tauri async runtime context. The
+            // worker task lives on the long-lived global tokio runtime
+            // and survives after `block_on` returns.
+            let message_writer = tauri::async_runtime::block_on(async {
+                crate::persistence::message_writer::MessageWriter::new(
+                    std::time::Duration::from_millis(500),
+                )
+            });
+            app.manage(message_writer);
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -57,9 +71,26 @@ pub fn run() {
             crate::commands::agent::send_message,
             crate::commands::agent::stop_agent,
             crate::commands::agent::list_messages,
+            crate::commands::agent::reattach_agent,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // On shutdown drain any pending debounced writes so messages
+            // queued in the last 500 ms aren't lost when the user closes
+            // the window. We block the run-loop briefly here — the flush
+            // is bounded by the in-memory pending list, not network I/O.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(writer) =
+                    app.try_state::<crate::persistence::message_writer::MessageWriter>()
+                {
+                    let writer = writer.inner().clone();
+                    tauri::async_runtime::block_on(async move {
+                        writer.flush_all().await;
+                    });
+                }
+            }
+        });
 }
 
 #[cfg(test)]
@@ -91,12 +122,15 @@ mod tests {
 
     #[test]
     fn all_agent_commands_are_accessible() {
-        // Compile-time check that all four command functions are pub and accessible
-        use crate::commands::agent::{list_messages, send_message, spawn_agent, stop_agent};
+        // Compile-time check that all five command functions are pub and accessible
+        use crate::commands::agent::{
+            list_messages, reattach_agent, send_message, spawn_agent, stop_agent,
+        };
         let _ = std::any::type_name_of_val(&spawn_agent);
         let _ = std::any::type_name_of_val(&send_message);
         let _ = std::any::type_name_of_val(&stop_agent);
         let _ = std::any::type_name_of_val(&list_messages);
+        let _ = std::any::type_name_of_val(&reattach_agent);
     }
 
     #[test]

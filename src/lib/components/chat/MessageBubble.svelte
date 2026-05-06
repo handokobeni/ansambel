@@ -1,44 +1,108 @@
 <script lang="ts">
+  import { convertFileSrc } from '@tauri-apps/api/core';
   import type { Message } from '$lib/types';
+  import { formatToolUse } from '$lib/tools/format';
 
   interface Props {
     message: Message;
   }
 
   const { message }: Props = $props();
+
+  // Compact tool_result preview: a chat bubble shouldn't swallow the screen
+  // when a Bash command dumps 5 KB of output. Show a head + ellipsis hint.
+  const RESULT_PREVIEW_CHARS = 600;
+
+  const tool = $derived(message.tool_use ? formatToolUse(message.tool_use) : null);
+  const resultPreview = $derived(
+    message.tool_result && message.tool_result.content.length > RESULT_PREVIEW_CHARS
+      ? `${message.tool_result.content.slice(0, RESULT_PREVIEW_CHARS)}\n…(${
+          message.tool_result.content.length - RESULT_PREVIEW_CHARS
+        } more chars)`
+      : (message.tool_result?.content ?? '')
+  );
+
+  const attachments = $derived(message.attachments ?? []);
+  const hasAttachments = $derived(attachments.length > 0);
+
+  // Defensive: an old persisted Message with empty text and no tool/result
+  // (legacy parser emitted these for thinking-only turns) would otherwise
+  // render as a blank rounded box. Hide it instead of letting it leak in.
+  // Attachments count as content too — a user echo with just an image must
+  // still render.
+  const isEmpty = $derived(
+    !message.text &&
+      !message.tool_use &&
+      !message.tool_result &&
+      !message.is_partial &&
+      !hasAttachments
+  );
 </script>
 
-<article
-  class="flex flex-col gap-1 px-3 py-2 rounded text-sm break-words"
-  class:bg-[var(--bg-card)]={message.role === 'user'}
-  class:bg-[var(--bg-base)]={message.role !== 'user'}
-  class:border={message.role !== 'user'}
-  class:border-[var(--border-light)]={message.role !== 'user'}
-  data-role={message.role}
-  data-message-id={message.id}
->
-  {#if message.tool_use}
-    <div
-      class="flex items-center gap-2 text-xs font-mono text-[var(--text-secondary)]"
-      data-tool-use
-    >
-      <span class="text-[var(--accent)]">⚙</span>
-      <span class="font-semibold text-[var(--text-primary)]">{message.tool_use.name}</span>
-    </div>
-  {/if}
+{#if isEmpty && message.role !== 'system'}
+  <!-- nothing — see isEmpty derivation -->
+{:else if message.role === 'system'}
+  <!-- System markers (e.g. compact_boundary) sit in the message stream as
+       thin centered notices rather than chat bubbles. -->
+  <div
+    class="flex items-center justify-center py-1 text-xs text-[var(--text-muted)] italic"
+    data-role="system"
+    data-message-id={message.id}
+  >
+    <span class="px-2">{message.text}</span>
+  </div>
+{:else}
+  <article
+    class="flex flex-col gap-1 px-3 py-2 rounded text-sm break-words"
+    class:bg-[var(--bg-card)]={message.role === 'user'}
+    class:bg-[var(--bg-base)]={message.role !== 'user'}
+    class:border={message.role !== 'user'}
+    class:border-[var(--border-light)]={message.role !== 'user'}
+    data-role={message.role}
+    data-message-id={message.id}
+  >
+    {#if tool}
+      <div
+        class="flex items-center gap-2 text-xs font-mono text-[var(--text-secondary)]"
+        data-tool-use
+        data-tool-name={tool.label}
+      >
+        <span class="text-[var(--accent)]">{tool.icon}</span>
+        <span class="font-semibold text-[var(--text-primary)]">{tool.label}</span>
+        {#if tool.detail}
+          <span class="text-[var(--text-secondary)] truncate" data-tool-detail>{tool.detail}</span>
+        {/if}
+      </div>
+    {/if}
 
-  {#if message.tool_result}
-    <pre
-      class="text-xs font-mono text-[var(--text-secondary)] whitespace-pre-wrap overflow-x-auto"
-      data-tool-result
-      class:text-[var(--error)]={message.tool_result.is_error}>{message.tool_result.content}</pre>
-  {/if}
+    {#if message.tool_result}
+      <pre
+        class="text-xs font-mono text-[var(--text-secondary)] whitespace-pre-wrap overflow-x-auto"
+        data-tool-result
+        class:text-[var(--error)]={message.tool_result.is_error}>{resultPreview}</pre>
+    {/if}
 
-  {#if message.text}
-    <p class="whitespace-pre-wrap text-[var(--text-primary)]">{message.text}</p>
-  {/if}
+    {#if hasAttachments}
+      <div class="flex flex-wrap gap-2" data-testid="attachment-grid">
+        {#each attachments as att, i (att.path + i)}
+          {#if att.kind === 'image'}
+            <img
+              src={convertFileSrc(att.path)}
+              alt={att.filename ?? 'attachment'}
+              data-testid="attachment-image"
+              class="max-w-[240px] max-h-[240px] rounded border border-[var(--border-light)] object-cover"
+            />
+          {/if}
+        {/each}
+      </div>
+    {/if}
 
-  {#if message.is_partial}
-    <span class="text-xs text-[var(--text-muted)]" aria-label="streaming">▍</span>
-  {/if}
-</article>
+    {#if message.text}
+      <p class="whitespace-pre-wrap text-[var(--text-primary)]">{message.text}</p>
+    {/if}
+
+    {#if message.is_partial}
+      <span class="text-xs text-[var(--text-muted)]" aria-label="streaming">▍</span>
+    {/if}
+  </article>
+{/if}

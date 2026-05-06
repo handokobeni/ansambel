@@ -3,6 +3,7 @@
   import { open } from '@tauri-apps/plugin-dialog';
   import { repos } from '$lib/stores/repos.svelte';
   import { workspaces } from '$lib/stores/workspaces.svelte';
+  import { tasks } from '$lib/stores/tasks.svelte';
   import type { Mode } from '$lib/types';
 
   const {
@@ -19,13 +20,20 @@
 
   async function handleAddRepo() {
     if (adding) return;
-    const selected = await open({ directory: true, multiple: false });
-    if (typeof selected !== 'string' || !selected) return;
+    // Latch the in-flight flag BEFORE awaiting the dialog so a fast
+    // double-click can't open two pickers / fire two backend calls. The
+    // finally below clears it after the whole flow (cancel, success, or
+    // error) settles.
     adding = true;
     try {
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected !== 'string' || !selected) return;
       const repo = await repos.add(selected);
       repos.select(repo.id);
-      await workspaces.loadForRepo(repo.id);
+      // Backend `add_repo` is idempotent on the canonical path — re-Add of
+      // an existing folder returns the same RepoInfo. Hydrate both stores
+      // so the kanban populates without waiting for a restart.
+      await Promise.all([workspaces.loadForRepo(repo.id), tasks.loadForRepo(repo.id)]);
     } catch (err) {
       console.error('Failed to add repo:', err);
       alert(`Failed to add repo: ${err instanceof Error ? err.message : String(err)}`);

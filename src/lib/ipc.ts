@@ -9,6 +9,7 @@ import type {
   TaskPatch,
   KanbanColumn,
   AgentEvent,
+  AttachmentDraft,
   Message,
 } from './types';
 
@@ -60,10 +61,26 @@ export const api = {
     spawn: (workspaceId: string, onEvent: Channel<AgentEvent>): Promise<void> =>
       invoke('spawn_agent', { workspaceId, onEvent }),
 
-    send: (workspaceId: string, text: string): Promise<void> =>
-      invoke('send_message', { workspaceId, text }),
+    send: (workspaceId: string, text: string, attachments?: AttachmentDraft[]): Promise<void> =>
+      invoke('send_message', {
+        workspaceId,
+        text,
+        // Backend's AttachmentInput uses camelCase via #[serde(rename_all = "camelCase")];
+        // pass them through unchanged.
+        attachments:
+          attachments && attachments.length > 0
+            ? attachments.map((a) => ({
+                sourcePath: a.sourcePath,
+                mediaType: a.mediaType,
+                filename: a.filename,
+              }))
+            : null,
+      }),
 
     stop: (workspaceId: string): Promise<void> => invoke('stop_agent', { workspaceId }),
+
+    reattach: (workspaceId: string, onEvent: Channel<AgentEvent>): Promise<void> =>
+      invoke('reattach_agent', { workspaceId, onEvent }),
   },
 
   messages: {

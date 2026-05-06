@@ -20,6 +20,7 @@ vi.mock('$lib/stores/repos.svelte', () => ({
   repos: {
     selectedRepoId: null as string | null,
     load: vi.fn().mockResolvedValue(undefined),
+    select: vi.fn(),
     getSelected: vi.fn(() => null),
     repos: new Map(),
   },
@@ -82,6 +83,11 @@ beforeEach(() => {
   vi.mocked(workspaces.getSelected).mockReturnValue(null);
   (repos as { selectedRepoId: string | null }).selectedRepoId = null;
   (workspaces as { selectedWorkspaceId: string | null }).selectedWorkspaceId = null;
+  // Wire the select mock to update selectedRepoId so onMount's auto-select
+  // branch (which reads selectedRepoId after calling select) sees the change.
+  vi.mocked(repos.select).mockImplementation((id: string | null) => {
+    (repos as { selectedRepoId: string | null }).selectedRepoId = id;
+  });
   modeStore.set('plan');
 });
 
@@ -163,6 +169,78 @@ describe('App', () => {
       expect(tasks.loadForRepo).toHaveBeenCalledWith('repo_xyz');
       expect(workspaces.loadForRepo).toHaveBeenCalledWith('repo_xyz');
     });
+  });
+
+  it('auto-selects the first repo on cold start so tasks/workspaces load without re-Add', async () => {
+    // Cold start: selectedRepoId is null, but the persisted repos list has
+    // entries — load() populates the SvelteMap. App should pick the first
+    // and trigger both loaders so the kanban does not appear empty after
+    // restart.
+    (repos as { selectedRepoId: string | null }).selectedRepoId = null;
+    const repoMap = new Map<string, unknown>();
+    repoMap.set('repo_kelola', {
+      id: 'repo_kelola',
+      name: 'kelola-app',
+      path: '/x/kelola',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 1,
+      updated_at: 1,
+    });
+    (repos as unknown as { repos: Map<string, unknown> }).repos = repoMap;
+    // load() is what the app awaits; simulate it setting selectedRepoId by
+    // letting our auto-select logic do it. The mock just resolves.
+    vi.mocked(repos.load).mockResolvedValue(undefined);
+    render(App);
+    await waitFor(() => {
+      expect(repos.select).toHaveBeenCalledWith('repo_kelola');
+      expect(tasks.loadForRepo).toHaveBeenCalledWith('repo_kelola');
+      expect(workspaces.loadForRepo).toHaveBeenCalledWith('repo_kelola');
+    });
+  });
+
+  it('does not auto-select when repos list is empty (first-run experience preserved)', async () => {
+    (repos as { selectedRepoId: string | null }).selectedRepoId = null;
+    (repos as unknown as { repos: Map<string, unknown> }).repos = new Map();
+    vi.mocked(repos.load).mockResolvedValue(undefined);
+    render(App);
+    // Wait for onMount to settle; nothing should be selected.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(repos.select).not.toHaveBeenCalled();
+    expect(tasks.loadForRepo).not.toHaveBeenCalled();
+    expect(workspaces.loadForRepo).not.toHaveBeenCalled();
+  });
+
+  it('does not override an already-set selectedRepoId during auto-select', async () => {
+    // If a future change persists selectedRepoId, the auto-select branch
+    // must not clobber it — only fall back when nothing is selected.
+    (repos as { selectedRepoId: string | null }).selectedRepoId = 'repo_existing';
+    const repoMap = new Map<string, unknown>();
+    repoMap.set('repo_first', {
+      id: 'repo_first',
+      name: 'first',
+      path: '/x',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 1,
+      updated_at: 1,
+    });
+    repoMap.set('repo_existing', {
+      id: 'repo_existing',
+      name: 'existing',
+      path: '/y',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 2,
+      updated_at: 2,
+    });
+    (repos as unknown as { repos: Map<string, unknown> }).repos = repoMap;
+    vi.mocked(repos.load).mockResolvedValue(undefined);
+    render(App);
+    await waitFor(() => {
+      expect(tasks.loadForRepo).toHaveBeenCalledWith('repo_existing');
+    });
+    expect(repos.select).not.toHaveBeenCalled();
   });
 
   it('clicking Plan/Work toggle switches mode store', async () => {

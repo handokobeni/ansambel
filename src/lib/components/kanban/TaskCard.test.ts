@@ -76,4 +76,13 @@ describe('TaskCard', () => {
     render(TaskCard, { props: { task, onRemove: vi.fn() } });
     expect(document.body.textContent).toMatch(/\d+d ago/);
   });
+
+  it('shows relative date in minutes when task is fresh (under an hour)', () => {
+    // Covers the diff < 3600 branch — without this, the minute path is dead
+    // in coverage even though it's the most common state for new tasks.
+    const fiveMinutesAgo = Math.floor(Date.now() / 1000) - 300;
+    const task = makeTask({ created_at: fiveMinutesAgo });
+    render(TaskCard, { props: { task, onRemove: vi.fn() } });
+    expect(document.body.textContent).toMatch(/\d+m ago/);
+  });
 });

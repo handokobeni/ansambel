@@ -3,7 +3,7 @@
   import { api, agentChannel } from '$lib/ipc';
   import { messages } from '$lib/stores/messages.svelte';
   import ChatPanel from '$lib/components/chat/ChatPanel.svelte';
-  import type { AgentEvent, WorkspaceInfo } from '$lib/types';
+  import type { AgentEvent, Attachment, AttachmentDraft, WorkspaceInfo } from '$lib/types';
 
   interface Props {
     workspace: WorkspaceInfo;
@@ -18,7 +18,7 @@
   onMount(async () => {
     // Hydrate persisted history first so previous turns appear immediately
     // on workspace open. Failures here are non-fatal — we still want to
-    // spawn the agent so the user can start a fresh turn.
+    // spawn or reattach so the user can start a fresh turn.
     try {
       const history = await api.messages.list(workspace.id);
       messages.hydrate(workspace.id, history);
@@ -26,16 +26,21 @@
       messages.apply({ type: 'error', message: String(err) }, workspace.id);
     }
 
-    if (workspace.status === 'not_started' || workspace.status === 'waiting') {
-      channel = agentChannel();
-      channel.onmessage = (ev: AgentEvent) => {
-        messages.apply(ev, workspace.id);
-      };
-      try {
+    channel = agentChannel();
+    channel.onmessage = (ev: AgentEvent) => {
+      messages.apply(ev, workspace.id);
+    };
+    try {
+      if (workspace.status === 'not_started' || workspace.status === 'waiting') {
         await api.agent.spawn(workspace.id, channel);
-      } catch (err) {
-        messages.apply({ type: 'error', message: String(err) }, workspace.id);
+      } else {
+        // Status is running — the agent is alive on the backend but our
+        // Channel handler was GC'd on the previous unmount. Re-subscribe
+        // to the broadcaster so live events resume.
+        await api.agent.reattach(workspace.id, channel);
       }
+    } catch (err) {
+      messages.apply({ type: 'error', message: String(err) }, workspace.id);
     }
   });
 
@@ -48,24 +53,75 @@
     return await api.messages.list(workspace.id, { beforeId });
   }
 
-  async function handleSend(text: string) {
+  let stopping = $state(false);
+  async function handleStop() {
+    if (stopping) return;
+    stopping = true;
+    try {
+      await api.agent.stop(workspace.id);
+    } catch (err) {
+      messages.apply({ type: 'error', message: String(err) }, workspace.id);
+    } finally {
+      stopping = false;
+    }
+  }
+
+  async function handleSend(text: string, drafts: AttachmentDraft[] = []) {
     // Echo the user's own message into the store immediately so the bubble
     // renders without waiting for the backend. The backend's send_message
     // command writes the user message to disk; the agent Channel only
     // streams Claude's responses back, so the user message must be added
     // here on the frontend.
+    //
+    // For attachments we synthesize a preview Attachment from the draft
+    // (path = sourcePath until the backend copies the file). The bubble
+    // rendering uses convertFileSrc on `path`, which works with both the
+    // user's source path and the eventual data-dir path.
+    const previewAttachments: Attachment[] = drafts.map((d) => ({
+      kind: 'image',
+      media_type: d.mediaType,
+      path: d.sourcePath,
+      filename: d.filename,
+    }));
+    const echoId = `msg_user_${Date.now()}`;
     messages.apply(
       {
         type: 'message',
-        id: `msg_user_${Date.now()}`,
+        id: echoId,
         role: 'user',
         text,
         is_partial: false,
       },
       workspace.id
     );
+    if (previewAttachments.length > 0) {
+      // The 'message' event handler in the store ignores attachments because
+      // the backend's AgentEvent::Message has no such field. Stamp them on
+      // the echoed Message directly so the user's bubble shows their
+      // upload immediately.
+      messages.attachToMessage(workspace.id, echoId, previewAttachments);
+    }
     try {
-      await api.agent.send(workspace.id, text);
+      // After Stop the agent process is dead, but the user can still type
+      // their next prompt. Re-spawn before sending so the conversation
+      // continues seamlessly — same UX as Claude/ChatGPT web.
+      const current = messages.statusFor(workspace.id) ?? workspace.status;
+      if (current === 'stopped' || current === 'not_started') {
+        // Detach the previous channel and use a fresh one. The old reader
+        // thread on the backend can still emit a trailing Status::Stopped
+        // through its broadcaster after respawn; routing it to a dead
+        // channel keeps the new agent's status from flapping back to
+        // "stopped" the moment we set it to "running".
+        if (channel) {
+          channel.onmessage = () => {};
+        }
+        channel = agentChannel();
+        channel.onmessage = (ev: AgentEvent) => {
+          messages.apply(ev, workspace.id);
+        };
+        await api.agent.spawn(workspace.id, channel);
+      }
+      await api.agent.send(workspace.id, text, drafts);
     } catch (err) {
       messages.apply({ type: 'error', message: String(err) }, workspace.id);
     }
@@ -90,13 +146,25 @@
       </h2>
       <code class="text-xs text-[var(--text-muted)]">{workspace.branch}</code>
     </div>
-    <span
-      class="text-xs px-2 py-0.5 rounded bg-[var(--bg-card)] text-[var(--text-secondary)]"
-      data-status={status}
-      aria-label="Agent status"
-    >
-      {statusLabel(status)}
-    </span>
+    <div class="flex items-center gap-2">
+      {#if status === 'running'}
+        <button
+          type="button"
+          onclick={handleStop}
+          disabled={stopping}
+          class="text-xs px-2 py-0.5 rounded border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--bg-card)] disabled:opacity-50"
+        >
+          Stop
+        </button>
+      {/if}
+      <span
+        class="text-xs px-2 py-0.5 rounded bg-[var(--bg-card)] text-[var(--text-secondary)]"
+        data-status={status}
+        aria-label="Agent status"
+      >
+        {statusLabel(status)}
+      </span>
+    </div>
   </header>
 
   <div class="flex-1 overflow-hidden">

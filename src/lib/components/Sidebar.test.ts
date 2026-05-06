@@ -120,11 +120,30 @@ describe('Sidebar', () => {
     expect(screen.getByText('Add dark mode')).toBeInTheDocument();
   });
 
-  it('shows amber status dot for running workspace and olive for waiting', () => {
+  it('paints status dots with the user-aligned palette: running=green, waiting=amber', () => {
+    // The original mapping (running=amber, waiting=green) confused users
+    // because green conventionally signals "active". Running is the most
+    // active state — agent currently processing — so it owns green now.
     const { container } = render(Sidebar);
     const dots = container.querySelectorAll('[data-status-dot]');
     expect(dots[0]).toHaveAttribute('data-status', 'running');
+    expect(dots[0]?.className).toContain('var(--status-ok)');
     expect(dots[1]).toHaveAttribute('data-status', 'waiting');
+    expect(dots[1]?.className).toContain('amber');
+  });
+
+  it('selected workspace row shows a left-border accent so selection is unmistakable', () => {
+    (workspaces as { selectedWorkspaceId: string | null }).selectedWorkspaceId = 'ws_abc123';
+    const { container } = render(Sidebar);
+    const rows = container.querySelectorAll('li[data-workspace-id]');
+    // The selected row carries a marker attribute the styling hooks into.
+    // Without this the only selection cue was a subtle bg shift that lost
+    // visual priority to the status dot of the OTHER row.
+    expect(rows[0]).toHaveAttribute('data-selected', 'true');
+    expect(rows[1]).toHaveAttribute('data-selected', 'false');
+    // Class-level check pins down the accent so a refactor doesn't silently
+    // drop it.
+    expect(rows[0]?.className).toContain('var(--accent)');
   });
 
   it('clicking a workspace row calls workspaces.select with its id', async () => {

@@ -26,9 +26,19 @@ vi.mock('$lib/stores/workspaces.svelte', () => ({
   },
 }));
 
+// Mock the tasks store — TitleBar should refresh kanban tasks after Add Repo
+// so that re-adding an existing repo (or first-add) populates the board
+// without waiting for an app restart.
+vi.mock('$lib/stores/tasks.svelte', () => ({
+  tasks: {
+    loadForRepo: vi.fn(),
+  },
+}));
+
 import { open } from '@tauri-apps/plugin-dialog';
 import { repos } from '$lib/stores/repos.svelte';
 import { workspaces } from '$lib/stores/workspaces.svelte';
+import { tasks } from '$lib/stores/tasks.svelte';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -36,6 +46,7 @@ beforeEach(() => {
   (repos as { selectedRepoId: string | null }).selectedRepoId = null;
   // Default loadForRepo to resolve immediately so the promise chain completes.
   vi.mocked(workspaces.loadForRepo).mockResolvedValue(undefined);
+  vi.mocked(tasks.loadForRepo).mockResolvedValue(undefined);
   // Silence alert() during error-path tests.
   vi.stubGlobal('alert', vi.fn());
 });
@@ -60,7 +71,7 @@ describe('TitleBar', () => {
     expect(screen.getByText('my-project')).toBeInTheDocument();
   });
 
-  it('clicking "Add Repo" opens folder dialog, calls repos.add, selects, and loads workspaces', async () => {
+  it('clicking "Add Repo" opens folder dialog, calls repos.add, selects, and loads workspaces + tasks', async () => {
     vi.mocked(open).mockResolvedValue('/home/user/new-project');
     vi.mocked(repos.add).mockResolvedValue({
       id: 'repo_new111',
@@ -78,6 +89,10 @@ describe('TitleBar', () => {
     await waitFor(() => {
       expect(repos.select).toHaveBeenCalledWith('repo_new111');
       expect(workspaces.loadForRepo).toHaveBeenCalledWith('repo_new111');
+      // Re-Add of an existing repo (idempotent on the backend) must also
+      // hydrate the kanban — otherwise the board stays empty until the next
+      // app restart even though tasks.json already contains them.
+      expect(tasks.loadForRepo).toHaveBeenCalledWith('repo_new111');
     });
   });
 
@@ -108,6 +123,38 @@ describe('TitleBar', () => {
       );
     });
     expect(repos.select).not.toHaveBeenCalled();
+  });
+
+  it('coerces non-Error rejections to a string for the alert', async () => {
+    // Covers the err-instanceof-Error fallback branch. Tauri commands
+    // commonly reject with a plain string rather than an Error object.
+    vi.mocked(open).mockResolvedValue('/home/user/raw-string-error');
+    vi.mocked(repos.add).mockRejectedValue('plain string failure');
+    render(TitleBar);
+    await fireEvent.click(screen.getByRole('button', { name: /add repo/i }));
+    await waitFor(() => {
+      expect(globalThis.alert).toHaveBeenCalledWith(
+        expect.stringContaining('plain string failure')
+      );
+    });
+  });
+
+  it('ignores a second click while the first add is in flight', async () => {
+    // Covers the `if (adding) return;` short-circuit so a fast double-tap
+    // doesn't open two dialogs / fire two backend calls.
+    let resolveOpen!: (v: string) => void;
+    vi.mocked(open).mockReturnValue(
+      new Promise<string>((r) => {
+        resolveOpen = r;
+      }) as unknown as Promise<string | string[] | null>
+    );
+    render(TitleBar);
+    const btn = screen.getByRole('button', { name: /add repo/i });
+    await fireEvent.click(btn);
+    await fireEvent.click(btn);
+    // Only one open() call regardless of double-click.
+    expect(open).toHaveBeenCalledTimes(1);
+    resolveOpen('/cancel-anyway');
   });
 });
 
