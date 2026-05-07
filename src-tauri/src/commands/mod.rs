@@ -9,4 +9,5 @@ pub mod scripts;
 pub mod search;
 pub mod system;
 pub mod task;
+pub mod terminal;
 pub mod workspace;

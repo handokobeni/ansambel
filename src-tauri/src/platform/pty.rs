@@ -11,6 +11,17 @@ pub struct PtySession {
     pid: u32,
 }
 
+// `MasterPty`/`Child` trait objects don't implement Debug; supply a thin
+// manual impl so PtySession can be embedded in `#[derive(Debug)]` types
+// (e.g. TerminalHandle in state.rs).
+impl std::fmt::Debug for PtySession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PtySession")
+            .field("pid", &self.pid)
+            .finish()
+    }
+}
+
 pub fn spawn(cmd: CommandBuilder) -> Result<PtySession> {
     let pty_system = native_pty_system();
     let pair = pty_system
