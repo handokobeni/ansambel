@@ -2,6 +2,7 @@ pub mod agent;
 pub mod agent_core;
 pub mod agent_stream;
 pub mod diff;
+pub mod file_io;
 pub mod files;
 pub mod helpers;
 pub mod repo;

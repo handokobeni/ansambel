@@ -88,6 +88,119 @@ pub async fn script_set(
     script_set_inner(&repo_id, scripts, &data_dir, state.inner().clone()).map_err(|e| e.to_string())
 }
 
+// ── Task 5: script_run ───────────────────────────────────────────────
+//
+// Spawns the configured script via PTY rooted at the workspace's
+// worktree. Output streams over a Tauri Channel<TerminalChunk>: bytes
+// for stdout chunks, then a final Exited{code}. Frontend feeds these
+// into the same xterm.js buffer the interactive shell writes to.
+//
+// One PTY per script run (ephemeral). The interactive workspace
+// terminal (terminal_spawn) is a separate session and is not affected.
+
+use crate::platform::pty;
+use crate::state::TerminalChunk;
+use portable_pty::CommandBuilder;
+use tauri::ipc::Channel;
+
+pub fn script_run_inner<F>(
+    workspace_id: &str,
+    script_id: &str,
+    state: Arc<Mutex<AppState>>,
+    mut emit: F,
+) -> crate::error::Result<()>
+where
+    F: FnMut(TerminalChunk) + Send + 'static,
+{
+    // Resolve workspace + worktree dir + script command. Fail fast on
+    // any missing piece so the frontend gets a clear error per cause.
+    let (worktree, command) = {
+        let st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        let ws = st
+            .workspaces
+            .get(workspace_id)
+            .ok_or_else(|| AppError::NotFound(format!("workspace '{workspace_id}'")))?;
+        let repo = st
+            .repos
+            .get(&ws.repo_id)
+            .ok_or_else(|| AppError::NotFound(format!("repo '{}' for workspace", ws.repo_id)))?;
+        let script = repo
+            .scripts
+            .iter()
+            .find(|s| s.id == script_id)
+            .ok_or_else(|| AppError::NotFound(format!("script '{script_id}'")))?;
+        (ws.worktree_dir.clone(), script.command.clone())
+    };
+
+    if !worktree.exists() {
+        return Err(AppError::PathNotFound(worktree));
+    }
+
+    // Wrap the user's command in `sh -c` / `cmd /c` so they can chain
+    // pipes and redirects naturally. Same shape Phase 1's agent path
+    // uses.
+    let cmd = if cfg!(windows) {
+        let mut c = CommandBuilder::new("cmd.exe");
+        c.args(["/C", &command]);
+        c.cwd(&worktree);
+        c
+    } else {
+        let mut c = CommandBuilder::new("sh");
+        c.args(["-c", &command]);
+        c.cwd(&worktree);
+        c
+    };
+
+    let session = pty::spawn(cmd)?;
+    let reader = session.reader()?;
+    let session = Arc::new(Mutex::new(session));
+
+    // Spawn a thread that reads PTY stdout and forwards each chunk
+    // through the emit closure. EOF triggers the Exited chunk with the
+    // process's exit code.
+    let session_for_reader = Arc::clone(&session);
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        let mut buf = [0u8; 4096];
+        loop {
+            match std::io::Read::read(&mut reader, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    emit(TerminalChunk::Bytes {
+                        bytes: buf[..n].to_vec(),
+                    });
+                }
+                Err(_) => break,
+            }
+        }
+        let code = session_for_reader
+            .lock()
+            .ok()
+            .and_then(|mut s| s.try_wait().ok().flatten())
+            .and_then(|status| i32::try_from(status.exit_code()).ok());
+        emit(TerminalChunk::Exited { code });
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn script_run(
+    workspace_id: String,
+    script_id: String,
+    channel: Channel<TerminalChunk>,
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> std::result::Result<(), String> {
+    let inner_state = state.inner().clone();
+    let emit = move |chunk: TerminalChunk| {
+        let _ = channel.send(chunk);
+    };
+    script_run_inner(&workspace_id, &script_id, inner_state, emit).map_err(|e| {
+        tracing::error!(error = %e, "script_run failed");
+        e.to_string()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,5 +391,143 @@ mod tests {
         let data = data_dir();
         let err = script_set_inner("repo_missing", vec![], data.path(), state).unwrap_err();
         assert!(err.to_string().contains("repo_missing"));
+    }
+
+    // ── script_run ──────────────────────────────────────────────────
+
+    use crate::state::{KanbanColumn, WorkspaceInfo, WorkspaceStatus};
+    use std::time::Duration;
+
+    fn make_state_with_repo_and_workspace(
+        repo_id: &str,
+        workspace_id: &str,
+        worktree: &std::path::Path,
+        scripts: Vec<RepoScript>,
+    ) -> Arc<Mutex<AppState>> {
+        let mut state = AppState::default();
+        state.repos.insert(
+            repo_id.into(),
+            RepoInfo {
+                id: repo_id.into(),
+                name: "test".into(),
+                path: PathBuf::from("/tmp/test"),
+                gh_profile: None,
+                default_branch: "main".into(),
+                created_at: 0,
+                updated_at: 0,
+                scripts,
+            },
+        );
+        state.workspaces.insert(
+            workspace_id.into(),
+            WorkspaceInfo {
+                id: workspace_id.into(),
+                repo_id: repo_id.into(),
+                branch: "ansambel/t".into(),
+                base_branch: "main".into(),
+                custom_branch: false,
+                title: "T".into(),
+                description: String::new(),
+                status: WorkspaceStatus::Waiting,
+                column: KanbanColumn::InProgress,
+                created_at: 0,
+                updated_at: 0,
+                worktree_dir: worktree.to_path_buf(),
+            },
+        );
+        Arc::new(Mutex::new(state))
+    }
+
+    fn make_worktree() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        (tmp, wt)
+    }
+
+    fn collect_chunks_until_exit(
+        rx: std::sync::mpsc::Receiver<TerminalChunk>,
+        deadline: Duration,
+    ) -> Vec<TerminalChunk> {
+        let start = std::time::Instant::now();
+        let mut out = Vec::new();
+        while start.elapsed() < deadline {
+            if let Ok(chunk) = rx.recv_timeout(Duration::from_millis(100)) {
+                let is_exit = matches!(chunk, TerminalChunk::Exited { .. });
+                out.push(chunk);
+                if is_exit {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn script_run_inner_streams_output_and_emits_exit_chunk() {
+        let (_tmp, wt) = make_worktree();
+        // Cross-platform "echo hello" — on Windows we'd use a different
+        // command but `echo hello` works in cmd /c too.
+        let scripts = vec![RepoScript {
+            id: "sc_echo".into(),
+            name: "Echo".into(),
+            command: "echo hello".into(),
+        }];
+        let state = make_state_with_repo_and_workspace("repo_a", "ws_a", &wt, scripts);
+
+        let (tx, rx) = std::sync::mpsc::channel::<TerminalChunk>();
+        let emit = move |chunk: TerminalChunk| {
+            let _ = tx.send(chunk);
+        };
+        script_run_inner("ws_a", "sc_echo", state, emit).unwrap();
+
+        let chunks = collect_chunks_until_exit(rx, Duration::from_secs(5));
+        // At minimum we expect one Bytes chunk + one Exited chunk.
+        assert!(
+            chunks.len() >= 2,
+            "expected ≥2 chunks (bytes + exit), got {chunks:?}"
+        );
+        assert!(matches!(chunks.last(), Some(TerminalChunk::Exited { .. })));
+        // The output should include "hello" somewhere.
+        let combined: Vec<u8> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                TerminalChunk::Bytes { bytes } => Some(bytes.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let text = String::from_utf8_lossy(&combined);
+        assert!(text.contains("hello"), "expected 'hello' in: {text:?}");
+    }
+
+    #[test]
+    fn script_run_inner_returns_error_for_unknown_workspace() {
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let err = script_run_inner("ws_missing", "sc_x", state, |_| {}).unwrap_err();
+        assert!(err.to_string().contains("ws_missing"));
+    }
+
+    #[test]
+    fn script_run_inner_returns_error_for_unknown_script_id() {
+        let (_tmp, wt) = make_worktree();
+        let state = make_state_with_repo_and_workspace("repo_a", "ws_a", &wt, vec![]);
+        let err = script_run_inner("ws_a", "sc_ghost", state, |_| {}).unwrap_err();
+        assert!(err.to_string().contains("sc_ghost"));
+    }
+
+    #[test]
+    fn script_run_inner_returns_error_when_worktree_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("nope");
+        let scripts = vec![RepoScript {
+            id: "sc_x".into(),
+            name: "X".into(),
+            command: "echo hi".into(),
+        }];
+        let state = make_state_with_repo_and_workspace("repo_a", "ws_a", &wt, scripts);
+        let err = script_run_inner("ws_a", "sc_x", state, |_| {}).unwrap_err();
+        let msg = err.to_string().to_lowercase();
+        assert!(msg.contains("path") || msg.contains("not found"));
     }
 }

@@ -83,6 +83,9 @@ pub fn run() {
             crate::commands::terminal::terminal_resize,
             crate::commands::terminal::terminal_kill,
             crate::commands::terminal::terminal_reattach,
+            crate::commands::file_io::file_read,
+            crate::commands::file_io::file_write,
+            crate::commands::scripts::script_run,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -182,6 +185,21 @@ mod tests {
     #[test]
     fn terminal_reattach_command_is_registered() {
         let _ = std::any::type_name_of_val(&crate::commands::terminal::terminal_reattach);
+    }
+
+    #[test]
+    fn file_read_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::file_io::file_read);
+    }
+
+    #[test]
+    fn file_write_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::file_io::file_write);
+    }
+
+    #[test]
+    fn script_run_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::scripts::script_run);
     }
 
     #[test]
