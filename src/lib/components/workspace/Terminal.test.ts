@@ -7,7 +7,9 @@ import type { TerminalChunk } from '$lib/types';
 // because it needs a real DOM with measurement APIs that jsdom lacks.
 let lastChannel: { onmessage?: (chunk: TerminalChunk) => void } | null = null;
 let reattachBehavior: 'success' | 'reject' = 'reject';
+let spawnBehavior: 'success' | 'reject' = 'success';
 const writeCalls: { workspaceId: string; bytes: number[] }[] = [];
+const resizeCalls: { workspaceId: string; cols: number; rows: number }[] = [];
 
 vi.mock('@tauri-apps/api/core', () => {
   class MockChannel {
@@ -23,12 +25,21 @@ vi.mock('@tauri-apps/api/core', () => {
       }
       if (cmd === 'terminal_spawn' && args && 'channel' in args) {
         lastChannel = args.channel as { onmessage?: (chunk: TerminalChunk) => void };
+        if (spawnBehavior === 'reject') throw 'pty failed';
         return undefined;
       }
       if (cmd === 'terminal_write' && args) {
         writeCalls.push({
           workspaceId: args.workspaceId as string,
           bytes: args.bytes as number[],
+        });
+        return undefined;
+      }
+      if (cmd === 'terminal_resize' && args) {
+        resizeCalls.push({
+          workspaceId: args.workspaceId as string,
+          cols: args.cols as number,
+          rows: args.rows as number,
         });
         return undefined;
       }
@@ -64,32 +75,48 @@ vi.mock('@xterm/xterm', () => {
   return { Terminal: MockTerminal };
 });
 
+// `fitThrows` lets a single test simulate a no-layout runtime where
+// the FitAddon's `.fit()` raises — the component must swallow that.
+let fitThrows = false;
+
 vi.mock('@xterm/addon-fit', () => {
   class MockFitAddon {
-    fit = vi.fn();
+    fit = vi.fn(() => {
+      if (fitThrows) throw new Error('no layout');
+    });
     activate = vi.fn();
     dispose = vi.fn();
   }
   return { FitAddon: MockFitAddon };
 });
 
-// jsdom doesn't ship ResizeObserver — provide a no-op.
-class NoopResizeObserver {
+// jsdom doesn't ship ResizeObserver — provide a stub that captures the
+// callback so tests can fire a fake resize and assert the component
+// reflows + calls api.terminal.resize.
+let resizeCb: (() => void) | null = null;
+class CapturingResizeObserver {
+  constructor(cb: () => void) {
+    resizeCb = cb;
+  }
   observe(): void {}
   unobserve(): void {}
   disconnect(): void {}
 }
-vi.stubGlobal('ResizeObserver', NoopResizeObserver);
+vi.stubGlobal('ResizeObserver', CapturingResizeObserver);
 
 import Terminal from './Terminal.svelte';
 
 beforeEach(() => {
   lastChannel = null;
   writeCalls.length = 0;
+  resizeCalls.length = 0;
   writes.length = 0;
   writelns.length = 0;
   dataHandler = null;
+  resizeCb = null;
   reattachBehavior = 'reject';
+  spawnBehavior = 'success';
+  fitThrows = false;
 });
 
 afterEach(() => {
@@ -156,5 +183,47 @@ describe('Terminal', () => {
       expect(writelns.some((l) => l.includes('exited with code unknown'))).toBe(true);
     });
     expect((await findByTestId('terminal-status')).textContent).toMatch(/exited/);
+  });
+
+  it('writes a "[failed to start shell]" marker when both reattach and spawn reject', async () => {
+    reattachBehavior = 'reject';
+    spawnBehavior = 'reject';
+    const { findByTestId } = render(Terminal, { props: { workspaceId: 'ws_g' } });
+    await waitFor(() => {
+      expect(writelns.some((l) => l.includes('failed to start shell'))).toBe(true);
+    });
+    // Status flips from "attaching…" to "exited" once the spawn-failure
+    // branch sets `exited = true`.
+    await waitFor(async () => {
+      const status = await findByTestId('terminal-status');
+      expect(status.textContent).toMatch(/exited/);
+    });
+  });
+
+  it('ResizeObserver callback fires fit + api.terminal.resize with current cols/rows', async () => {
+    render(Terminal, { props: { workspaceId: 'ws_h' } });
+    await waitFor(() => expect(resizeCb).not.toBeNull());
+    resizeCb!();
+    await waitFor(() => {
+      expect(resizeCalls.length).toBeGreaterThan(0);
+    });
+    expect(resizeCalls[0]).toMatchObject({ workspaceId: 'ws_h', cols: 80, rows: 24 });
+  });
+
+  it('initial fit() throwing in a no-layout runtime is swallowed (component still mounts)', async () => {
+    fitThrows = true;
+    const { findByTestId } = render(Terminal, { props: { workspaceId: 'ws_i' } });
+    // Even though fit.fit() throws on every call, the component still
+    // wires up the channel + reaches the spawn path.
+    expect(await findByTestId('terminal-view')).toBeTruthy();
+    await waitFor(() => expect(lastChannel).not.toBeNull());
+  });
+
+  it('ResizeObserver callback swallows fit() throws without crashing', async () => {
+    render(Terminal, { props: { workspaceId: 'ws_j' } });
+    await waitFor(() => expect(resizeCb).not.toBeNull());
+    fitThrows = true;
+    // Should not throw — component must catch and skip the resize call.
+    expect(() => resizeCb!()).not.toThrow();
   });
 });

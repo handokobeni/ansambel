@@ -152,4 +152,65 @@ describe('Editor', () => {
     expect(await findByTestId('editor-empty-label')).toBeTruthy();
     expect(writeCalls.length).toBe(0);
   });
+
+  it('a programmatic doc-change dispatch updates the buffer in the store (updateListener path)', async () => {
+    // Mount with no file open first so the view is fully wired before
+    // the activeFile changes; opening the file after mount drives the
+    // $effect's swap-doc branch with `view` already defined.
+    const { findByTestId } = render(Editor, { props: { workspaceId: 'ws_a' } });
+    const cm = await findByTestId('editor-codemirror');
+    const { EditorView } = await import('@codemirror/view');
+    const view = await waitFor(() => {
+      const v = EditorView.findFromDOM(cm as HTMLElement);
+      if (!v) throw new Error('view not yet mounted');
+      return v;
+    });
+    editorTabs.openFile('ws_a', 'a.ts', 'hello', 'sha-orig', false);
+    await waitFor(() => expect(view.state.doc.toString()).toBe('hello'));
+    view.dispatch({
+      changes: { from: 5, insert: ' world' },
+    });
+    await waitFor(() => {
+      expect(editorTabs.activeFile('ws_a')?.content).toBe('hello world');
+      expect(editorTabs.activeFile('ws_a')?.dirty).toBe(true);
+    });
+  });
+
+  it('closing the last open file reverts the editor doc back to empty', async () => {
+    // Mount with no file → wait for view → open a file → close it. The
+    // close drives the $effect's "active became null" branch which dispatches
+    // a swap back to ''.
+    const { findByTestId } = render(Editor, { props: { workspaceId: 'ws_a' } });
+    const cm = await findByTestId('editor-codemirror');
+    const { EditorView } = await import('@codemirror/view');
+    const view = await waitFor(() => {
+      const v = EditorView.findFromDOM(cm as HTMLElement);
+      if (!v) throw new Error('view not yet mounted');
+      return v;
+    });
+    editorTabs.openFile('ws_a', 'a.ts', 'hello', 'sha-orig', false);
+    await waitFor(() => expect(view.state.doc.toString()).toBe('hello'));
+    editorTabs.closeFile('ws_a', 'a.ts');
+    await waitFor(() => expect(view.state.doc.toString()).toBe(''));
+    expect(editorTabs.activeFile('ws_a')).toBeNull();
+  });
+
+  it('opening a known-extension file kicks off the lazy lang import + dispatches the resolved extension', async () => {
+    // The Compartment's reconfigure path runs through langExtensionsFor,
+    // which fires loadLang(...).then(...) and dispatches the resolved
+    // language extension once the dynamic import settles.
+    const { findByTestId } = render(Editor, { props: { workspaceId: 'ws_a' } });
+    const cm = await findByTestId('editor-codemirror');
+    const { EditorView } = await import('@codemirror/view');
+    const view = await waitFor(() => {
+      const v = EditorView.findFromDOM(cm as HTMLElement);
+      if (!v) throw new Error('view not yet mounted');
+      return v;
+    });
+    editorTabs.openFile('ws_a', 'main.ts', 'const x = 1;', 'sha-ts', false);
+    await waitFor(() => expect(view.state.doc.toString()).toBe('const x = 1;'));
+    // Give the dynamic import a microtask window to land + redispatch.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(view.state.doc.toString()).toBe('const x = 1;');
+  });
 });

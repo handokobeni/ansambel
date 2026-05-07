@@ -129,4 +129,27 @@ describe('editorTabs store', () => {
     editorTabs.openFile('ws_a', 'img.png', '', 'shaA', true);
     expect(editorTabs.activeFile('ws_a')?.isBinary).toBe(true);
   });
+
+  it('updateContent is a no-op when the path is not open', () => {
+    editorTabs.openFile('ws_a', 'a.ts', 'A', 'shaA', false);
+    editorTabs.updateContent('ws_a', 'never-opened.ts', 'noop');
+    // The opened file is untouched — no phantom entry was inserted.
+    expect(editorTabs.open('ws_a').map((f) => f.path)).toEqual(['a.ts']);
+    expect(editorTabs.activeFile('ws_a')?.dirty).toBe(false);
+  });
+
+  it('markSaved is a no-op when the path is not open', () => {
+    editorTabs.openFile('ws_a', 'a.ts', 'A', 'shaA', false);
+    editorTabs.updateContent('ws_a', 'a.ts', 'A edited');
+    editorTabs.markSaved('ws_a', 'never-opened.ts', 'irrelevant');
+    // a.ts is still dirty — the phantom mark didn't accidentally clear it.
+    expect(editorTabs.activeFile('ws_a')?.dirty).toBe(true);
+  });
+
+  it('closeFile is a no-op when the path is not open', () => {
+    editorTabs.openFile('ws_a', 'a.ts', 'A', 'shaA', false);
+    editorTabs.closeFile('ws_a', 'never-opened.ts');
+    expect(editorTabs.open('ws_a').map((f) => f.path)).toEqual(['a.ts']);
+    expect(editorTabs.active('ws_a')).toBe('a.ts');
+  });
 });
