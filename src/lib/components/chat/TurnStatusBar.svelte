@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { messages } from '$lib/stores/messages.svelte';
+  import { tooltip } from '$lib/actions';
+  import type { TurnState } from '$lib/types';
 
   interface Props {
     workspaceId: string;
@@ -47,8 +49,12 @@
     // < 1000 stays as a raw count to avoid the misleading "0.0k" early in
     // the turn. ≥ 1000 collapses to one decimal so the line stays compact
     // even when context is massive.
-    if (n < 1_000) return `${n} tokens`;
-    return `${(n / 1_000).toFixed(1)}k tokens`;
+    if (n < 1_000) return `${n}`;
+    return `${(n / 1_000).toFixed(1)}k`;
+  }
+
+  function tokensTooltip(t: TurnState): string {
+    return `Fresh input: ${t.inputTokens.toLocaleString()} tokens (input + cache writes, billed at full rate)`;
   }
 </script>
 
@@ -65,6 +71,27 @@
     <span data-testid="turn-verb" class="text-[var(--text-secondary)] font-medium">{verb}…</span>
     <span data-testid="turn-elapsed">({elapsedSec}s</span>
     <span aria-hidden="true">·</span>
-    <span data-testid="turn-tokens">↓ {formatTokens(turn.inputTokens)})</span>
+    <!-- ↓ = fresh input + cache_creation; ↻ = cached re-reads (billed
+         at 10% of input). Splitting these keeps multi-step turns from
+         flashing alarming numbers like "900k tokens" when most of that
+         is the same cached system prompt being re-read each step. -->
+    <span data-testid="turn-tokens" use:tooltip={{ text: tokensTooltip(turn) }}>
+      ↓ {formatTokens(turn.inputTokens)}
+    </span>
+    {#if turn.cachedTokens > 0}
+      <span aria-hidden="true">·</span>
+      <span
+        data-testid="turn-cached"
+        class="text-[var(--text-dim)]"
+        use:tooltip={{ text: 'Cached context re-read (billed at 10% of input)' }}
+      >
+        ↻ {formatTokens(turn.cachedTokens)}
+      </span>
+    {/if}
+    {#if turn.outputTokens > 0}
+      <span aria-hidden="true">·</span>
+      <span data-testid="turn-output">↑ {formatTokens(turn.outputTokens)}</span>
+    {/if}
+    <span aria-hidden="true">)</span>
   </div>
 {/if}

@@ -4,7 +4,14 @@
   import { repos } from '$lib/stores/repos.svelte';
   import { workspaces } from '$lib/stores/workspaces.svelte';
   import { tasks } from '$lib/stores/tasks.svelte';
+  import { addToast } from '$lib/stores/toasts.svelte';
+  import { theme } from '$lib/stores/theme.svelte';
+  import { tooltip } from '$lib/actions';
   import type { Mode } from '$lib/types';
+
+  // Reading `theme.colorMode` (a `$state` field) inside this $derived
+  // makes the toggle icon reactive to mode changes anywhere in the app.
+  const isDark = $derived(theme.colorMode !== 'light' && theme.isDark());
 
   const {
     mode = undefined,
@@ -35,8 +42,7 @@
       // so the kanban populates without waiting for a restart.
       await Promise.all([workspaces.loadForRepo(repo.id), tasks.loadForRepo(repo.id)]);
     } catch (err) {
-      console.error('Failed to add repo:', err);
-      alert(`Failed to add repo: ${err instanceof Error ? err.message : String(err)}`);
+      addToast(`Failed to add repo: ${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       adding = false;
     }
@@ -90,6 +96,58 @@
   {/if}
 
   <div class="flex items-center gap-2">
+    <button
+      type="button"
+      class="flex items-center justify-center w-7 h-7 rounded text-[var(--text-dim)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
+      onclick={() => theme.toggleColorMode()}
+      aria-label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
+      data-theme-toggle
+      data-mode={isDark ? 'dark' : 'light'}
+      use:tooltip={{
+        text: isDark ? 'Switch to light theme' : 'Switch to dark theme',
+        shortcut: '⌃⇧L',
+      }}
+    >
+      {#if isDark}
+        <!-- Sun icon: shown in dark mode (clicking flips to light) -->
+        <svg
+          viewBox="0 0 24 24"
+          width="14"
+          height="14"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="4" />
+          <line x1="12" y1="2" x2="12" y2="4" />
+          <line x1="12" y1="20" x2="12" y2="22" />
+          <line x1="4.93" y1="4.93" x2="6.34" y2="6.34" />
+          <line x1="17.66" y1="17.66" x2="19.07" y2="19.07" />
+          <line x1="2" y1="12" x2="4" y2="12" />
+          <line x1="20" y1="12" x2="22" y2="12" />
+          <line x1="4.93" y1="19.07" x2="6.34" y2="17.66" />
+          <line x1="17.66" y1="6.34" x2="19.07" y2="4.93" />
+        </svg>
+      {:else}
+        <!-- Moon icon: shown in light mode (clicking flips to dark) -->
+        <svg
+          viewBox="0 0 24 24"
+          width="14"
+          height="14"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+        </svg>
+      {/if}
+    </button>
     <button
       class="flex items-center gap-1 px-2 py-1 text-xs font-semibold rounded bg-[var(--bg-card)] border border-[var(--border-light)] text-[var(--text-dim)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
       onclick={handleAddRepo}

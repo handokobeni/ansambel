@@ -105,6 +105,45 @@ describe('MessageBubble', () => {
     expect(getByText(/compacted earlier/i)).toBeTruthy();
   });
 
+  it('renders a thinking marker collapsed by default with the full text inside', () => {
+    const fullThought =
+      'Considering edge cases — what if the user passes an empty string or a value out of range? '.repeat(
+        4
+      );
+    const { container } = render(MessageBubble, {
+      props: {
+        message: make({
+          role: 'system',
+          text: '✻ Thinking — Considering edge cases…',
+          thinking_text: fullThought,
+        }),
+      },
+    });
+    const details = container.querySelector<HTMLDetailsElement>('details[data-thinking]');
+    expect(details).not.toBeNull();
+    expect(details?.open).toBe(false);
+    // The full text lives inside the marker so the user can expand to read it.
+    const fullPanel = container.querySelector('[data-thinking-full]');
+    expect(fullPanel?.textContent).toContain('Considering edge cases');
+    expect(fullPanel?.textContent).toContain(fullThought.trim());
+  });
+
+  it('falls back to a plain marker when the thinking_text field is absent', () => {
+    // Pre-G10 persisted thinking records don't carry the full text.
+    // Without the field the bubble must still render the truncated text
+    // rather than throwing or rendering empty.
+    const { container, getByText } = render(MessageBubble, {
+      props: {
+        message: make({
+          role: 'system',
+          text: '✻ Thinking — Working on it',
+        }),
+      },
+    });
+    expect(container.querySelector('details[data-thinking]')).toBeNull();
+    expect(getByText(/working on it/i)).toBeTruthy();
+  });
+
   it('renders nothing when the message has no text, tool, or partial state', () => {
     // Legacy parser used to emit Message{text:""} for thinking-only turns —
     // those should render to nothing rather than an empty rounded bubble.
@@ -231,6 +270,30 @@ describe('MessageBubble', () => {
         props: { message: make({ text: 'plain' }) },
       });
       expect(container.querySelector('[data-testid="attachment-grid"]')).toBeNull();
+    });
+
+    it('falls back to a generic alt text when filename is null', () => {
+      // Covers the `att.filename ?? 'attachment'` nullish-coalesce branch
+      // for legacy persisted attachments that did not capture the source
+      // basename.
+      const { container } = render(MessageBubble, {
+        props: {
+          message: make({
+            role: 'user',
+            text: '',
+            attachments: [
+              {
+                kind: 'image',
+                media_type: 'image/png',
+                path: '/abs/no-name.png',
+                filename: null,
+              },
+            ],
+          }),
+        },
+      });
+      const img = container.querySelector<HTMLImageElement>('[data-testid="attachment-image"]')!;
+      expect(img.getAttribute('alt')).toBe('attachment');
     });
 
     it('does not treat an attachment-only user message as empty', () => {

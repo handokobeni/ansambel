@@ -122,6 +122,7 @@ class MessagesStore {
           this.turn.set(wsId, {
             startedAt: Date.now(),
             inputTokens: 0,
+            cachedTokens: 0,
             outputTokens: 0,
           });
         } else {
@@ -138,20 +139,33 @@ class MessagesStore {
         // Usage lines arrive after every assistant message. Accumulate into
         // the active turn; ignore if no turn is active (the CLI sometimes
         // echoes a trailing usage line after status:waiting).
+        //
+        // We deliberately split fresh-input (input_tokens +
+        // cache_creation_input_tokens) from cache_read_input_tokens.
+        // Cache reads repeat the same bytes on every multi-step turn, so
+        // summing them under a single "input" counter gives wildly
+        // inflated numbers — a basic question with a 50k system-prompt
+        // cache and 9 tool steps shows up as ~900k tokens, which is
+        // technically true at the wire level but useless as a user
+        // signal. The two counters keep the display honest: real new
+        // spend on `inputTokens`, cached re-reads on `cachedTokens`.
         const t = this.turn.get(wsId);
         if (!t) return;
         this.turn.set(wsId, {
           startedAt: t.startedAt,
-          inputTokens: t.inputTokens + ev.total_input,
+          inputTokens: t.inputTokens + ev.input_tokens + ev.cache_creation_input_tokens,
+          cachedTokens: t.cachedTokens + ev.cache_read_input_tokens,
           outputTokens: t.outputTokens + ev.output_tokens,
         });
         return;
       }
       case 'thinking': {
-        // Thinking blocks render as a thin "Claude is thinking…" marker so
-        // the user has visibility into what the model is doing between
-        // text and tool calls. The id is derived from the owning assistant
-        // message so streaming partials land on the same marker.
+        // Thinking blocks render as a thin marker so the user has
+        // visibility into what the model is doing between text and tool
+        // calls. The bubble component lifts the marker into an
+        // expandable `<details>` when `thinking_text` is present. The id
+        // is derived from the owning assistant message so streaming
+        // partials land on the same marker.
         const THINKING_PREVIEW = 280;
         const trimmed =
           ev.text.length > THINKING_PREVIEW ? `${ev.text.slice(0, THINKING_PREVIEW)}…` : ev.text;
@@ -167,6 +181,7 @@ class MessagesStore {
           tool_use: null,
           tool_result: null,
           created_at,
+          thinking_text: ev.text,
         });
         return;
       }

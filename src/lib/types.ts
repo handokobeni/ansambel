@@ -125,6 +125,13 @@ export type Message = {
   /** Attached files (currently images only). Optional on the wire so old
    *  persisted records load without it. */
   attachments?: Attachment[];
+  /** Full thinking-block text for `role='system'` messages emitted by the
+   *  thinking event handler. The `text` field still carries a truncated
+   *  preview so listings stay compact; the bubble component reaches into
+   *  `thinking_text` to power the expandable `<details>` view. Optional
+   *  because non-thinking system messages and pre-G10 persisted records
+   *  don't carry it. */
+  thinking_text?: string;
 };
 
 export type AgentStatus = 'running' | 'waiting' | 'error' | 'stopped';
@@ -162,10 +169,23 @@ export type AgentEvent =
 
 /** Live-turn telemetry surfaced above the input while the agent is running.
  *  Resets on every status:running edge so each turn shows its own elapsed
- *  time and cumulative token spend. */
+ *  time and cumulative token spend.
+ *
+ *  Split into three counters because Claude's cache_read tokens are
+ *  re-read on every step — accumulating them into a single "input" total
+ *  inflates the displayed figure by an order of magnitude on any
+ *  multi-step turn. The status bar shows them separately so the user
+ *  can see real new spend vs cache replays at a glance. */
 export type TurnState = {
   startedAt: number;
-  /** Cumulative across all assistant messages in this turn. */
+  /** Cumulative `input_tokens + cache_creation_input_tokens` — bytes
+   *  freshly fed into the model and billed at full input rate. */
   inputTokens: number;
+  /** Cumulative `cache_read_input_tokens` — bytes re-read from prompt
+   *  cache and billed at 10% of input rate. Repeats across every
+   *  multi-step assistant message in a turn, so this can be much larger
+   *  than `inputTokens` even for short prompts. */
+  cachedTokens: number;
+  /** Cumulative `output_tokens`. */
   outputTokens: number;
 };
