@@ -176,6 +176,38 @@ export type AgentEvent =
  *  inflates the displayed figure by an order of magnitude on any
  *  multi-step turn. The status bar shows them separately so the user
  *  can see real new spend vs cache replays at a glance. */
+// --- Phase 2a: Work Mode read-only surfaces ----------------------------
+
+/** One streamed slice of a workspace diff. The frontend concatenates `text`
+ *  from every `text` chunk into one buffer, then parses on `eof`. `error`
+ *  is rare — non-zero exit from `git diff` — and is surfaced as an inline
+ *  banner in the DiffView. */
+export type DiffChunk =
+  | { kind: 'text'; text: string }
+  | { kind: 'error'; message: string }
+  | { kind: 'eof' };
+
+export type FileKind = 'file' | 'dir';
+
+export type FileEntry = {
+  /** Basename — the leaf name shown in the tree row. */
+  name: string;
+  /** Path relative to the worktree root, forward-slash separated on every OS. */
+  path: string;
+  kind: FileKind;
+};
+
+export type SearchMode = 'filename' | 'content';
+
+export type SearchHit =
+  | { kind: 'filename'; path: string }
+  | { kind: 'content'; path: string; line_number: number; line_text: string }
+  | { kind: 'ripgrep_unavailable'; reason: string }
+  | { kind: 'eof' };
+
+/** Tab id within the per-workspace tab strip. */
+export type WorkspaceTabId = 'chat' | 'diff' | 'files';
+
 export type TurnState = {
   startedAt: number;
   /** Cumulative `input_tokens + cache_creation_input_tokens` — bytes

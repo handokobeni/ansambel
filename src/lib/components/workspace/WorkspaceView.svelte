@@ -2,16 +2,24 @@
   import { onMount, onDestroy } from 'svelte';
   import { api, agentChannel } from '$lib/ipc';
   import { messages } from '$lib/stores/messages.svelte';
+  import { workspaceTabs } from '$lib/stores/workspace-tabs.svelte';
   import ChatPanel from '$lib/components/chat/ChatPanel.svelte';
+  import TabStrip from './TabStrip.svelte';
+  import DiffView from './DiffView.svelte';
+  import FileBrowser from './FileBrowser.svelte';
   import type { AgentEvent, Attachment, AttachmentDraft, WorkspaceInfo } from '$lib/types';
 
   interface Props {
     workspace: WorkspaceInfo;
+    /** Path (relative to the worktree) the FileBrowser should highlight.
+     *  Stamped from the App-level SearchModal jump callback. */
+    highlightedFile?: string | null;
   }
 
-  const { workspace }: Props = $props();
+  const { workspace, highlightedFile = null }: Props = $props();
 
   const status = $derived(messages.statusFor(workspace.id) ?? workspace.status);
+  const activeTab = $derived(workspaceTabs.active(workspace.id));
 
   let channel: ReturnType<typeof agentChannel> | undefined;
 
@@ -167,7 +175,40 @@
     </div>
   </header>
 
-  <div class="flex-1 overflow-hidden">
-    <ChatPanel workspaceId={workspace.id} onSend={handleSend} onLoadEarlier={loadEarlier} />
+  <TabStrip active={activeTab} onSelect={(t) => workspaceTabs.setActive(workspace.id, t)} />
+
+  <!-- Hidden-mount: every tab stays in the DOM and just toggles `display`
+       so ChatPanel keeps its scroll position + xterm-style hard-rule
+       components don't have to remount. DiffView and FileBrowser are
+       cheap enough to remount, but the same shape future-proofs 2b's
+       editor + terminal panels. -->
+  <div class="flex-1 overflow-hidden relative">
+    <div
+      id="tabpanel-chat"
+      class:hidden={activeTab !== 'chat'}
+      role="tabpanel"
+      aria-labelledby="tab-chat"
+      class="absolute inset-0"
+    >
+      <ChatPanel workspaceId={workspace.id} onSend={handleSend} onLoadEarlier={loadEarlier} />
+    </div>
+    <div
+      id="tabpanel-diff"
+      class:hidden={activeTab !== 'diff'}
+      role="tabpanel"
+      aria-labelledby="tab-diff"
+      class="absolute inset-0"
+    >
+      <DiffView workspaceId={workspace.id} />
+    </div>
+    <div
+      id="tabpanel-files"
+      class:hidden={activeTab !== 'files'}
+      role="tabpanel"
+      aria-labelledby="tab-files"
+      class="absolute inset-0"
+    >
+      <FileBrowser workspaceId={workspace.id} selectedPath={highlightedFile} />
+    </div>
   </div>
 </section>

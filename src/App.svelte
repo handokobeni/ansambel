@@ -7,6 +7,9 @@
   import KanbanBoard from '$lib/components/kanban/KanbanBoard.svelte';
   import NewTaskDialog from '$lib/components/kanban/NewTaskDialog.svelte';
   import WorkspaceView from '$lib/components/workspace/WorkspaceView.svelte';
+  import SearchModal from '$lib/components/workspace/SearchModal.svelte';
+  import { workspaceTabs } from '$lib/stores/workspace-tabs.svelte';
+  import type { SearchMode } from '$lib/types';
   import { repos } from '$lib/stores/repos.svelte';
   import { workspaces } from '$lib/stores/workspaces.svelte';
   import { tasks } from '$lib/stores/tasks.svelte';
@@ -17,6 +20,9 @@
 
   let registry: ShortcutRegistry | undefined;
   let showNewTask = $state(false);
+  let searchOpen = $state(false);
+  let searchMode = $state<SearchMode>('filename');
+  let highlightedFile = $state<string | null>(null);
 
   const selectedRepo = $derived(repos.getSelected());
   const selectedWorkspace = $derived(workspaces.getSelected());
@@ -40,6 +46,19 @@
     });
     registry.register('ctrl+e', () => {
       // Focus repo dropdown — no-op until Phase 2
+    });
+    // Phase 2a search modal — Ctrl+P opens filename mode, Ctrl+Shift+F
+    // opens content mode. Both require an active workspace; the no-op
+    // branch below is intentional for the Plan-mode case.
+    registry.register('ctrl+p', () => {
+      if (!selectedWorkspace) return;
+      searchMode = 'filename';
+      searchOpen = true;
+    });
+    registry.register('ctrl+shift+f', () => {
+      if (!selectedWorkspace) return;
+      searchMode = 'content';
+      searchOpen = true;
     });
 
     await repos.load();
@@ -128,7 +147,7 @@
         </div>
       {/if}
     {:else if selectedWorkspace}
-      <WorkspaceView workspace={selectedWorkspace} />
+      <WorkspaceView workspace={selectedWorkspace} {highlightedFile} />
     {:else}
       <div class="h-full flex items-center justify-center text-sm text-[var(--text-muted)]">
         Select or create a workspace
@@ -140,6 +159,21 @@
     open={showNewTask}
     onSubmit={handleAddTask}
     onCancel={() => (showNewTask = false)}
+  />
+
+  <SearchModal
+    open={searchOpen}
+    workspaceId={selectedWorkspace?.id ?? null}
+    initialMode={searchMode}
+    onClose={() => (searchOpen = false)}
+    onJump={(path) => {
+      if (selectedWorkspace) {
+        // Switch to the Files tab and stamp the path so the FileBrowser
+        // highlights the row. Editor / line-jump arrives in Phase 2b.
+        workspaceTabs.setActive(selectedWorkspace.id, 'files');
+        highlightedFile = path;
+      }
+    }}
   />
 
   <Toasts />
