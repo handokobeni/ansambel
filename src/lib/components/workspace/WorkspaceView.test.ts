@@ -542,4 +542,47 @@ describe('WorkspaceView', () => {
       expect(listCallCount).toBeGreaterThanOrEqual(2);
     });
   });
+
+  // ── Phase 2a: tab integration ─────────────────────────────────────
+
+  describe('tab strip integration', () => {
+    it('renders the tab strip with the three tabs', async () => {
+      const { findByTestId } = render(WorkspaceView, { props: { workspace: ws() } });
+      expect(await findByTestId('tab-strip')).toBeTruthy();
+      expect(await findByTestId('tab-chat')).toBeTruthy();
+      expect(await findByTestId('tab-diff')).toBeTruthy();
+      expect(await findByTestId('tab-files')).toBeTruthy();
+    });
+
+    it('defaults to the chat tab on first open', async () => {
+      const { findByTestId } = render(WorkspaceView, { props: { workspace: ws() } });
+      const chat = await findByTestId('tab-chat');
+      expect(chat.getAttribute('aria-selected')).toBe('true');
+    });
+
+    it('clicking the diff tab makes the diff panel visible', async () => {
+      const { findByTestId, container } = render(WorkspaceView, { props: { workspace: ws() } });
+      const diffTab = await findByTestId('tab-diff');
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(diffTab);
+      await waitFor(() => expect(diffTab.getAttribute('aria-selected')).toBe('true'));
+      const diffPanel = container.querySelector('#tabpanel-diff');
+      expect(diffPanel?.classList.contains('hidden')).toBe(false);
+      const chatPanel = container.querySelector('#tabpanel-chat');
+      // ChatPanel stays in DOM but is hidden — proves the hidden-mount
+      // pattern preserves chat scroll position when the user pops away.
+      expect(chatPanel).not.toBeNull();
+      expect(chatPanel?.classList.contains('hidden')).toBe(true);
+    });
+
+    it('clicking the files tab makes the files panel visible', async () => {
+      const { findByTestId, container } = render(WorkspaceView, { props: { workspace: ws() } });
+      const filesTab = await findByTestId('tab-files');
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(filesTab);
+      await waitFor(() => expect(filesTab.getAttribute('aria-selected')).toBe('true'));
+      const filesPanel = container.querySelector('#tabpanel-files');
+      expect(filesPanel?.classList.contains('hidden')).toBe(false);
+    });
+  });
 });

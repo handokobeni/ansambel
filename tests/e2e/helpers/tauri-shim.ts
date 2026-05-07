@@ -448,6 +448,63 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
             return undefined;
           }
 
+          // ── Phase 2a: workspace read-only surfaces ─────────────
+          //
+          // Each command takes a `channel` arg (Tauri Channel<T>). We
+          // drive `channel.onmessage` with mock chunks so the frontend
+          // sees the same shape as the real backend.
+          case 'workspace_diff': {
+            const channel = args.channel as { onmessage?: (chunk: unknown) => void };
+            // Mock diff: one modified file with a single-line hunk. Enough
+            // to verify the DiffView renders green/red row tagging.
+            const mockDiff = [
+              'diff --git a/foo.txt b/foo.txt',
+              '--- a/foo.txt',
+              '+++ b/foo.txt',
+              '@@ -1 +1 @@',
+              '-old',
+              '+new',
+              '',
+            ].join('\n');
+            setTimeout(() => channel.onmessage?.({ kind: 'text', text: mockDiff }), 0);
+            setTimeout(() => channel.onmessage?.({ kind: 'eof' }), 5);
+            return undefined;
+          }
+
+          case 'workspace_files': {
+            const path = (args.path as string | undefined) ?? '';
+            // Two-level mock tree: root has `src/` and `README.md`;
+            // expanding `src` reveals `app.ts`.
+            if (path === '') {
+              return [
+                { name: 'src', path: 'src', kind: 'dir' },
+                { name: 'README.md', path: 'README.md', kind: 'file' },
+              ];
+            }
+            if (path === 'src') {
+              return [{ name: 'app.ts', path: 'src/app.ts', kind: 'file' }];
+            }
+            return [];
+          }
+
+          case 'workspace_search': {
+            const channel = args.channel as { onmessage?: (hit: unknown) => void };
+            const query = (args.query as string).toLowerCase();
+            const mode = args.mode as string;
+            // Filename search: pretend `app.ts` matches anything containing 'app'.
+            if (mode === 'filename') {
+              setTimeout(() => {
+                if (query.includes('app')) {
+                  channel.onmessage?.({ kind: 'filename', path: 'src/app.ts' });
+                }
+                channel.onmessage?.({ kind: 'eof' });
+              }, 0);
+            } else {
+              setTimeout(() => channel.onmessage?.({ kind: 'eof' }), 0);
+            }
+            return undefined;
+          }
+
           case 'plugin:dialog|open':
             return dialogOpenPath ?? null;
 

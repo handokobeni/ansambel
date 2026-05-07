@@ -1,8 +1,11 @@
 pub mod agent;
 pub mod agent_core;
 pub mod agent_stream;
+pub mod diff;
+pub mod files;
 pub mod helpers;
 pub mod repo;
+pub mod search;
 pub mod system;
 pub mod task;
 pub mod workspace;

@@ -11,6 +11,10 @@ import type {
   AgentEvent,
   AttachmentDraft,
   Message,
+  DiffChunk,
+  FileEntry,
+  SearchHit,
+  SearchMode,
 } from './types';
 
 export type ListMessagesOpts = {
@@ -40,6 +44,27 @@ export const api = {
     list: (repoId?: string): Promise<WorkspaceInfo[]> => invoke('list_workspaces', { repoId }),
 
     remove: (workspaceId: string): Promise<void> => invoke('remove_workspace', { workspaceId }),
+
+    /** Stream the unified diff for a workspace's worktree. The backend
+     *  emits `text` chunks ≤ 64 KB, then a single `eof`. `error` is rare
+     *  and surfaces as an inline banner in the DiffView. */
+    diff: (workspaceId: string, channel: Channel<DiffChunk>): Promise<void> =>
+      invoke('workspace_diff', { workspaceId, channel }),
+
+    /** List immediate children of `path` (or the worktree root when `path`
+     *  is omitted) — gitignore-aware, sorted directories-first. */
+    files: (workspaceId: string, path?: string): Promise<FileEntry[]> =>
+      invoke('workspace_files', { workspaceId, path }),
+
+    /** Stream filename-or-content hits. Emits a single
+     *  `ripgrep_unavailable` sentinel when content mode is requested and
+     *  the `rg` binary is missing. */
+    search: (
+      workspaceId: string,
+      query: string,
+      mode: SearchMode,
+      channel: Channel<SearchHit>
+    ): Promise<void> => invoke('workspace_search', { workspaceId, query, mode, channel }),
   },
 
   task: {
