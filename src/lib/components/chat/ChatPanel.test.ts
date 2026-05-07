@@ -430,4 +430,58 @@ describe('ChatPanel', () => {
       });
     });
   });
+
+  describe('tool group collapse', () => {
+    function tool(id: string, ws = 'ws_a', order = 0): Message {
+      return {
+        id,
+        workspace_id: ws,
+        role: 'tool',
+        text: '',
+        is_partial: false,
+        tool_use: { id: `toolu_${id}`, name: 'Read', input: { file_path: `/x/${id}` } },
+        tool_result: null,
+        created_at: order,
+      };
+    }
+
+    it('renders 3 consecutive tool messages as a single ToolGroup', () => {
+      messages.upsert(tool('t1', 'ws_a', 1));
+      messages.upsert(tool('t2', 'ws_a', 2));
+      messages.upsert(tool('t3', 'ws_a', 3));
+      const { container } = render(ChatPanel, {
+        props: { workspaceId: 'ws_a', onSend: vi.fn() },
+      });
+      const groups = container.querySelectorAll('[data-tool-group]');
+      expect(groups.length).toBe(1);
+      expect(groups[0].getAttribute('data-tool-group-count')).toBe('3');
+      // The toggle is rendered and starts in the expanded state.
+      const toggle = container.querySelector('[data-tool-group-toggle]');
+      expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+    });
+
+    it('keeps short tool runs (1-2) inline as individual bubbles', () => {
+      messages.upsert(tool('t1', 'ws_a', 1));
+      messages.upsert(tool('t2', 'ws_a', 2));
+      const { container } = render(ChatPanel, {
+        props: { workspaceId: 'ws_a', onSend: vi.fn() },
+      });
+      expect(container.querySelector('[data-tool-group]')).toBeNull();
+      expect(container.querySelectorAll('[data-tool-use]').length).toBe(2);
+    });
+
+    it('breaks the group when a non-tool message interrupts the run', () => {
+      // Sort key is created_at, so use ids whose digits encode the
+      // intended sequence: 2 tools → text → 1 tool.
+      messages.upsert(tool('t1', 'ws_a', 1));
+      messages.upsert(tool('t2', 'ws_a', 2));
+      messages.upsert(make('msg3', 'ws_a', 'observation'));
+      messages.upsert(tool('t4', 'ws_a', 4));
+      const { container } = render(ChatPanel, {
+        props: { workspaceId: 'ws_a', onSend: vi.fn() },
+      });
+      // Run lengths are <3 either side → no grouping.
+      expect(container.querySelector('[data-tool-group]')).toBeNull();
+    });
+  });
 });

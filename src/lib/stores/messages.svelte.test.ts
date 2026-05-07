@@ -152,6 +152,19 @@ describe('MessagesStore', () => {
     expect(marker!.text.length).toBeLessThan(long.length);
   });
 
+  it('apply Thinking carries the full block text on `thinking_text` for expand UX', () => {
+    const long = 'this is the full thinking block. '.repeat(40);
+    messages.apply(
+      { type: 'thinking', message_id: 'msg_full', text: long, is_partial: false },
+      'ws_a'
+    );
+    const marker = messages.listForWorkspace('ws_a').find((m) => m.id.startsWith('thinking_'));
+    expect(marker?.thinking_text).toBe(long);
+    // Preview text is shorter so the bubble can show a teaser without
+    // ballooning the chat list.
+    expect(marker!.text.length).toBeLessThan(long.length);
+  });
+
   it('apply Compact emits unique ids so concurrent events do not collide', () => {
     messages.apply({ type: 'compact', trigger: 'auto', pre_tokens: 1000 }, 'ws_a');
     messages.apply({ type: 'compact', trigger: 'auto', pre_tokens: 2000 }, 'ws_a');
@@ -341,6 +354,7 @@ describe('MessagesStore', () => {
       expect(turn).not.toBeNull();
       expect(turn!.startedAt).toBeGreaterThanOrEqual(before);
       expect(turn!.inputTokens).toBe(0);
+      expect(turn!.cachedTokens).toBe(0);
       expect(turn!.outputTokens).toBe(0);
 
       messages.apply({ type: 'status', status: 'waiting' }, 'ws_t');
@@ -357,17 +371,21 @@ describe('MessagesStore', () => {
       expect(messages.turnFor('ws_t2')).toBeNull();
     });
 
-    it('accumulates Usage events into the active turn', () => {
+    it('accumulates Usage events into the active turn, splitting fresh vs cached', () => {
+      // Cache reads repeat across multi-step turns (the same system
+      // prompt is re-read on every assistant message). Lumping them in
+      // with `inputTokens` would inflate a basic turn from a few k to
+      // hundreds of k — see the `cachedTokens` rationale on TurnState.
       messages.apply({ type: 'status', status: 'running' }, 'ws_u');
       messages.apply(
         {
           type: 'usage',
           message_id: 'msg_a',
           input_tokens: 12,
-          cache_creation_input_tokens: 0,
+          cache_creation_input_tokens: 200,
           cache_read_input_tokens: 4500,
           output_tokens: 100,
-          total_input: 4512,
+          total_input: 4712,
         },
         'ws_u'
       );
@@ -375,18 +393,44 @@ describe('MessagesStore', () => {
         {
           type: 'usage',
           message_id: 'msg_b',
-          input_tokens: 0,
-          cache_creation_input_tokens: 0,
+          input_tokens: 8,
+          cache_creation_input_tokens: 50,
           cache_read_input_tokens: 4600,
           output_tokens: 200,
-          total_input: 4600,
+          total_input: 4658,
         },
         'ws_u'
       );
       const turn = messages.turnFor('ws_u');
       expect(turn).not.toBeNull();
-      expect(turn!.inputTokens).toBe(4512 + 4600);
+      // Fresh input = sum(input + cache_creation) across both events.
+      expect(turn!.inputTokens).toBe(12 + 200 + 8 + 50);
+      // Cached re-reads accumulate so the user sees the actual replay
+      // volume (and can mentally apply the 10% billing factor).
+      expect(turn!.cachedTokens).toBe(4500 + 4600);
       expect(turn!.outputTokens).toBe(100 + 200);
+    });
+
+    it('keeps cachedTokens at zero when no cache_read tokens are reported', () => {
+      // First-turn-of-session: no prior cache to read. The display
+      // should hide the ↻ chip in this case rather than showing
+      // "↻ 0 tokens".
+      messages.apply({ type: 'status', status: 'running' }, 'ws_no_cache');
+      messages.apply(
+        {
+          type: 'usage',
+          message_id: 'msg_first',
+          input_tokens: 30,
+          cache_creation_input_tokens: 22000,
+          cache_read_input_tokens: 0,
+          output_tokens: 80,
+          total_input: 22030,
+        },
+        'ws_no_cache'
+      );
+      const turn = messages.turnFor('ws_no_cache');
+      expect(turn!.inputTokens).toBe(30 + 22000);
+      expect(turn!.cachedTokens).toBe(0);
     });
 
     it('drops Usage events that arrive while no turn is active', () => {
@@ -492,6 +536,7 @@ describe('MessagesStore', () => {
       messages.apply({ type: 'status', status: 'running' }, 'ws_re');
       const second = messages.turnFor('ws_re')!;
       expect(second.inputTokens).toBe(0);
+      expect(second.cachedTokens).toBe(0);
       expect(second.outputTokens).toBe(0);
       expect(second.startedAt).toBeGreaterThan(first.startedAt);
     });

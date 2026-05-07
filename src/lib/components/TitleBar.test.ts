@@ -39,16 +39,28 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { repos } from '$lib/stores/repos.svelte';
 import { workspaces } from '$lib/stores/workspaces.svelte';
 import { tasks } from '$lib/stores/tasks.svelte';
+import { getToasts, removeToast } from '$lib/stores/toasts.svelte';
+
+function clearAllToasts(): void {
+  for (const id of Array.from(getToasts().keys())) removeToast(id);
+}
+
+function findToastByText(needle: string | RegExp): string | null {
+  for (const t of getToasts().values()) {
+    const match = typeof needle === 'string' ? t.message.includes(needle) : needle.test(t.message);
+    if (match) return t.message;
+  }
+  return null;
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearAllToasts();
   vi.mocked(repos.getSelected).mockReturnValue(null);
   (repos as { selectedRepoId: string | null }).selectedRepoId = null;
   // Default loadForRepo to resolve immediately so the promise chain completes.
   vi.mocked(workspaces.loadForRepo).mockResolvedValue(undefined);
   vi.mocked(tasks.loadForRepo).mockResolvedValue(undefined);
-  // Silence alert() during error-path tests.
-  vi.stubGlobal('alert', vi.fn());
 });
 
 describe('TitleBar', () => {
@@ -112,20 +124,18 @@ describe('TitleBar', () => {
     expect(repos.add).not.toHaveBeenCalled();
   });
 
-  it('surfaces an alert when repos.add throws', async () => {
+  it('shows an error toast when repos.add throws', async () => {
     vi.mocked(open).mockResolvedValue('/home/user/bad-project');
     vi.mocked(repos.add).mockRejectedValue(new Error('not a git repository'));
     render(TitleBar);
     await fireEvent.click(screen.getByRole('button', { name: /add repo/i }));
     await waitFor(() => {
-      expect(globalThis.alert).toHaveBeenCalledWith(
-        expect.stringContaining('not a git repository')
-      );
+      expect(findToastByText('not a git repository')).not.toBeNull();
     });
     expect(repos.select).not.toHaveBeenCalled();
   });
 
-  it('coerces non-Error rejections to a string for the alert', async () => {
+  it('coerces non-Error rejections to a string for the toast', async () => {
     // Covers the err-instanceof-Error fallback branch. Tauri commands
     // commonly reject with a plain string rather than an Error object.
     vi.mocked(open).mockResolvedValue('/home/user/raw-string-error');
@@ -133,9 +143,7 @@ describe('TitleBar', () => {
     render(TitleBar);
     await fireEvent.click(screen.getByRole('button', { name: /add repo/i }));
     await waitFor(() => {
-      expect(globalThis.alert).toHaveBeenCalledWith(
-        expect.stringContaining('plain string failure')
-      );
+      expect(findToastByText('plain string failure')).not.toBeNull();
     });
   });
 
@@ -155,6 +163,30 @@ describe('TitleBar', () => {
     // Only one open() call regardless of double-click.
     expect(open).toHaveBeenCalledTimes(1);
     resolveOpen('/cancel-anyway');
+  });
+});
+
+describe('TitleBar theme toggle', () => {
+  it('renders a theme toggle button reflecting the current mode', () => {
+    const { container } = render(TitleBar);
+    const btn = container.querySelector<HTMLButtonElement>('[data-theme-toggle]');
+    expect(btn).not.toBeNull();
+    // Default install lands on dark, so the button shows the sun (click to flip to light).
+    expect(btn?.dataset.mode).toBe('dark');
+    expect(btn?.getAttribute('aria-label')).toMatch(/light/i);
+  });
+
+  it('clicking the theme toggle flips dark↔light', async () => {
+    const themeMod = await import('$lib/stores/theme.svelte');
+    // Reset to a known starting point so the test is independent of order.
+    themeMod.theme.setColorMode('dark');
+    const { container } = render(TitleBar);
+    const btn = container.querySelector<HTMLButtonElement>('[data-theme-toggle]')!;
+    expect(btn.dataset.mode).toBe('dark');
+    await fireEvent.click(btn);
+    expect(themeMod.theme.colorMode).toBe('light');
+    await fireEvent.click(btn);
+    expect(themeMod.theme.colorMode).toBe('dark');
   });
 });
 

@@ -4,6 +4,8 @@
   import MessageBubble from './MessageBubble.svelte';
   import MessageInput from './MessageInput.svelte';
   import TurnStatusBar from './TurnStatusBar.svelte';
+  import ToolGroup from './ToolGroup.svelte';
+  import { groupConsecutiveTools } from '$lib/chat-grouping';
   import type { AttachmentDraft, Message } from '$lib/types';
 
   interface Props {
@@ -62,6 +64,11 @@
   const visibleList = $derived(
     list.length <= effectiveWindow ? list : list.slice(list.length - effectiveWindow)
   );
+
+  // Collapse runs of >=3 consecutive tool messages into a single
+  // ToolGroup slot so a Read+Edit+Bash flurry doesn't drown out the
+  // surrounding text. The user can expand/collapse each group.
+  const renderItems = $derived(groupConsecutiveTools(visibleList));
 
   // Auto-scroll only when the user is anchored near the bottom. The
   // pinned flag flips false when they scroll up to read history so a
@@ -212,8 +219,12 @@
         Start the conversation — type a message below.
       </div>
     {:else}
-      {#each visibleList as msg (msg.id)}
-        <MessageBubble message={msg} />
+      {#each renderItems as item (item.kind === 'message' ? item.message.id : item.id)}
+        {#if item.kind === 'message'}
+          <MessageBubble message={item.message} />
+        {:else}
+          <ToolGroup messages={item.messages} />
+        {/if}
       {/each}
     {/if}
   </div>

@@ -3,6 +3,7 @@
   import { onMount, onDestroy } from 'svelte';
   import TitleBar from '$lib/components/TitleBar.svelte';
   import Sidebar from '$lib/components/Sidebar.svelte';
+  import Toasts from '$lib/components/Toasts.svelte';
   import KanbanBoard from '$lib/components/kanban/KanbanBoard.svelte';
   import NewTaskDialog from '$lib/components/kanban/NewTaskDialog.svelte';
   import WorkspaceView from '$lib/components/workspace/WorkspaceView.svelte';
@@ -10,6 +11,7 @@
   import { workspaces } from '$lib/stores/workspaces.svelte';
   import { tasks } from '$lib/stores/tasks.svelte';
   import { modeStore } from '$lib/stores/mode.svelte';
+  import { theme } from '$lib/stores/theme.svelte';
   import { ShortcutRegistry } from '$lib/keyboard';
   import type { KanbanColumn } from '$lib/types';
 
@@ -21,9 +23,15 @@
   const boardTasks = $derived(selectedRepo ? tasks.listForRepo(selectedRepo.id) : []);
 
   onMount(async () => {
+    // Apply CSS variables and start tracking system color-scheme changes so
+    // a `system` color mode tracks the OS in real time. Must run before any
+    // surface relies on theme tokens — keep this at the top of onMount.
+    theme.initTheme();
+
     registry = new ShortcutRegistry();
     registry.register('ctrl+1', () => modeStore.set('plan'));
     registry.register('ctrl+2', () => modeStore.set('work'));
+    registry.register('ctrl+shift+l', () => theme.toggleColorMode());
     registry.register('ctrl+n', () => {
       if (modeStore.mode === 'plan' && selectedRepo) showNewTask = true;
     });
@@ -88,7 +96,7 @@
   style="
     display: grid;
     grid-template-rows: auto 1fr;
-    grid-template-columns: 260px 1fr;
+    grid-template-columns: auto 1fr;
     height: 100vh;
     overflow: hidden;
   "
@@ -133,4 +141,6 @@
     onSubmit={handleAddTask}
     onCancel={() => (showNewTask = false)}
   />
+
+  <Toasts />
 </div>

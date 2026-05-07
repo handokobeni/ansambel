@@ -2,6 +2,7 @@
   import { convertFileSrc } from '@tauri-apps/api/core';
   import type { Message } from '$lib/types';
   import { formatToolUse } from '$lib/tools/format';
+  import { renderMarkdown } from '$lib/markdown';
 
   interface Props {
     message: Message;
@@ -42,15 +43,52 @@
 {#if isEmpty && message.role !== 'system'}
   <!-- nothing — see isEmpty derivation -->
 {:else if message.role === 'system'}
-  <!-- System markers (e.g. compact_boundary) sit in the message stream as
-       thin centered notices rather than chat bubbles. -->
-  <div
-    class="flex items-center justify-center py-1 text-xs text-[var(--text-muted)] italic"
-    data-role="system"
-    data-message-id={message.id}
-  >
-    <span class="px-2">{message.text}</span>
-  </div>
+  <!-- System markers (e.g. compact_boundary, thinking) sit in the message
+       stream as thin centered notices rather than chat bubbles. Thinking
+       markers carry the full block text in `thinking_text` so the user
+       can expand to read it. -->
+  {#if message.thinking_text}
+    <details
+      class="py-1 text-xs text-[var(--text-muted)] italic"
+      data-role="system"
+      data-message-id={message.id}
+      data-thinking
+    >
+      <summary
+        class="cursor-pointer list-none flex items-center justify-center gap-1.5 hover:text-[var(--text-secondary)] transition-colors"
+      >
+        <svg
+          viewBox="0 0 24 24"
+          width="9"
+          height="9"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="3"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+          class="thinking-chevron transition-transform"
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+        <span class="px-2">{message.text}</span>
+      </summary>
+      <div
+        class="mt-1.5 mx-auto max-w-[640px] px-3 py-2 rounded bg-[var(--code-block-bg)] text-[var(--text-secondary)] not-italic font-mono whitespace-pre-wrap break-words"
+        data-thinking-full
+      >
+        {message.thinking_text}
+      </div>
+    </details>
+  {:else}
+    <div
+      class="flex items-center justify-center py-1 text-xs text-[var(--text-muted)] italic"
+      data-role="system"
+      data-message-id={message.id}
+    >
+      <span class="px-2">{message.text}</span>
+    </div>
+  {/if}
 {:else}
   <article
     class="flex flex-col gap-1 px-3 py-2 rounded text-sm break-words"
@@ -98,7 +136,12 @@
     {/if}
 
     {#if message.text}
-      <p class="whitespace-pre-wrap text-[var(--text-primary)]">{message.text}</p>
+      <!-- Markdown is run through DOMPurify in renderMarkdown so script
+           tags and inline event handlers are stripped before injection. -->
+      <div class="msg-prose text-[var(--text-primary)] break-words" data-message-text>
+        <!-- eslint-disable-next-line svelte/no-at-html-tags -- sanitized by DOMPurify in renderMarkdown -->
+        {@html renderMarkdown(message.text)}
+      </div>
     {/if}
 
     {#if message.is_partial}

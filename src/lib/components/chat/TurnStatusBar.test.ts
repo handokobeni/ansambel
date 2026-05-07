@@ -44,25 +44,25 @@ describe('TurnStatusBar', () => {
     expect(getByTestId('turn-elapsed').textContent).toMatch(/51s/);
   });
 
-  it('formats token count as Yk with one decimal place', () => {
+  it('formats fresh-input token count as Yk with one decimal place', () => {
     vi.setSystemTime(new Date('2026-04-30T12:00:00Z').getTime());
     messages.apply({ type: 'status', status: 'running' }, 'ws_t');
     messages.apply(
       {
         type: 'usage',
         message_id: 'msg_a',
-        input_tokens: 0,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 2000,
+        input_tokens: 200,
+        cache_creation_input_tokens: 1800,
+        cache_read_input_tokens: 0,
         output_tokens: 0,
         total_input: 2000,
       },
       'ws_t'
     );
     const { getByTestId } = render(TurnStatusBar, { props: { workspaceId: 'ws_t' } });
-    // 2000 → "2.0k". The down-arrow points at the input direction (context
-    // sent to the model), matching the Claude CLI convention.
-    expect(getByTestId('turn-tokens').textContent).toMatch(/↓\s*2\.0k tokens/);
+    // 200 + 1800 = 2000 fresh tokens → "2.0k". The down-arrow chip
+    // tracks bytes freshly fed into the model, billed at full rate.
+    expect(getByTestId('turn-tokens').textContent).toMatch(/↓\s*2\.0k/);
   });
 
   it('shows raw count when below 1000', () => {
@@ -81,7 +81,95 @@ describe('TurnStatusBar', () => {
       'ws_lo'
     );
     const { getByTestId } = render(TurnStatusBar, { props: { workspaceId: 'ws_lo' } });
-    expect(getByTestId('turn-tokens').textContent).toMatch(/↓\s*12 tokens/);
+    expect(getByTestId('turn-tokens').textContent).toMatch(/↓\s*12/);
+  });
+
+  it('shows a separate ↻ chip for cache_read tokens, but only when > 0', () => {
+    vi.setSystemTime(new Date('2026-04-30T12:00:00Z').getTime());
+    messages.apply({ type: 'status', status: 'running' }, 'ws_cache');
+    // Fresh-only first turn — no cached chip yet.
+    messages.apply(
+      {
+        type: 'usage',
+        message_id: 'msg_first',
+        input_tokens: 30,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        output_tokens: 10,
+        total_input: 30,
+      },
+      'ws_cache'
+    );
+    const { queryByTestId, rerender } = render(TurnStatusBar, {
+      props: { workspaceId: 'ws_cache' },
+    });
+    expect(queryByTestId('turn-cached')).toBeNull();
+
+    // Subsequent step replays a 50k cached system prompt — chip appears.
+    messages.apply(
+      {
+        type: 'usage',
+        message_id: 'msg_second',
+        input_tokens: 5,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 50000,
+        output_tokens: 80,
+        total_input: 50005,
+      },
+      'ws_cache'
+    );
+    // Force re-render so the $derived turn snapshot updates.
+    rerender({ workspaceId: 'ws_cache' });
+    const cached = queryByTestId('turn-cached');
+    expect(cached).not.toBeNull();
+    expect(cached!.textContent).toMatch(/↻\s*50\.0k/);
+  });
+
+  it('shows the output ↑ chip with cumulative output_tokens', () => {
+    vi.setSystemTime(new Date('2026-04-30T12:00:00Z').getTime());
+    messages.apply({ type: 'status', status: 'running' }, 'ws_out');
+    messages.apply(
+      {
+        type: 'usage',
+        message_id: 'msg_a',
+        input_tokens: 10,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        output_tokens: 1500,
+        total_input: 10,
+      },
+      'ws_out'
+    );
+    const { getByTestId } = render(TurnStatusBar, { props: { workspaceId: 'ws_out' } });
+    expect(getByTestId('turn-output').textContent).toMatch(/↑\s*1\.5k/);
+  });
+
+  it('does NOT inflate inputTokens by accumulating cache_read across steps', () => {
+    // Regression guard for the "900k tokens for a basic question" bug:
+    // a multi-step turn that re-reads a 100k cached prompt 9 times must
+    // surface the cache replays under ↻, not under ↓.
+    vi.setSystemTime(new Date('2026-04-30T12:00:00Z').getTime());
+    messages.apply({ type: 'status', status: 'running' }, 'ws_900k');
+    for (let i = 0; i < 9; i++) {
+      messages.apply(
+        {
+          type: 'usage',
+          message_id: `msg_${i}`,
+          input_tokens: 50,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 100_000,
+          output_tokens: 200,
+          total_input: 100_050,
+        },
+        'ws_900k'
+      );
+    }
+    const { getByTestId } = render(TurnStatusBar, { props: { workspaceId: 'ws_900k' } });
+    // Fresh = 9 * 50 = 450 tokens. NOT 900k.
+    expect(getByTestId('turn-tokens').textContent).toMatch(/↓\s*450/);
+    // Cached = 9 * 100k = 900k — visible separately so the user sees
+    // the truth without confusing replay volume with new spend.
+    expect(getByTestId('turn-cached').textContent).toMatch(/↻\s*900\.0k/);
   });
 
   it('hides itself once the turn ends', async () => {
