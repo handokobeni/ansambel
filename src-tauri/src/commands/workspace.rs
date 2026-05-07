@@ -526,10 +526,21 @@ mod tests {
             .output()
             .unwrap();
         let list = String::from_utf8_lossy(&out.stdout);
-        let wt_str = ws.worktree_dir.to_string_lossy();
+        // Compare against the basename only. `git worktree list` reports
+        // paths with forward slashes on every platform AND can resolve
+        // through 8.3 short names on Windows runners (e.g. RUNNER~1 vs
+        // runneradmin), so a literal-string match against
+        // `ws.worktree_dir.to_string_lossy()` is fragile cross-platform.
+        // The random adjective-noun slug is unique enough to identify
+        // the worktree without that fragility.
+        let dir_name = ws
+            .worktree_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
         assert!(
-            list.contains(wt_str.as_ref()),
-            "worktree list should contain workspace path '{wt_str}', got: {list}"
+            !dir_name.is_empty() && list.contains(dir_name),
+            "worktree list should contain workspace dir name '{dir_name}', got: {list}"
         );
     }
 
