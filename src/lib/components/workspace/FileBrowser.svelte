@@ -1,6 +1,6 @@
 <script lang="ts">
   import { SvelteMap } from 'svelte/reactivity';
-  import { untrack } from 'svelte';
+  import { untrack, tick } from 'svelte';
   import { api } from '$lib/ipc';
   import { workspaceTabs } from '$lib/stores/workspace-tabs.svelte';
   import type { FileEntry } from '$lib/types';
@@ -56,6 +56,59 @@
       void loadChildren('');
     });
   });
+
+  // Reveal-on-select: when `selectedPath` flips to a non-null value
+  // (search hit, future jump-from-anywhere flows), expand every ancestor
+  // directory top-down, lazy-load any children that aren't cached yet,
+  // and scroll the matching row into view. Without this the FileBrowser
+  // would silently hide rows for any deeply-nested file because the
+  // ancestor `<details>` containers were never opened.
+  $effect(() => {
+    const target = selectedPath;
+    if (!target) return;
+    untrack(() => {
+      void revealPath(target);
+    });
+  });
+
+  async function revealPath(target: string): Promise<void> {
+    // Compute every ancestor directory path top-down. For
+    // `app/Http/Controllers/web.php` → ['app', 'app/Http',
+    // 'app/Http/Controllers']. The file itself isn't in the list — only
+    // the dirs that need to be expanded.
+    const parts = target.split('/').filter(Boolean);
+    const ancestors: string[] = [];
+    for (let i = 1; i < parts.length; i++) {
+      ancestors.push(parts.slice(0, i).join('/'));
+    }
+    const expandedSet = workspaceTabs.expanded(workspaceId);
+    for (const ancestor of ancestors) {
+      expandedSet.add(ancestor);
+      if (!children.has(ancestor)) {
+        await loadChildren(ancestor);
+      }
+    }
+    // After all loads, give Svelte a tick to render the now-deeper tree
+    // and then scroll the file row into view. `block: 'nearest'` keeps
+    // surrounding context visible if the row is already on-screen.
+    await tick();
+    const row = document.querySelector<HTMLElement>(
+      `[data-testid="file-row"][data-path="${cssEscape(target)}"]`
+    );
+    // jsdom and older browsers don't ship scrollIntoView — fall back
+    // gracefully so reveal still expands the tree even if the auto-scroll
+    // half no-ops.
+    if (row && typeof row.scrollIntoView === 'function') {
+      row.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  function cssEscape(s: string): string {
+    // CSS.escape isn't on every test runtime; do the bare minimum here so
+    // attribute selectors stay valid for the path strings we generate
+    // (alphanumerics + `/` + `.` + `-` + `_`).
+    return s.replace(/["\\]/g, '\\$&');
+  }
 
   async function handleDirClick(path: string): Promise<void> {
     const state = workspaceTabs.toggleExpanded(workspaceId, path);

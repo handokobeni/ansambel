@@ -142,11 +142,14 @@ test('Phase 2a: Ctrl+P search → click hit → switch to Files tab with selecti
 
   await page.getByTestId('search-hit').first().locator('button').click();
 
-  // Modal closes; we land on the Files tab. The FileBrowser at minimum
-  // has loaded the root listing — selectedPath is propagated as the
-  // aria-selected row when its own row is rendered. We verify the tab
-  // switched and the modal is gone; deeper auto-expand of ancestor
-  // directories is a follow-up nicety, not part of 2a's golden path.
+  // Modal closes; we land on the Files tab and the picked row is
+  // revealed — for nested matches FileBrowser auto-expands ancestor
+  // directories so the row is actually visible.
   await expect(page.getByTestId('search-modal')).toBeHidden();
   await expect(page.getByTestId('tab-files')).toHaveAttribute('aria-selected', 'true');
+  // The shim returns `src/app.ts` — its parent `src` should be expanded
+  // and the leaf row marked aria-selected.
+  await expect(page.locator('[data-path="src/app.ts"]')).toHaveAttribute('aria-selected', 'true', {
+    timeout: 5000,
+  });
 });

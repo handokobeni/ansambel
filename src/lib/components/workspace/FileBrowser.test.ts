@@ -143,4 +143,77 @@ describe('FileBrowser', () => {
     const rows = await findAllByTestId('file-row');
     expect(rows[0].getAttribute('aria-selected')).toBe('true');
   });
+
+  it('reveals a deeply-nested selectedPath by expanding every ancestor', async () => {
+    // Tree:
+    //   app/
+    //     Http/
+    //       Controllers/
+    //         web.php  ← target
+    //   README.md
+    responses.push([dir('app'), file('README.md')]);
+    responses.push([dir('Http', 'app/Http')]);
+    responses.push([dir('Controllers', 'app/Http/Controllers')]);
+    responses.push([file('web.php', 'app/Http/Controllers/web.php')]);
+    const { findAllByTestId, container } = render(FileBrowser, {
+      props: {
+        workspaceId: 'ws_reveal',
+        selectedPath: 'app/Http/Controllers/web.php',
+      },
+    });
+    // The deeply-nested file row appears only after every ancestor is
+    // expanded and lazy-loaded — proves the reveal walked the tree.
+    await waitFor(async () => {
+      const targetRow = container.querySelector(
+        '[data-testid="file-row"][data-path="app/Http/Controllers/web.php"]'
+      );
+      expect(targetRow).not.toBeNull();
+    });
+    // Sanity: the full chain is present (5 rows = 2 root + 3 nested).
+    const rows = await findAllByTestId('file-row');
+    expect(rows.length).toBeGreaterThanOrEqual(5);
+    // After reveal the expanded set contains every ancestor dir path.
+    expect(workspaceTabs.expanded('ws_reveal').has('app')).toBe(true);
+    expect(workspaceTabs.expanded('ws_reveal').has('app/Http')).toBe(true);
+    expect(workspaceTabs.expanded('ws_reveal').has('app/Http/Controllers')).toBe(true);
+    // The leaf file isn't a directory — it must NOT be in the expanded set.
+    expect(workspaceTabs.expanded('ws_reveal').has('app/Http/Controllers/web.php')).toBe(false);
+  });
+
+  it('skips ancestor reloads when children are already cached', async () => {
+    // Pre-populate the `app` directory by clicking it open first.
+    responses.push([dir('app')]);
+    responses.push([dir('Http', 'app/Http')]);
+    const { findAllByTestId, rerender } = render(FileBrowser, {
+      props: { workspaceId: 'ws_no_reload', selectedPath: null },
+    });
+    const rows = await findAllByTestId('file-row');
+    await fireEvent.click(rows[0].querySelector('button')!);
+    // Wait for the first-level expansion to actually surface — proves
+    // the cached state is in place before we trigger the reveal flow.
+    await waitFor(async () => {
+      const after = await findAllByTestId('file-row');
+      expect(after.length).toBeGreaterThan(1);
+    });
+
+    // Now stage only the LEAF response. If revealPath naively re-fetched
+    // every ancestor, the cached `app` and `app/Http` calls would drain
+    // the queue and cause a 404 here (or undefined response).
+    responses.push([file('routes.php', 'app/Http/routes.php')]);
+    await rerender({ workspaceId: 'ws_no_reload', selectedPath: 'app/Http/routes.php' });
+    await waitFor(() => {
+      expect(workspaceTabs.expanded('ws_no_reload').has('app')).toBe(true);
+      expect(workspaceTabs.expanded('ws_no_reload').has('app/Http')).toBe(true);
+    });
+    // `responses` should be drained to 0 — only the leaf was fetched.
+    expect(responses.length).toBe(0);
+  });
+
+  it('does not run reveal when selectedPath is null', async () => {
+    responses.push([dir('app')]);
+    render(FileBrowser, { props: { workspaceId: 'ws_no_target', selectedPath: null } });
+    // Wait for the root load to settle, then assert no ancestors expanded.
+    await waitFor(() => expect(responses.length).toBe(0));
+    expect(workspaceTabs.expanded('ws_no_target').size).toBe(0);
+  });
 });
