@@ -23,10 +23,50 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: vi.fn(),
 }));
 
+// xterm.js / FitAddon are heavy ESM modules with canvas/measurement
+// expectations jsdom can't satisfy. Mock the parts the Terminal component
+// actually calls.
+vi.mock('@xterm/xterm', () => {
+  class MockTerminal {
+    cols = 80;
+    rows = 24;
+    open = vi.fn();
+    write = vi.fn();
+    writeln = vi.fn();
+    loadAddon = vi.fn();
+    onData = vi.fn();
+    dispose = vi.fn();
+  }
+  return { Terminal: MockTerminal };
+});
+
+vi.mock('@xterm/addon-fit', () => {
+  class MockFitAddon {
+    fit = vi.fn();
+    activate = vi.fn();
+    dispose = vi.fn();
+  }
+  return { FitAddon: MockFitAddon };
+});
+
+class NoopResizeObserver {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+vi.stubGlobal('ResizeObserver', NoopResizeObserver);
+
 import { invoke } from '@tauri-apps/api/core';
 import WorkspaceView from './WorkspaceView.svelte';
 import { messages } from '$lib/stores/messages.svelte';
+import { editorTabs } from '$lib/stores/editor-tabs.svelte';
+import { workspaceTabs } from '$lib/stores/workspace-tabs.svelte';
+import { getToasts, removeToast } from '$lib/stores/toasts.svelte';
 import type { WorkspaceInfo } from '$lib/types';
+
+function clearToasts(): void {
+  for (const id of Array.from(getToasts().keys())) removeToast(id);
+}
 
 const ws = (overrides: Partial<WorkspaceInfo> = {}): WorkspaceInfo => ({
   id: 'ws_a',
@@ -46,12 +86,16 @@ const ws = (overrides: Partial<WorkspaceInfo> = {}): WorkspaceInfo => ({
 
 beforeEach(() => {
   messages.reset();
+  editorTabs.reset();
+  workspaceTabs.reset();
+  clearToasts();
   vi.mocked(invoke).mockReset();
   vi.mocked(invoke).mockResolvedValue(undefined);
 });
 
 afterEach(() => {
   vi.clearAllMocks();
+  clearToasts();
 });
 
 describe('WorkspaceView', () => {
@@ -546,12 +590,14 @@ describe('WorkspaceView', () => {
   // ── Phase 2a: tab integration ─────────────────────────────────────
 
   describe('tab strip integration', () => {
-    it('renders the tab strip with the three tabs', async () => {
+    it('renders the tab strip with all five tabs', async () => {
       const { findByTestId } = render(WorkspaceView, { props: { workspace: ws() } });
       expect(await findByTestId('tab-strip')).toBeTruthy();
       expect(await findByTestId('tab-chat')).toBeTruthy();
       expect(await findByTestId('tab-diff')).toBeTruthy();
       expect(await findByTestId('tab-files')).toBeTruthy();
+      expect(await findByTestId('tab-editor')).toBeTruthy();
+      expect(await findByTestId('tab-terminal')).toBeTruthy();
     });
 
     it('defaults to the chat tab on first open', async () => {
@@ -583,6 +629,130 @@ describe('WorkspaceView', () => {
       await waitFor(() => expect(filesTab.getAttribute('aria-selected')).toBe('true'));
       const filesPanel = container.querySelector('#tabpanel-files');
       expect(filesPanel?.classList.contains('hidden')).toBe(false);
+    });
+
+    it('the editor panel is mounted but hidden when other tabs are active', async () => {
+      const { container } = render(WorkspaceView, { props: { workspace: ws() } });
+      const editorPanel = container.querySelector('#tabpanel-editor');
+      // Editor panel must always be in the DOM — its CodeMirror instance
+      // and undo history are too expensive to throw away on tab switch.
+      expect(editorPanel).not.toBeNull();
+      expect(editorPanel?.classList.contains('hidden')).toBe(true);
+    });
+
+    it('the terminal panel is mounted but hidden when other tabs are active', async () => {
+      const { container } = render(WorkspaceView, { props: { workspace: ws() } });
+      const terminalPanel = container.querySelector('#tabpanel-terminal');
+      // Same hidden-mount rule — xterm.js scrollback survives tab switches.
+      expect(terminalPanel).not.toBeNull();
+      expect(terminalPanel?.classList.contains('hidden')).toBe(true);
+    });
+  });
+
+  // ── Phase 2b: file-open wiring ────────────────────────────────────
+
+  describe('FileBrowser onOpen wiring', () => {
+    it('reads file content via api.file.read when the user clicks a file', async () => {
+      vi.mocked(invoke).mockImplementation(async (cmd, args) => {
+        if (cmd === 'list_messages') return [];
+        if (cmd === 'workspace_files') return [{ name: 'a.ts', path: 'a.ts', kind: 'file' }];
+        if (cmd === 'file_read' && args) {
+          return {
+            content: 'console.log(1);',
+            is_binary: false,
+            size: 16,
+            sha1: 'sha-orig',
+          };
+        }
+        return undefined;
+      });
+      const { findByTestId, container } = render(WorkspaceView, { props: { workspace: ws() } });
+      // Switch to files tab so the FileBrowser renders rows.
+      const filesTab = await findByTestId('tab-files');
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(filesTab);
+      // Wait for the FileBrowser's first row.
+      const row = await waitFor(() => {
+        const r = container.querySelector('[data-testid="file-row"][data-path="a.ts"] button');
+        if (!r) throw new Error('row not found');
+        return r;
+      });
+      await fireEvent.click(row as Element);
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith('file_read', { workspaceId: 'ws_a', path: 'a.ts' });
+      });
+    });
+
+    it('after a successful read, the file is open in the editor-tabs store', async () => {
+      vi.mocked(invoke).mockImplementation(async (cmd, args) => {
+        if (cmd === 'list_messages') return [];
+        if (cmd === 'workspace_files') return [{ name: 'a.ts', path: 'a.ts', kind: 'file' }];
+        if (cmd === 'file_read' && args) {
+          return { content: 'hi', is_binary: false, size: 2, sha1: 'sha-a' };
+        }
+        return undefined;
+      });
+      const { findByTestId, container } = render(WorkspaceView, { props: { workspace: ws() } });
+      const filesTab = await findByTestId('tab-files');
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(filesTab);
+      const row = await waitFor(() => {
+        const r = container.querySelector('[data-testid="file-row"][data-path="a.ts"] button');
+        if (!r) throw new Error('row not found');
+        return r;
+      });
+      await fireEvent.click(row as Element);
+      await waitFor(() => {
+        const open = editorTabs.open('ws_a');
+        expect(open.find((f) => f.path === 'a.ts')?.content).toBe('hi');
+      });
+    });
+
+    it('after a successful read, the active tab switches to editor', async () => {
+      vi.mocked(invoke).mockImplementation(async (cmd) => {
+        if (cmd === 'list_messages') return [];
+        if (cmd === 'workspace_files') return [{ name: 'a.ts', path: 'a.ts', kind: 'file' }];
+        if (cmd === 'file_read') {
+          return { content: 'hi', is_binary: false, size: 2, sha1: 'sha-a' };
+        }
+        return undefined;
+      });
+      const { findByTestId, container } = render(WorkspaceView, { props: { workspace: ws() } });
+      const filesTab = await findByTestId('tab-files');
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(filesTab);
+      const row = await waitFor(() => {
+        const r = container.querySelector('[data-testid="file-row"][data-path="a.ts"] button');
+        if (!r) throw new Error('row not found');
+        return r;
+      });
+      await fireEvent.click(row as Element);
+      await waitFor(() => expect(workspaceTabs.active('ws_a')).toBe('editor'));
+    });
+
+    it('file_read failure surfaces a toast and leaves tabs untouched', async () => {
+      vi.mocked(invoke).mockImplementation(async (cmd) => {
+        if (cmd === 'list_messages') return [];
+        if (cmd === 'workspace_files') return [{ name: 'bad', path: 'bad', kind: 'file' }];
+        if (cmd === 'file_read') throw 'boom';
+        return undefined;
+      });
+      const { findByTestId, container } = render(WorkspaceView, { props: { workspace: ws() } });
+      const filesTab = await findByTestId('tab-files');
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(filesTab);
+      const row = await waitFor(() => {
+        const r = container.querySelector('[data-testid="file-row"][data-path="bad"] button');
+        if (!r) throw new Error('row not found');
+        return r;
+      });
+      await fireEvent.click(row as Element);
+      await waitFor(() => {
+        const toasts = Array.from(getToasts().values());
+        expect(toasts.some((t) => t.message.includes('boom'))).toBe(true);
+      });
+      // Stays on files tab — no half-baked editor switch.
+      expect(workspaceTabs.active('ws_a')).toBe('files');
     });
   });
 });

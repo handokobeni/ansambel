@@ -9,6 +9,9 @@
   import WorkspaceView from '$lib/components/workspace/WorkspaceView.svelte';
   import SearchModal from '$lib/components/workspace/SearchModal.svelte';
   import { workspaceTabs } from '$lib/stores/workspace-tabs.svelte';
+  import { editorTabs } from '$lib/stores/editor-tabs.svelte';
+  import { addToast } from '$lib/stores/toasts.svelte';
+  import { api } from '$lib/ipc';
   import type { SearchMode } from '$lib/types';
   import { repos } from '$lib/stores/repos.svelte';
   import { workspaces } from '$lib/stores/workspaces.svelte';
@@ -59,6 +62,15 @@
       if (!selectedWorkspace) return;
       searchMode = 'content';
       searchOpen = true;
+    });
+    // Phase 2b: workspace tab shortcuts. ⌃1-3 are claimed by mode/plan
+    // shortcuts above; tabs 4 (Editor) and 5 (Terminal) get keyboard
+    // bindings here. Both are no-ops without a selected workspace.
+    registry.register('ctrl+4', () => {
+      if (selectedWorkspace) workspaceTabs.setActive(selectedWorkspace.id, 'editor');
+    });
+    registry.register('ctrl+5', () => {
+      if (selectedWorkspace) workspaceTabs.setActive(selectedWorkspace.id, 'terminal');
     });
 
     await repos.load();
@@ -166,12 +178,19 @@
     workspaceId={selectedWorkspace?.id ?? null}
     initialMode={searchMode}
     onClose={() => (searchOpen = false)}
-    onJump={(path) => {
-      if (selectedWorkspace) {
-        // Switch to the Files tab and stamp the path so the FileBrowser
-        // highlights the row. Editor / line-jump arrives in Phase 2b.
-        workspaceTabs.setActive(selectedWorkspace.id, 'files');
-        highlightedFile = path;
+    onJump={async (path) => {
+      if (!selectedWorkspace) return;
+      // Stamp the path so the FileBrowser tree reveals it on its next
+      // render — useful when the user hops back to the Files tab.
+      // Line-number jump within the editor is deferred (CodeMirror
+      // selection effect needs a separate signal channel into Editor).
+      highlightedFile = path;
+      try {
+        const r = await api.file.read(selectedWorkspace.id, path);
+        editorTabs.openFile(selectedWorkspace.id, path, r.content, r.sha1, r.is_binary);
+        workspaceTabs.setActive(selectedWorkspace.id, 'editor');
+      } catch (err) {
+        addToast(`Open failed: ${String(err)}`, 'error');
       }
     }}
   />
