@@ -9,9 +9,6 @@
   import WorkspaceView from '$lib/components/workspace/WorkspaceView.svelte';
   import SearchModal from '$lib/components/workspace/SearchModal.svelte';
   import { workspaceTabs } from '$lib/stores/workspace-tabs.svelte';
-  import { editorTabs } from '$lib/stores/editor-tabs.svelte';
-  import { addToast } from '$lib/stores/toasts.svelte';
-  import { api } from '$lib/ipc';
   import type { SearchMode } from '$lib/types';
   import { repos } from '$lib/stores/repos.svelte';
   import { workspaces } from '$lib/stores/workspaces.svelte';
@@ -178,19 +175,13 @@
     workspaceId={selectedWorkspace?.id ?? null}
     initialMode={searchMode}
     onClose={() => (searchOpen = false)}
-    onJump={async (path) => {
-      if (!selectedWorkspace) return;
-      // Stamp the path so the FileBrowser tree reveals it on its next
-      // render — useful when the user hops back to the Files tab.
-      // Line-number jump within the editor is deferred (CodeMirror
-      // selection effect needs a separate signal channel into Editor).
-      highlightedFile = path;
-      try {
-        const r = await api.file.read(selectedWorkspace.id, path);
-        editorTabs.openFile(selectedWorkspace.id, path, r.content, r.sha1, r.is_binary);
-        workspaceTabs.setActive(selectedWorkspace.id, 'editor');
-      } catch (err) {
-        addToast(`Open failed: ${String(err)}`, 'error');
+    onJump={(path) => {
+      if (selectedWorkspace) {
+        // Switch to Files and stamp the path so the tree highlights and
+        // expands ancestors. The user clicks the row to actually open it
+        // in the Editor — the FileBrowser onOpen wire handles that.
+        workspaceTabs.setActive(selectedWorkspace.id, 'files');
+        highlightedFile = path;
       }
     }}
   />

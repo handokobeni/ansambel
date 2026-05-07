@@ -505,6 +505,73 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
             return undefined;
           }
 
+          // ── Phase 2b: interactive surfaces ──────────────────────
+          case 'file_read': {
+            const path = args.path as string;
+            // Tiny synthetic content keyed off the path so each open
+            // file has a distinguishable buffer in the editor tab.
+            const content = `// mock content for ${path}\nexport const x = 1;\n`;
+            return {
+              content,
+              is_binary: false,
+              size: content.length,
+              sha1: `sha-${path}`,
+            };
+          }
+
+          case 'file_write': {
+            const content = args.content as string;
+            // Echo a fresh sha1 so the editor stamps the buffer clean.
+            return {
+              sha1: `sha-after-${(args.path as string) ?? 'write'}`,
+              size: content.length,
+            };
+          }
+
+          case 'terminal_reattach':
+            // No live session in mock-mode → reject so frontend falls
+            // back to spawn (mirrors real-backend flow on first open).
+            throw 'no active terminal';
+
+          case 'terminal_spawn': {
+            const channel = args.channel as { onmessage?: (chunk: unknown) => void };
+            const wsId = args.workspaceId as string;
+            // Stash so a follow-up script_run can also stream into it.
+            (state as unknown as Record<string, unknown>)[`term_${wsId}`] = channel;
+            // Nudge a one-byte greeting so the frontend's xterm reflects
+            // a live shell within the test's wait window.
+            setTimeout(() => channel.onmessage?.({ kind: 'bytes', bytes: [36, 32] }), 5);
+            return undefined;
+          }
+
+          case 'terminal_write':
+            return undefined;
+
+          case 'terminal_resize':
+            return undefined;
+
+          case 'terminal_kill':
+            return undefined;
+
+          case 'script_list':
+            // Two synthetic scripts so the picker has something to render.
+            return [
+              { id: 'sc_dev', name: 'dev', command: 'bun run dev' },
+              { id: 'sc_test', name: 'test', command: 'bun test' },
+            ];
+
+          case 'script_set':
+            return undefined;
+
+          case 'script_run': {
+            const channel = args.channel as { onmessage?: (chunk: unknown) => void };
+            // Output a tiny banner + an "exited" terminator so the test
+            // can assert both the bytes and the exit lifecycle.
+            setTimeout(() => channel.onmessage?.({ kind: 'bytes', bytes: [104, 105] }), 5);
+            setTimeout(() => channel.onmessage?.({ kind: 'exited', code: 0 }), 10);
+            return undefined;
+          }
+
           case 'plugin:dialog|open':
             return dialogOpenPath ?? null;
 
