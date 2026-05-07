@@ -205,8 +205,44 @@ export type SearchHit =
   | { kind: 'ripgrep_unavailable'; reason: string }
   | { kind: 'eof' };
 
-/** Tab id within the per-workspace tab strip. */
-export type WorkspaceTabId = 'chat' | 'diff' | 'files';
+/** Tab id within the per-workspace tab strip. Phase 2b adds 'editor'
+ *  and 'terminal' to the read-only Phase 2a triple. */
+export type WorkspaceTabId = 'chat' | 'diff' | 'files' | 'editor' | 'terminal';
+
+// --- Phase 2b: interactive surfaces ----------------------------------
+
+/** A user-configured script per repo. The Terminal tab's script picker
+ *  reads this list; clicking a script invokes `script_run` which streams
+ *  output as TerminalChunks into the same buffer the interactive shell
+ *  writes to. */
+export type RepoScript = {
+  id: string;
+  name: string;
+  command: string;
+};
+
+/** Streamed terminal output. xterm.js-shaped: bytes (so ANSI escapes
+ *  arrive intact, no UTF-8 round-trip) plus a single Exited terminator. */
+export type TerminalChunk =
+  | { kind: 'bytes'; bytes: number[] }
+  | { kind: 'exited'; code: number | null };
+
+/** Editor file_read response — content + binary detection + sha1 for
+ *  race-detect on save. */
+export type FileReadResponse = {
+  content: string;
+  is_binary: boolean;
+  size: number;
+  /** Frontend round-trips this back via `file_write({ expected_sha1 })`
+   *  so the backend can reject when the file was changed under us. */
+  sha1: string;
+};
+
+/** Editor file_write response — sha1 of the bytes that were written. */
+export type FileWriteResponse = {
+  sha1: string;
+  size: number;
+};
 
 export type TurnState = {
   startedAt: number;
