@@ -32,6 +32,7 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 directories = "5"
 nanoid = "0.4"
 portable-pty = "0.8"
+ignore = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

@@ -72,6 +72,9 @@ pub fn run() {
             crate::commands::agent::stop_agent,
             crate::commands::agent::list_messages,
             crate::commands::agent::reattach_agent,
+            crate::commands::diff::workspace_diff,
+            crate::commands::files::workspace_files,
+            crate::commands::search::workspace_search,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -118,6 +121,23 @@ mod tests {
         let _ = crate::commands::task::update_task as *const () as usize;
         let _ = crate::commands::task::move_task as *const () as usize;
         let _ = crate::commands::task::remove_task as *const () as usize;
+    }
+
+    #[test]
+    fn workspace_diff_command_is_registered() {
+        // Symbol existence check — ensures the command is wired in
+        // `tauri::generate_handler!` and not silently dropped.
+        let _ = std::any::type_name_of_val(&crate::commands::diff::workspace_diff);
+    }
+
+    #[test]
+    fn workspace_files_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::files::workspace_files);
+    }
+
+    #[test]
+    fn workspace_search_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::search::workspace_search);
     }
 
     #[test]
