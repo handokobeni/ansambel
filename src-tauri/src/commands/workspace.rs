@@ -2,9 +2,106 @@ use crate::error::{AppError, Result};
 use crate::ids::workspace_id;
 use crate::persistence::workspaces::save_workspaces;
 use crate::state::{AppState, KanbanColumn, WorkspaceInfo, WorkspaceStatus};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
+
+// ── Random workspace names ───────────────────────────────────────────
+//
+// Identical surface to korlap so worktree directory names stay
+// human-readable on the filesystem. Branch names use the `ansambel/`
+// prefix to make their origin obvious in `git branch` listings.
+
+const ADJECTIVES: &[&str] = &[
+    "swift", "calm", "bright", "gentle", "quiet", "bold", "keen", "warm", "cool", "wild", "deep",
+    "soft", "sharp", "fresh", "still", "true", "pure", "rare", "wise", "fair", "clear", "proud",
+    "quick", "neat", "slim", "vast", "vivid", "lucid", "amber", "misty",
+];
+
+const NOUNS: &[&str] = &[
+    "oak", "elm", "pine", "fern", "moss", "reed", "sage", "mint", "jade", "onyx", "ruby", "opal",
+    "hawk", "dove", "wolf", "bear", "fox", "lynx", "hare", "wren", "lark", "crow", "orca", "puma",
+    "coral", "pearl", "ember", "dusk", "dawn", "vale",
+];
+
+const BRANCH_PREFIX: &str = "ansambel";
+const MAX_NAME_RETRIES: u32 = 10;
+
+/// Hash-seeded pick of an adjective-noun pair. Cheap, sync, and good
+/// enough for workspace identifiers — collisions are caught and retried
+/// by the caller via [`generate_unique_workspace_name`].
+fn random_workspace_name() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    let mut hasher = DefaultHasher::new();
+    seed.hash(&mut hasher);
+    let h = hasher.finish();
+
+    let adj = ADJECTIVES[(h as usize) % ADJECTIVES.len()];
+    let noun = NOUNS[((h >> 16) as usize) % NOUNS.len()];
+    format!("{adj}-{noun}")
+}
+
+/// Try up to [`MAX_NAME_RETRIES`] random names; on conflict (branch
+/// already exists *or* worktree folder exists) append a short
+/// disambiguator and try again.
+///
+/// Returns `(dir_name, branch)` where `branch = ansambel/<dir_name>`.
+fn generate_unique_workspace_name(
+    repo_path: &Path,
+    workspace_root: &Path,
+) -> Result<(String, String)> {
+    let mut name = random_workspace_name();
+    for attempt in 0..MAX_NAME_RETRIES {
+        let branch_candidate = format!("{BRANCH_PREFIX}/{name}");
+        let branch_exists = git_branch_exists(repo_path, &branch_candidate)?;
+        let folder_exists = workspace_root.join(&name).exists();
+
+        if !branch_exists && !folder_exists {
+            return Ok((name, branch_candidate));
+        }
+
+        if attempt + 1 == MAX_NAME_RETRIES {
+            return Err(AppError::Other(format!(
+                "Could not generate a unique workspace name after {MAX_NAME_RETRIES} attempts"
+            )));
+        }
+
+        // Disambiguate by appending the first 4 chars of a fresh ID. We
+        // pull from `workspace_id()` rather than minting another
+        // `random_workspace_name` so the suffix is guaranteed-distinct
+        // even if the hash clock granularity collides.
+        let suffix = workspace_id();
+        let suffix = suffix.split('_').next_back().unwrap_or(&suffix);
+        let suffix = &suffix[..suffix.len().min(4)];
+        name = format!("{}-{suffix}", random_workspace_name());
+    }
+    // Loop is guaranteed to either return Ok or Err above.
+    unreachable!("retry loop must terminate within MAX_NAME_RETRIES");
+}
+
+/// Returns true if `branch` resolves via `git rev-parse --verify`. Used
+/// both to gate custom branch names and to drive the auto-name retry
+/// loop. Surfaces I/O errors rather than swallowing them so the caller
+/// can produce a descriptive error.
+fn git_branch_exists(repo_path: &Path, branch: &str) -> Result<bool> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", branch])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| AppError::Command {
+            cmd: "git rev-parse".into(),
+            msg: e.to_string(),
+        })?;
+    Ok(output.status.success())
+}
 
 // ── Public Tauri commands ────────────────────────────────────────────
 
@@ -93,18 +190,31 @@ pub(crate) async fn create_workspace_inner(
     };
 
     let ws_id = workspace_id();
-    let worktree_path = crate::platform::paths::worktree_dir(&data_dir, &ws_id);
+    let workspace_root = data_dir.join("workspaces");
 
-    let (branch, custom_branch) = if let Some(ref custom) = branch_name {
-        if custom.trim().is_empty() {
+    // Resolve `(dir_name, branch, custom)` triple. Custom-branch users
+    // get an explicit duplicate check up front; auto-branch generation
+    // picks a fresh adjective-noun and retries on conflict.
+    let (dir_name, branch, custom_branch) = if let Some(ref custom) = branch_name {
+        let custom = custom.trim();
+        if custom.is_empty() {
             return Err(AppError::InvalidState("Branch name cannot be empty".into()));
         }
-        (custom.trim().to_string(), true)
+        if git_branch_exists(&repo_path, custom)? {
+            return Err(AppError::Git(format!("Branch '{custom}' already exists")));
+        }
+        // Decouple the on-disk folder from the branch slug — branches
+        // commonly contain `/` which would create a nested directory.
+        let dir = random_workspace_name();
+        (dir, custom.to_string(), true)
     } else {
-        (format!("ws/{}", ws_id), false)
+        let (name, branch) = generate_unique_workspace_name(&repo_path, &workspace_root)?;
+        (name, branch, false)
     };
 
-    // Create parent dir for the worktree
+    let worktree_path = workspace_root.join(&dir_name);
+
+    // Create parent dir for the worktree.
     if let Some(parent) = worktree_path.parent() {
         std::fs::create_dir_all(parent).map_err(AppError::Io)?;
     }
@@ -129,10 +239,7 @@ pub(crate) async fn create_workspace_inner(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(AppError::Git(format!(
-            "git worktree add failed: {}",
-            stderr
-        )));
+        return Err(AppError::Git(format!("git worktree add failed: {stderr}")));
     }
 
     let now = now_unix();
@@ -154,7 +261,7 @@ pub(crate) async fn create_workspace_inner(
     let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
     st.workspaces.insert(ws_id, ws.clone());
     save_workspaces(&data_dir, &st.workspaces)?;
-    tracing::info!(workspace_id = %ws.id, branch = %ws.branch, "Created workspace");
+    tracing::info!(workspace_id = %ws.id, branch = %ws.branch, dir = %dir_name, "Created workspace");
     Ok(ws)
 }
 
@@ -173,8 +280,13 @@ async fn remove_workspace_inner(
             .repos
             .get(&ws.repo_id)
             .ok_or_else(|| AppError::NotFound(format!("repo '{}'", ws.repo_id)))?;
-        let wt_path = crate::platform::paths::worktree_dir(&data_dir, &ws_id);
-        (wt_path, repo.path.clone(), ws.branch.clone())
+        // Use the path stored on WorkspaceInfo: with random dir naming
+        // we can't reconstruct it from `ws_id` alone any more.
+        (
+            ws.worktree_dir.clone(),
+            repo.path.clone(),
+            ws.branch.clone(),
+        )
     };
 
     // git worktree remove --force <path>
@@ -266,6 +378,84 @@ mod tests {
         (local, remote)
     }
 
+    // ── Random naming helpers ────────────────────────────────────────
+
+    #[test]
+    fn random_workspace_name_uses_adjective_noun_format() {
+        let name = random_workspace_name();
+        let (adj, noun) = name.split_once('-').expect("name should have a '-'");
+        assert!(
+            ADJECTIVES.contains(&adj),
+            "adjective '{adj}' not in ADJECTIVES"
+        );
+        assert!(NOUNS.contains(&noun), "noun '{noun}' not in NOUNS");
+    }
+
+    #[test]
+    fn generate_unique_workspace_name_returns_branch_with_ansambel_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let workspace_root = tmp.path().join("workspaces");
+        let (_, branch) = generate_unique_workspace_name(&local, &workspace_root).unwrap();
+        assert!(
+            branch.starts_with("ansambel/"),
+            "branch should start with ansambel/, got {branch}"
+        );
+    }
+
+    #[test]
+    fn generate_unique_workspace_name_skips_pre_existing_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let workspace_root = tmp.path().join("workspaces");
+
+        // Pre-create one of the candidate branches by hand. The
+        // generator should sidestep it (suffix on second attempt). We
+        // can't predict which adjective-noun the RNG will pick, so we
+        // pre-create *all* of them — making the first attempt always
+        // collide and forcing the suffix branch.
+        for adj in ADJECTIVES {
+            for noun in NOUNS {
+                let _ = Command::new("git")
+                    .args(["branch", &format!("{BRANCH_PREFIX}/{adj}-{noun}")])
+                    .current_dir(&local)
+                    .output();
+            }
+        }
+
+        let (name, branch) = generate_unique_workspace_name(&local, &workspace_root).unwrap();
+        // The first attempt's `<adj>-<noun>` always collides, so the
+        // resolver must have appended a 4-char suffix.
+        let parts: Vec<&str> = name.split('-').collect();
+        assert!(
+            parts.len() >= 3,
+            "expected suffix-disambiguated name, got '{name}'"
+        );
+        assert!(branch.starts_with("ansambel/"));
+        assert_eq!(branch, format!("ansambel/{name}"));
+    }
+
+    #[test]
+    fn git_branch_exists_returns_false_for_unknown_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        assert!(!git_branch_exists(&local, "no/such/branch").unwrap());
+    }
+
+    #[test]
+    fn git_branch_exists_returns_true_for_existing_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        Command::new("git")
+            .args(["branch", "feature/preexisting"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        assert!(git_branch_exists(&local, "feature/preexisting").unwrap());
+    }
+
+    // ── create_workspace_inner ───────────────────────────────────────
+
     #[tokio::test]
     async fn create_workspace_creates_worktree_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -293,12 +483,14 @@ mod tests {
         .await
         .unwrap();
 
-        let worktree_path = crate::platform::paths::worktree_dir(&data, &ws.id);
         assert!(
-            worktree_path.exists(),
+            ws.worktree_dir.exists(),
             "Worktree dir should exist at {}",
-            worktree_path.display()
+            ws.worktree_dir.display()
         );
+        // Folder name is human-readable, not the workspace id.
+        assert!(ws.worktree_dir.starts_with(data.join("workspaces")));
+        assert!(!ws.worktree_dir.ends_with(&ws.id));
     }
 
     #[tokio::test]
@@ -334,15 +526,15 @@ mod tests {
             .output()
             .unwrap();
         let list = String::from_utf8_lossy(&out.stdout);
+        let wt_str = ws.worktree_dir.to_string_lossy();
         assert!(
-            list.contains(&ws.id),
-            "worktree list should contain ws id: {}",
-            ws.id
+            list.contains(wt_str.as_ref()),
+            "worktree list should contain workspace path '{wt_str}', got: {list}"
         );
     }
 
     #[tokio::test]
-    async fn create_workspace_auto_branch_has_ws_prefix() {
+    async fn create_workspace_auto_branch_uses_ansambel_prefix() {
         let tmp = tempfile::tempdir().unwrap();
         let (local, _) = init_repo_with_remote(&tmp);
         let data = tmp.path().join("data");
@@ -369,15 +561,22 @@ mod tests {
         .unwrap();
 
         assert!(
-            ws.branch.starts_with("ws/"),
-            "branch should start with ws/, got {}",
+            ws.branch.starts_with("ansambel/"),
+            "branch should start with ansambel/, got {}",
             ws.branch
         );
         assert!(!ws.custom_branch);
+        // Branch slug after the prefix should be parseable as
+        // <adjective>-<noun> so it stays human-readable.
+        let slug = ws.branch.strip_prefix("ansambel/").unwrap();
+        assert!(
+            slug.contains('-'),
+            "expected adjective-noun slug, got {slug}"
+        );
     }
 
     #[tokio::test]
-    async fn create_workspace_custom_branch_sets_flag() {
+    async fn create_workspace_custom_branch_sets_flag_and_uses_random_dir_name() {
         let tmp = tempfile::tempdir().unwrap();
         let (local, _) = init_repo_with_remote(&tmp);
         let data = tmp.path().join("data");
@@ -405,6 +604,94 @@ mod tests {
 
         assert!(ws.custom_branch);
         assert_eq!(ws.branch, "feat/custom-branch");
+        // Folder must NOT contain the slash from the branch name —
+        // otherwise we'd create a nested `feat/custom-branch/` tree on
+        // disk which `git worktree remove` later struggles with.
+        let last = ws
+            .worktree_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        assert!(!last.contains('/'));
+        assert!(
+            last.contains('-'),
+            "expected adjective-noun dir, got {last}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_workspace_custom_branch_rejects_existing_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+
+        // Pre-create the branch so the pre-check trips.
+        Command::new("git")
+            .args(["branch", "feature/already-here"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repo = crate::commands::repo::add_repo_inner(
+            local.to_str().unwrap().to_string(),
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+
+        let err = create_workspace_inner(
+            repo.id,
+            "Conflict".into(),
+            String::new(),
+            Some("feature/already-here".into()),
+            data,
+            state,
+        )
+        .await
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("already exists"),
+            "expected 'already exists' in error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_workspace_rejects_empty_custom_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repo = crate::commands::repo::add_repo_inner(
+            local.to_str().unwrap().to_string(),
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+
+        let err = create_workspace_inner(
+            repo.id,
+            "Empty branch".into(),
+            String::new(),
+            Some("   ".into()),
+            data,
+            state,
+        )
+        .await
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("empty"),
+            "expected 'empty' in error, got: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -451,14 +738,17 @@ mod tests {
         .await
         .unwrap();
 
-        let wt_path = crate::platform::paths::worktree_dir(&data, &ws.id);
-        assert!(wt_path.exists());
+        assert!(ws.worktree_dir.exists());
 
         remove_workspace_inner(ws.id.clone(), data.clone(), Arc::clone(&state))
             .await
             .unwrap();
 
-        assert!(!wt_path.exists(), "Worktree dir should be removed");
+        assert!(
+            !ws.worktree_dir.exists(),
+            "Worktree dir should be removed at {}",
+            ws.worktree_dir.display()
+        );
         let st = state.lock().unwrap();
         assert!(!st.workspaces.contains_key(&ws.id));
     }

@@ -243,7 +243,10 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
               // Auto-create workspace when moved to in_progress (mirrors backend side effect)
               if (column === 'in_progress' && !task.workspace_id) {
                 const wsId = makeWsId();
-                const branchName = `ws/${wsId}`;
+                // Mirror backend: branches use the `ansambel/` prefix
+                // with a random-ish slug so E2E assertions can rely on
+                // the same convention as production.
+                const branchName = `ansambel/${wsId}`;
                 const repo = state.repos.find((r) => r.id === task.repo_id);
                 const baseBranch = repo?.default_branch ?? 'main';
                 const ws = {
