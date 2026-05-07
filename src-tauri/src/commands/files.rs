@@ -49,7 +49,8 @@ pub fn workspace_files_inner(
         return Err(AppError::PathNotFound(worktree_dir));
     }
 
-    let target = resolve_within_worktree(&worktree_dir, rel_path.unwrap_or(""))?;
+    let rel_path_str = rel_path.unwrap_or("");
+    let target = resolve_within_worktree(&worktree_dir, rel_path_str)?;
     if !target.is_dir() {
         return Err(AppError::Other(format!(
             "not a directory: {}",
@@ -59,6 +60,15 @@ pub fn workspace_files_inner(
 
     let canonical_root = dunce::canonicalize(&worktree_dir)
         .map_err(|e| AppError::Other(format!("canonicalize worktree: {e}")))?;
+
+    // The user-facing path of every result is `<rel_path>/<basename>` —
+    // normalized to forward slashes. Computing it from `target` (which we
+    // already canonicalized) plus the basename sidesteps the
+    // strip_prefix-vs-canonicalization mismatch we otherwise hit on
+    // Windows when the worktree path contains a tempdir short name like
+    // `RUNNER~1` that the entry's path shows as `runneradmin`.
+    let rel_prefix = rel_path_str.replace('\\', "/");
+    let rel_prefix = rel_prefix.trim_end_matches('/').to_string();
 
     let mut entries: Vec<FileEntry> = Vec::new();
     let walker = ignore::WalkBuilder::new(&target)
@@ -85,23 +95,20 @@ pub fn workspace_files_inner(
         if !canonical.starts_with(&canonical_root) {
             continue;
         }
-        let rel = abs
-            .strip_prefix(&worktree_dir)
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|_| PathBuf::from(entry.file_name()));
-        let name = entry
-            .file_name()
-            .to_string_lossy()
-            .trim_start_matches('/')
-            .to_string();
+        let basename = entry.file_name().to_string_lossy().to_string();
+        let path = if rel_prefix.is_empty() {
+            basename.clone()
+        } else {
+            format!("{rel_prefix}/{basename}")
+        };
         let kind = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             FileKind::Dir
         } else {
             FileKind::File
         };
         entries.push(FileEntry {
-            name,
-            path: to_forward_slash(&rel),
+            name: basename,
+            path,
             kind,
         });
     }
@@ -135,11 +142,25 @@ pub async fn workspace_files(
 // ── helpers ─────────────────────────────────────────────────────────
 
 fn resolve_within_worktree(worktree: &Path, rel: &str) -> Result<PathBuf> {
+    // Reject obviously-absolute inputs *before* the join. On Unix
+    // `PathBuf::join("/etc")` resets to "/etc"; on Windows it instead
+    // becomes `<drive>:/etc` which then fails canonicalize with
+    // path-not-found, masking the real "outside worktree" intent. Catching
+    // the leading slash + drive-letter shapes here keeps the error
+    // message the same on every OS.
+    if rel.starts_with('/') || rel.starts_with('\\') {
+        return Err(AppError::Other(format!("path '{rel}' is outside worktree")));
+    }
+    if rel.len() >= 2 {
+        let mut chars = rel.chars();
+        let c0 = chars.next().unwrap();
+        let c1 = chars.next().unwrap();
+        if c0.is_ascii_alphabetic() && c1 == ':' {
+            return Err(AppError::Other(format!("path '{rel}' is outside worktree")));
+        }
+    }
     let normalized = rel.replace('\\', "/");
-    if normalized
-        .split('/')
-        .any(|seg| seg == ".." || seg.starts_with('/'))
-    {
+    if normalized.split('/').any(|seg| seg == "..") {
         return Err(AppError::Other(format!("path '{rel}' is outside worktree")));
     }
     let joined = if normalized.is_empty() {
@@ -155,13 +176,6 @@ fn resolve_within_worktree(worktree: &Path, rel: &str) -> Result<PathBuf> {
         return Err(AppError::Other(format!("path '{rel}' is outside worktree")));
     }
     Ok(canonical_joined)
-}
-
-fn to_forward_slash(p: &Path) -> String {
-    p.components()
-        .map(|c| c.as_os_str().to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-        .join("/")
 }
 
 #[cfg(test)]
@@ -290,6 +304,32 @@ mod tests {
     }
 
     #[test]
+    fn workspace_files_inner_rejects_windows_drive_letter() {
+        // Regression guard for the Windows CI failure: `C:\etc` would
+        // canonicalize to a not-found path on Linux and a drive-relative
+        // path on Windows, both of which masked the "outside worktree"
+        // message. The drive-letter shape must be rejected up-front.
+        let (_tmp, wt) = make_worktree();
+        let state = make_state("ws_drive", &wt);
+        let err = workspace_files_inner("ws_drive", Some("C:\\Windows"), state).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("outside worktree"),
+            "expected 'outside worktree', got: {err}"
+        );
+    }
+
+    #[test]
+    fn workspace_files_inner_rejects_backslash_absolute() {
+        let (_tmp, wt) = make_worktree();
+        let state = make_state("ws_bs", &wt);
+        let err = workspace_files_inner("ws_bs", Some("\\etc\\hosts"), state).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("outside worktree"),
+            "expected 'outside worktree', got: {err}"
+        );
+    }
+
+    #[test]
     fn workspace_files_inner_returns_error_for_invalid_workspace_id() {
         let state = Arc::new(Mutex::new(AppState::default()));
         let err = workspace_files_inner("ws_missing", None, state).unwrap_err();
@@ -322,8 +362,17 @@ mod tests {
     }
 
     #[test]
-    fn to_forward_slash_uses_unix_separator_on_every_os() {
-        let p = Path::new("a").join("b").join("c.txt");
-        assert_eq!(to_forward_slash(&p), "a/b/c.txt");
+    fn workspace_files_inner_uses_forward_slash_in_returned_paths() {
+        // Regression guard: even after the refactor that drops the
+        // dedicated `to_forward_slash` helper, returned paths must use
+        // `/` (not `\`) on every OS.
+        let (_tmp, wt) = make_worktree();
+        std::fs::create_dir_all(wt.join("a")).unwrap();
+        std::fs::write(wt.join("a/b.txt"), b"x").unwrap();
+        let state = make_state("ws_slash", &wt);
+        let entries = workspace_files_inner("ws_slash", Some("a"), state).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "a/b.txt");
+        assert!(!entries[0].path.contains('\\'));
     }
 }

@@ -136,6 +136,23 @@ describe('parseUnifiedDiff', () => {
     expect(out.files[0].hunks).toHaveLength(0);
   });
 
+  it('handles a malformed `diff --git` header by recording a placeholder file', () => {
+    // Defensive: a header that doesn't match `a/<x> b/<y>` shouldn't throw.
+    // Subsequent --- / +++ lines still recover the old/new paths.
+    const text = [
+      'diff --git missing-prefix',
+      '--- a/foo',
+      '+++ b/foo',
+      '@@ -1 +1 @@',
+      '-x',
+      '+y',
+      '',
+    ].join('\n');
+    const out = parseUnifiedDiff(text);
+    expect(out.files).toHaveLength(1);
+    expect(out.files[0].path).toBe('foo');
+  });
+
   it('omits oldLines/newLines defaults of 1 when shorthand is used', () => {
     const text = [
       'diff --git a/foo b/foo',

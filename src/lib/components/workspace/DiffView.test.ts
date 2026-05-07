@@ -137,6 +137,58 @@ describe('DiffView', () => {
     });
   });
 
+  it('renders context, add, del, and meta lines with their respective row kinds', async () => {
+    // Drives the lineBg/lineSign branches for every DiffLineKind so the
+    // styling logic for `ctx`, `del`, `add`, and `meta` is all exercised
+    // in one render.
+    const { findAllByTestId } = render(DiffView, { props: { workspaceId: 'ws_kinds' } });
+    await waitFor(() => expect(lastDiffChannel).not.toBeNull());
+    send({
+      kind: 'text',
+      text: [
+        'diff --git a/foo b/foo',
+        '--- a/foo',
+        '+++ b/foo',
+        '@@ -1,3 +1,3 @@',
+        ' ctx-line',
+        '-removed',
+        '+added',
+        '\\ No newline at end of file',
+        '',
+      ].join('\n'),
+    });
+    send({ kind: 'eof' });
+    const lines = await findAllByTestId('diff-line');
+    const kinds = lines.map((el) => el.getAttribute('data-line-kind'));
+    expect(kinds).toEqual(['ctx', 'del', 'add', 'meta']);
+  });
+
+  it('renders the binary-file marker for files the parser flags as binary', async () => {
+    // Drives the `{#if file.isBinary}` branch in the template so the
+    // "Binary file — diff not shown." message gets rendered.
+    const { findByText } = render(DiffView, { props: { workspaceId: 'ws_bin' } });
+    await waitFor(() => expect(lastDiffChannel).not.toBeNull());
+    send({
+      kind: 'text',
+      text: ['diff --git a/img.png b/img.png', 'Binary file img.png not shown', ''].join('\n'),
+    });
+    send({ kind: 'eof' });
+    expect(await findByText(/Binary file/)).toBeTruthy();
+  });
+
+  it('renders the error banner when the invoke promise rejects', async () => {
+    vi.mocked(invoke).mockImplementationOnce(((cmd: string, args?: unknown) => {
+      const a = args as Record<string, unknown> | undefined;
+      if (cmd === 'workspace_diff' && a && 'channel' in a) {
+        lastDiffChannel = a.channel as { onmessage?: (chunk: DiffChunk) => void };
+      }
+      return Promise.reject('git binary not found');
+    }) as never);
+    const { findByTestId } = render(DiffView, { props: { workspaceId: 'ws_reject' } });
+    const banner = await findByTestId('diff-error');
+    expect(banner.textContent).toMatch(/git binary not found/);
+  });
+
   it('drops chunks from a stale generation after refresh', async () => {
     const { getByTestId, queryByTestId, findByTestId } = render(DiffView, {
       props: { workspaceId: 'ws_stale' },

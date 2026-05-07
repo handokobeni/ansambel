@@ -235,6 +235,29 @@ describe('SearchModal', () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 
+  it('shows the unavailable banner when the invoke promise rejects', async () => {
+    vi.mocked(invoke).mockImplementationOnce(((cmd: string, args?: unknown) => {
+      const a = args as Record<string, unknown> | undefined;
+      if (cmd === 'workspace_search' && a) {
+        lastSearchChannel = a.channel as { onmessage?: (hit: SearchHit) => void };
+      }
+      return Promise.reject('search backend offline');
+    }) as never);
+    const { findByTestId } = render(SearchModal, {
+      props: {
+        open: true,
+        workspaceId: 'ws_reject',
+        onClose: () => {},
+        onJump: () => {},
+      },
+    });
+    const input = (await findByTestId('search-input')) as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'foo' } });
+    await fireEvent.submit(input.closest('form')!);
+    const banner = await findByTestId('search-unavailable');
+    expect(banner.textContent).toMatch(/search backend offline/);
+  });
+
   it('drops chunks from a stale search after a re-submit', async () => {
     const { findByTestId, queryByTestId } = render(SearchModal, {
       props: {
