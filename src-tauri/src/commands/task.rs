@@ -312,6 +312,7 @@ mod tests {
                 default_branch: "main".into(),
                 created_at: 1_776_000_000,
                 updated_at: 1_776_000_000,
+                scripts: Vec::new(),
             },
         );
         Arc::new(Mutex::new(state))

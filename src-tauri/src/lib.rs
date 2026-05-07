@@ -75,6 +75,8 @@ pub fn run() {
             crate::commands::diff::workspace_diff,
             crate::commands::files::workspace_files,
             crate::commands::search::workspace_search,
+            crate::commands::scripts::script_list,
+            crate::commands::scripts::script_set,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -138,6 +140,16 @@ mod tests {
     #[test]
     fn workspace_search_command_is_registered() {
         let _ = std::any::type_name_of_val(&crate::commands::search::workspace_search);
+    }
+
+    #[test]
+    fn script_list_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::scripts::script_list);
+    }
+
+    #[test]
+    fn script_set_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::scripts::script_set);
     }
 
     #[test]

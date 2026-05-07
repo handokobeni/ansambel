@@ -97,6 +97,18 @@ pub struct AppState {
     pub settings: AppSettings,
 }
 
+/// A user-configured script per repo. The script runner picks one of
+/// these and spawns the command via PTY rooted at the worktree dir.
+/// Phase 2b ships read-only listing; the set command is wired so a
+/// future settings UI (Phase 8) can mutate without further backend
+/// work.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RepoScript {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RepoInfo {
     pub id: String,
@@ -106,6 +118,11 @@ pub struct RepoInfo {
     pub default_branch: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Per-repo scripts surfaced in the workspace Terminal tab. Empty
+    /// for repos persisted before Phase 2b — the `#[serde(default)]`
+    /// keeps older `repos.json` files loading without migration.
+    #[serde(default)]
+    pub scripts: Vec<RepoScript>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -489,6 +506,11 @@ mod tests {
             default_branch: "main".into(),
             created_at: 1_776_000_000,
             updated_at: 1_776_099_000,
+            scripts: vec![RepoScript {
+                id: "sc_test".into(),
+                name: "Run tests".into(),
+                command: "bun test".into(),
+            }],
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: RepoInfo = serde_json::from_str(&json).unwrap();
@@ -505,6 +527,7 @@ mod tests {
             default_branch: "main".into(),
             created_at: 0,
             updated_at: 0,
+            scripts: Vec::new(),
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"gh_profile\":null"));

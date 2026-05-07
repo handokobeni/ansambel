@@ -5,6 +5,7 @@ pub mod diff;
 pub mod files;
 pub mod helpers;
 pub mod repo;
+pub mod scripts;
 pub mod search;
 pub mod system;
 pub mod task;

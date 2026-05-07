@@ -111,6 +111,7 @@ pub(crate) async fn add_repo_inner(
         default_branch,
         created_at: now,
         updated_at: now,
+        scripts: Vec::new(),
     };
 
     st.repos.insert(id, repo.clone());
