@@ -88,7 +88,12 @@
 
     const channel = new Channel<TerminalChunk>();
     channel.onmessage = (chunk: TerminalChunk) => {
-      if (!term) return;
+      // eslint-disable-next-line no-console
+      console.log('[terminal] chunk', chunk);
+      if (!term) {
+        console.warn('[terminal] chunk dropped: term is undefined');
+        return;
+      }
       if (chunk.kind === 'bytes') {
         // xterm.js's write API accepts both string and Uint8Array. We
         // get a JSON number array from the IPC layer; normalize.
