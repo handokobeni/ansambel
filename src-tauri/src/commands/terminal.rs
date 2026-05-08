@@ -99,6 +99,11 @@ pub fn spawn_terminal_inner(
         Arc::clone(&cancel),
         Arc::clone(&session),
     );
+    // Windows ConPTY doesn't reliably deliver EOF when the child exits
+    // cleanly (e.g., user types `exit\n`). The watchdog polls
+    // `try_wait` and force-kills the PTY when the child has exited so
+    // the reader's blocking read returns and the Exited chunk fires.
+    spawn_exit_watchdog(Arc::clone(&session), Arc::clone(&cancel));
 
     let handle = TerminalHandle {
         workspace_id: workspace_id.into(),
@@ -265,6 +270,31 @@ fn spawn_writer_thread(
             if writer.flush().is_err() {
                 break;
             }
+        }
+    });
+}
+
+/// Polls `child.try_wait` and force-kills the PTY when the child has
+/// exited. Without this, Windows ConPTY can hold the master open after
+/// a clean child exit (`exit\n`, `Ctrl+D`), leaving the reader blocked
+/// on a read that never returns. Calling `kill()` closes the master's
+/// handle to the slave, which propagates EOF to the reader.
+fn spawn_exit_watchdog(session: Arc<Mutex<pty::PtySession>>, cancel: Arc<AtomicBool>) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        let exited = session
+            .lock()
+            .ok()
+            .and_then(|mut s| s.try_wait().ok().flatten())
+            .is_some();
+        if exited {
+            if let Ok(mut s) = session.lock() {
+                let _ = s.kill();
+            }
+            return;
         }
     });
 }

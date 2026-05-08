@@ -155,6 +155,33 @@ where
     let reader = session.reader()?;
     let session = Arc::new(Mutex::new(session));
 
+    // Watchdog: poll `try_wait` and force-kill the PTY when the child
+    // has exited. Without this the Windows ConPTY reader may stay
+    // blocked indefinitely after a clean child exit because EOF is not
+    // always delivered. Calling kill() closes the master's slave handle
+    // and propagates EOF to the reader so the loop below terminates
+    // and the Exited chunk fires.
+    let session_for_watchdog = Arc::clone(&session);
+    let watchdog_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watchdog_done_clone = Arc::clone(&watchdog_done);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if watchdog_done_clone.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let exited = session_for_watchdog
+            .lock()
+            .ok()
+            .and_then(|mut s| s.try_wait().ok().flatten())
+            .is_some();
+        if exited {
+            if let Ok(mut s) = session_for_watchdog.lock() {
+                let _ = s.kill();
+            }
+            return;
+        }
+    });
+
     // Spawn a thread that reads PTY stdout and forwards each chunk
     // through the emit closure. EOF triggers the Exited chunk with the
     // process's exit code.
@@ -173,6 +200,7 @@ where
                 Err(_) => break,
             }
         }
+        watchdog_done.store(true, std::sync::atomic::Ordering::SeqCst);
         let code = session_for_reader
             .lock()
             .ok()
