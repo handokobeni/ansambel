@@ -1,4 +1,4 @@
-# Journal — 2026-05-10
+# Journal — 2026-05-08 — Phase 2b terminal bringup
 
 ## Phase 2b post-shipping — terminal bringup + coverage debug session
 
