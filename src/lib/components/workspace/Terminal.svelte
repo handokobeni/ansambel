@@ -58,6 +58,11 @@
     } catch {
       // jsdom-style runtimes without layout: skip the initial fit.
     }
+    // Visible marker so we can tell at a glance whether xterm is
+    // actually rendering. If this banner shows up, rendering works
+    // and any blank area afterwards is the shell being silent —
+    // otherwise the issue is xterm/CSS, not the PTY.
+    term.writeln('\x1b[2m[xterm ready — waiting for shell]\x1b[0m');
 
     // Forward keystrokes (and pasted content) into the backend's PTY.
     term.onData((data: string) => {

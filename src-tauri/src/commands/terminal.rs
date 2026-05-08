@@ -333,7 +333,17 @@ fn spawn_reader_thread(
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
-                    tracing::debug!(bytes = n, "terminal reader chunk");
+                    let preview: String = buf[..n.min(80)]
+                        .iter()
+                        .map(|b| {
+                            if (32..127).contains(b) {
+                                (*b as char).to_string()
+                            } else {
+                                format!("\\x{b:02x}")
+                            }
+                        })
+                        .collect();
+                    tracing::info!(bytes = n, preview = %preview, "terminal reader chunk");
                     let _ = event_tx.send(TerminalChunk::Bytes {
                         bytes: buf[..n].to_vec(),
                     });
@@ -360,20 +370,29 @@ fn spawn_reader_thread(
 
 fn forward_to_channel(mut rx: broadcast::Receiver<TerminalChunk>, channel: Channel<TerminalChunk>) {
     tauri::async_runtime::spawn(async move {
+        tracing::info!("terminal channel forwarder started");
         loop {
             match rx.recv().await {
                 Ok(chunk) => {
-                    if channel.send(chunk).is_err() {
+                    let kind = match &chunk {
+                        TerminalChunk::Bytes { bytes } => format!("bytes({})", bytes.len()),
+                        TerminalChunk::Exited { code } => format!("exited({code:?})"),
+                    };
+                    if let Err(e) = channel.send(chunk) {
+                        tracing::warn!(error = %e, "channel send failed; forwarder stopping");
                         // Channel closed (frontend unmounted). The
                         // broadcaster keeps streaming for any other
                         // subscriber; we just stop forwarding.
                         break;
                     }
+                    tracing::info!(kind = %kind, "channel forwarded chunk");
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    // Slow consumer dropped chunks; keep going. The
-                    // frontend's next render will pick up where we are.
+                Err(broadcast::error::RecvError::Closed) => {
+                    tracing::info!("broadcast closed; forwarder stopping");
+                    break;
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "broadcast lagged; continuing");
                     continue;
                 }
             }
