@@ -251,8 +251,16 @@ fn build_shell_command(cwd: &Path) -> CommandBuilder {
     let mut cmd = if cfg!(windows) {
         CommandBuilder::new("cmd.exe")
     } else {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        CommandBuilder::new(shell)
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let mut c = CommandBuilder::new(&shell);
+        // Force interactive mode + login so the shell sources its
+        // dotfiles (.bashrc / .zshrc) and prints PS1. Without `-i`
+        // bash sometimes refuses to draw a prompt even with a TTY
+        // attached, depending on how the parent set up stdin.
+        if shell.ends_with("bash") || shell.ends_with("zsh") || shell.ends_with("sh") {
+            c.arg("-i");
+        }
+        c
     };
     cmd.cwd(cwd);
     // portable-pty's CommandBuilder starts with an empty env unless we
@@ -265,6 +273,7 @@ fn build_shell_command(cwd: &Path) -> CommandBuilder {
         cmd.env(k, v);
     }
     cmd.env("TERM", "xterm-256color");
+    tracing::info!(?cwd, "spawning shell for terminal");
     cmd
 }
 
@@ -324,11 +333,15 @@ fn spawn_reader_thread(
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
+                    tracing::debug!(bytes = n, "terminal reader chunk");
                     let _ = event_tx.send(TerminalChunk::Bytes {
                         bytes: buf[..n].to_vec(),
                     });
                 }
-                Err(_) => break,
+                Err(e) => {
+                    tracing::debug!(error = %e, "terminal reader error, exiting loop");
+                    break;
+                }
             }
         }
         // Process exited (or errored). Capture exit code and emit an
