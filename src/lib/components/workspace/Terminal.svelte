@@ -86,12 +86,17 @@
     });
     observer.observe(containerRef);
 
-    const channel = new Channel<TerminalChunk>();
-    channel.onmessage = (chunk: TerminalChunk) => {
-      // eslint-disable-next-line no-console
-      console.log('[terminal] chunk', chunk);
+    // Tauri's Channel<T> is single-use across invokes: when a command
+    // takes a Channel<T> parameter and the command returns Err, the
+    // Rust Channel struct is dropped, which sends a cleanup signal to
+    // the JS side that unregisters the callback id. If we reused the
+    // same Channel for reattach (which rejects when no session exists)
+    // and then spawn, the spawn's bytes would be sent to a callback id
+    // that JS has already torn down — DevTools shows "Couldn't find
+    // callback id N" once per chunk and xterm renders nothing. So
+    // build a *fresh* Channel for each invoke.
+    const handle = (chunk: TerminalChunk): void => {
       if (!term) {
-        console.warn('[terminal] chunk dropped: term is undefined');
         return;
       }
       if (chunk.kind === 'bytes') {
@@ -104,14 +109,20 @@
         term.writeln(`\r\n[process exited with code ${codeStr}]`);
       }
     };
+    const makeChannel = (): Channel<TerminalChunk> => {
+      const ch = new Channel<TerminalChunk>();
+      ch.onmessage = handle;
+      return ch;
+    };
 
     // Try reattach first — the backend may already have a session for
-    // this workspace from a prior mount. Spawn fresh on rejection.
+    // this workspace from a prior mount. Spawn fresh on rejection,
+    // each call with its own Channel id.
     try {
-      await api.terminal.reattach(workspaceId, channel);
+      await api.terminal.reattach(workspaceId, makeChannel());
     } catch {
       try {
-        await api.terminal.spawn(workspaceId, channel, term.cols, term.rows);
+        await api.terminal.spawn(workspaceId, makeChannel(), term.cols, term.rows);
       } catch (err) {
         if (term) {
           term.writeln(`\r\n[failed to start shell: ${String(err)}]`);
