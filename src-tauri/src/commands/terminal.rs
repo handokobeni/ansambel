@@ -255,6 +255,16 @@ fn build_shell_command(cwd: &Path) -> CommandBuilder {
         CommandBuilder::new(shell)
     };
     cmd.cwd(cwd);
+    // portable-pty's CommandBuilder starts with an empty env unless we
+    // explicitly populate it. Without PATH the shell can't resolve any
+    // command; without TERM xterm.js can't negotiate ANSI; without
+    // HOME/USER bash refuses to print a default prompt at all. Inherit
+    // the parent process env wholesale, then override TERM so xterm.js
+    // gets the colour-capable type the renderer expects.
+    for (k, v) in std::env::vars() {
+        cmd.env(k, v);
+    }
+    cmd.env("TERM", "xterm-256color");
     cmd
 }
 

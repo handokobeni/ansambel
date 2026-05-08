@@ -138,8 +138,10 @@ where
 
     // Wrap the user's command in `sh -c` / `cmd /c` so they can chain
     // pipes and redirects naturally. Same shape Phase 1's agent path
-    // uses.
-    let cmd = if cfg!(windows) {
+    // uses. Inherit the parent env (PATH, HOME, etc.) so the script
+    // can resolve binaries — portable-pty's CommandBuilder starts with
+    // an empty env otherwise.
+    let mut cmd = if cfg!(windows) {
         let mut c = CommandBuilder::new("cmd.exe");
         c.args(["/C", &command]);
         c.cwd(&worktree);
@@ -150,6 +152,10 @@ where
         c.cwd(&worktree);
         c
     };
+    for (k, v) in std::env::vars() {
+        cmd.env(k, v);
+    }
+    cmd.env("TERM", "xterm-256color");
 
     let session = pty::spawn(cmd)?;
     let reader = session.reader()?;
