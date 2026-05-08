@@ -36,6 +36,15 @@
       // ships the @xterm/xterm/css file via the import below.
     });
     term.loadAddon(fit);
+    // Hidden-mount means the Terminal component is created the first
+    // time the workspace opens — but the surrounding tab panel is
+    // `display:none` until the user clicks Terminal. Calling
+    // term.open() on a 0×0 container leaves the cell metrics
+    // permanently broken (a tiny strip with the cursor floating, no
+    // input). Wait for ResizeObserver to confirm the container has
+    // real layout before attaching xterm to it.
+    await waitForLayout(containerRef);
+    if (unmounted || !term) return;
     term.open(containerRef);
     // Wait one tick for the container to settle before fitting —
     // otherwise xterm renders zero-row.
@@ -109,6 +118,23 @@
     term?.dispose();
     term = undefined;
   });
+
+  /** Resolve once the element actually has non-zero layout, or after a
+   *  500 ms safety timeout (jsdom-style runtimes that never fire RO).
+   *  Promise resolves at most once — whichever of the two paths fires
+   *  first wins; the second is a no-op per Promise spec. */
+  function waitForLayout(el: HTMLElement): Promise<void> {
+    return new Promise((resolve) => {
+      const ro = new ResizeObserver((entries) => {
+        if (entries[0].contentRect.width > 0) {
+          ro.disconnect();
+          resolve();
+        }
+      });
+      ro.observe(el);
+      setTimeout(resolve, 500);
+    });
+  }
 </script>
 
 <div class="flex flex-col h-full bg-[var(--bg-base)]" data-testid="terminal-view">

@@ -91,14 +91,27 @@ vi.mock('@xterm/addon-fit', () => {
 });
 
 // jsdom doesn't ship ResizeObserver — provide a stub that captures the
-// callback so tests can fire a fake resize and assert the component
-// reflows + calls api.terminal.resize.
+// LATEST callback so tests can fire a fake resize and assert the
+// component reflows + calls api.terminal.resize. observe() also fires
+// once with a synthetic non-zero contentRect so the production
+// `waitForLayout` helper unblocks immediately in tests.
+type RoCallback = (entries: ResizeObserverEntry[], observer: ResizeObserver) => void;
 let resizeCb: (() => void) | null = null;
 class CapturingResizeObserver {
-  constructor(cb: () => void) {
-    resizeCb = cb;
+  cb: RoCallback;
+  constructor(cb: RoCallback) {
+    resizeCb = cb as unknown as () => void;
+    this.cb = cb;
   }
-  observe(): void {}
+  observe(target: Element): void {
+    queueMicrotask(() => {
+      const entry = {
+        target,
+        contentRect: { width: 800, height: 600 } as DOMRectReadOnly,
+      } as ResizeObserverEntry;
+      this.cb([entry], this as unknown as ResizeObserver);
+    });
+  }
   unobserve(): void {}
   disconnect(): void {}
 }
@@ -225,5 +238,31 @@ describe('Terminal', () => {
     fitThrows = true;
     // Should not throw — component must catch and skip the resize call.
     expect(() => resizeCb!()).not.toThrow();
+  });
+
+  it('falls back through the 500ms safety timeout when the runtime never fires ResizeObserver', async () => {
+    // Override the global with a no-op RO so waitForLayout's safety
+    // timeout is the only path that resolves the promise. Then advance
+    // fake timers past 500ms and assert the spawn flow still kicks in.
+    class SilentResizeObserver {
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    vi.stubGlobal('ResizeObserver', SilentResizeObserver);
+    vi.useFakeTimers();
+    try {
+      render(Terminal, { props: { workspaceId: 'ws_safety' } });
+      // Advance through the dynamic-import microtasks first…
+      await vi.advanceTimersByTimeAsync(0);
+      // …then fire the safety timeout.
+      await vi.advanceTimersByTimeAsync(600);
+      // After the timeout resolves, the rest of onMount runs and
+      // reattach (rejects) → spawn captures the channel.
+      await vi.runAllTimersAsync();
+      expect(lastChannel).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

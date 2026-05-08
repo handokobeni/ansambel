@@ -49,12 +49,28 @@ vi.mock('@xterm/addon-fit', () => {
   return { FitAddon: MockFitAddon };
 });
 
-class NoopResizeObserver {
-  observe(): void {}
+// Fire once with a synthetic non-zero contentRect on observe() so
+// Terminal's production waitForLayout helper unblocks immediately —
+// without it onMount blocks for 500 ms in every test.
+type RoCallback = (entries: ResizeObserverEntry[], observer: ResizeObserver) => void;
+class FiringResizeObserver {
+  cb: RoCallback;
+  constructor(cb: RoCallback) {
+    this.cb = cb;
+  }
+  observe(target: Element): void {
+    queueMicrotask(() => {
+      const entry = {
+        target,
+        contentRect: { width: 800, height: 600 } as DOMRectReadOnly,
+      } as ResizeObserverEntry;
+      this.cb([entry], this as unknown as ResizeObserver);
+    });
+  }
   unobserve(): void {}
   disconnect(): void {}
 }
-vi.stubGlobal('ResizeObserver', NoopResizeObserver);
+vi.stubGlobal('ResizeObserver', FiringResizeObserver);
 
 import { invoke } from '@tauri-apps/api/core';
 import WorkspaceView from './WorkspaceView.svelte';
