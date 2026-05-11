@@ -400,6 +400,49 @@ describe('MessageInput', () => {
       expect(onSend).toHaveBeenCalledWith('hi', []);
     });
 
+    it('ArrowUp moves highlight to the previous row (wraps from 0 to last)', async () => {
+      filesRecursiveMock.mockResolvedValue(['a.ts', 'b.ts', 'c.ts']);
+      const onSend = vi.fn();
+      const { getByLabelText, findAllByTestId } = render(MessageInput, {
+        props: { onSend, workspaceId: 'ws_up' },
+      });
+      const ta = getByLabelText('Message') as HTMLTextAreaElement;
+      await typeMention(ta, '@');
+      await findAllByTestId('mention-row');
+      // Starting at index 0 → ArrowUp wraps to last (index 2).
+      await fireEvent.keyDown(ta, { key: 'ArrowUp' });
+      const rows = await findAllByTestId('mention-row');
+      expect(rows[2].getAttribute('aria-selected')).toBe('true');
+    });
+
+    it('Tab selects the highlighted entry (same as Enter)', async () => {
+      filesRecursiveMock.mockResolvedValue(['src/lib.ts']);
+      const onSend = vi.fn();
+      const { getByLabelText, findByTestId } = render(MessageInput, {
+        props: { onSend, workspaceId: 'ws_tab' },
+      });
+      const ta = getByLabelText('Message') as HTMLTextAreaElement;
+      await typeMention(ta, '@src');
+      await findByTestId('mention-autocomplete');
+      await fireEvent.keyDown(ta, { key: 'Tab' });
+      await new Promise((r) => setTimeout(r, 0));
+      expect(ta.value).toBe('@src/lib.ts ');
+    });
+
+    it('renders an empty state when filesRecursive rejects', async () => {
+      filesRecursiveMock.mockRejectedValue(new Error('boom'));
+      const onSend = vi.fn();
+      const { getByLabelText, findByTestId } = render(MessageInput, {
+        props: { onSend, workspaceId: 'ws_err' },
+      });
+      const ta = getByLabelText('Message') as HTMLTextAreaElement;
+      await typeMention(ta, '@x');
+      // The error path falls through to an empty file list — the
+      // dropdown renders the empty state rather than crashing.
+      const empty = await findByTestId('mention-empty');
+      expect(empty.textContent).toContain('No files match');
+    });
+
     it('only calls filesRecursive once per workspace (caches)', async () => {
       filesRecursiveMock.mockResolvedValue(['a.ts']);
       const onSend = vi.fn();
