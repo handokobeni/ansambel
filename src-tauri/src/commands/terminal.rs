@@ -504,8 +504,11 @@ mod tests {
         // deadline so a hang surfaces fast.
         let rx = spawn_terminal_inner("ws_spawn", 80, 24, Arc::clone(&state)).unwrap();
 
-        // Push `exit\n` so the shell terminates quickly.
-        write_terminal_inner("ws_spawn", b"exit\n".to_vec(), Arc::clone(&state)).unwrap();
+        // Push `exit` followed by CR+LF so the shell terminates quickly.
+        // cmd.exe treats `\r` as the line terminator (what xterm.js sends
+        // for Enter on Windows); bash/zsh on Unix accept both `\r` and
+        // `\n`. `\r\n` works everywhere.
+        write_terminal_inner("ws_spawn", b"exit\r\n".to_vec(), Arc::clone(&state)).unwrap();
 
         let chunks = drain_until(rx, Duration::from_secs(5), has_exit);
         assert!(
@@ -644,7 +647,9 @@ mod tests {
         // receiver — proves reattach plugs into the broadcaster, not a
         // private channel.
         let rx = reattach_terminal_inner("ws_re", Arc::clone(&state)).unwrap();
-        write_terminal_inner("ws_re", b"exit\n".to_vec(), Arc::clone(&state)).unwrap();
+        // CR+LF: cmd.exe needs `\r` to treat as Enter; Unix shells accept
+        // either. See the spawn test for the full rationale.
+        write_terminal_inner("ws_re", b"exit\r\n".to_vec(), Arc::clone(&state)).unwrap();
 
         let chunks = drain_until(rx, Duration::from_secs(5), has_exit);
         assert!(has_exit(&chunks), "expected Exited on reattached rx");
