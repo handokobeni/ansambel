@@ -170,6 +170,7 @@ pub fn kill_terminal_inner(workspace_id: &str, state: Arc<Mutex<AppState>>) -> R
         .lock()
         .map_err(|e| AppError::Other(e.to_string()))?;
     let _ = pty.kill();
+    pty.close_master();
     Ok(())
 }
 
@@ -293,11 +294,12 @@ fn spawn_writer_thread(
     });
 }
 
-/// Polls `child.try_wait` and force-kills the PTY when the child has
-/// exited. Without this, Windows ConPTY can hold the master open after
-/// a clean child exit (`exit\n`, `Ctrl+D`), leaving the reader blocked
-/// on a read that never returns. Calling `kill()` closes the master's
-/// handle to the slave, which propagates EOF to the reader.
+/// Polls `child.try_wait` and force-closes the master PTY when the
+/// child has exited. Without this, Windows ConPTY can hold the master
+/// open after a clean child exit (`exit\n`, `Ctrl+D`), leaving the
+/// reader blocked on a read that never returns. `child.kill()` alone
+/// does not close the master on Windows — only dropping the master
+/// (`close_master()`) propagates EOF to the reader.
 fn spawn_exit_watchdog(session: Arc<Mutex<pty::PtySession>>, cancel: Arc<AtomicBool>) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -312,6 +314,7 @@ fn spawn_exit_watchdog(session: Arc<Mutex<pty::PtySession>>, cancel: Arc<AtomicB
         if exited {
             if let Ok(mut s) = session.lock() {
                 let _ = s.kill();
+                s.close_master();
             }
             return;
         }

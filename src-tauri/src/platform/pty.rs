@@ -6,7 +6,11 @@ const DEFAULT_ROWS: u16 = 30;
 const DEFAULT_COLS: u16 = 120;
 
 pub struct PtySession {
-    master: Box<dyn MasterPty + Send>,
+    // `Option<>` so `close_master()` can drop the master to propagate EOF
+    // to readers on Windows ConPTY. On Linux dropping is unnecessary but
+    // harmless; on Windows a clean child exit does not always EOF the
+    // master, so the watchdog explicitly drops it.
+    master: Option<Box<dyn MasterPty + Send>>,
     child: Box<dyn Child + Send + Sync>,
     pid: u32,
 }
@@ -49,7 +53,7 @@ pub fn spawn(cmd: CommandBuilder) -> Result<PtySession> {
 
     let pid = child.process_id().unwrap_or(0);
     Ok(PtySession {
-        master: pair.master,
+        master: Some(pair.master),
         child,
         pid,
     })
@@ -62,6 +66,11 @@ impl PtySession {
 
     pub fn reader(&self) -> Result<Box<dyn Read + Send>> {
         self.master
+            .as_ref()
+            .ok_or_else(|| AppError::Command {
+                cmd: "pty.reader".into(),
+                msg: "master pty closed".into(),
+            })?
             .try_clone_reader()
             .map_err(|e| AppError::Command {
                 cmd: "pty.reader".into(),
@@ -70,10 +79,17 @@ impl PtySession {
     }
 
     pub fn writer(&self) -> Result<Box<dyn Write + Send>> {
-        self.master.take_writer().map_err(|e| AppError::Command {
-            cmd: "pty.writer".into(),
-            msg: e.to_string(),
-        })
+        self.master
+            .as_ref()
+            .ok_or_else(|| AppError::Command {
+                cmd: "pty.writer".into(),
+                msg: "master pty closed".into(),
+            })?
+            .take_writer()
+            .map_err(|e| AppError::Command {
+                cmd: "pty.writer".into(),
+                msg: e.to_string(),
+            })
     }
 
     pub fn kill(&mut self) -> Result<()> {
@@ -82,6 +98,14 @@ impl PtySession {
             msg: e.to_string(),
         })?;
         Ok(())
+    }
+
+    /// Drop the master PTY handle. On Windows ConPTY this is what
+    /// propagates EOF to outstanding readers — `child.kill()` alone does
+    /// not. Idempotent. Subsequent reader/writer/resize calls return an
+    /// error because the master is gone.
+    pub fn close_master(&mut self) {
+        self.master = None;
     }
 
     pub fn try_wait(&mut self) -> Result<Option<portable_pty::ExitStatus>> {
@@ -93,6 +117,11 @@ impl PtySession {
 
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         self.master
+            .as_ref()
+            .ok_or_else(|| AppError::Command {
+                cmd: "resize".into(),
+                msg: "master pty closed".into(),
+            })?
             .resize(PtySize {
                 rows,
                 cols,
@@ -234,6 +263,26 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         panic!("child did not exit within 2s of kill");
+    }
+
+    #[test]
+    fn close_master_drops_handle_and_errors_subsequent_reader() {
+        let session = spawn(echo_command()).expect("spawn echo");
+        // First reader: master still open.
+        assert!(session.reader().is_ok());
+        let mut session = session;
+        session.close_master();
+        // After close, reader/writer/resize must return an error rather
+        // than panic. `kill()` still works because it talks to `child`,
+        // not `master`.
+        let r = session.reader();
+        assert!(r.is_err(), "reader should err after close_master");
+        let w = session.writer();
+        assert!(w.is_err(), "writer should err after close_master");
+        let r2 = session.resize(24, 80);
+        assert!(r2.is_err(), "resize should err after close_master");
+        // Idempotent: calling close_master a second time is fine.
+        session.close_master();
     }
 
     #[test]
