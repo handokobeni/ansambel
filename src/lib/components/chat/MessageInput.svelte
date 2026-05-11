@@ -1,14 +1,21 @@
 <script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
   import { convertFileSrc } from '@tauri-apps/api/core';
+  import { SvelteMap } from 'svelte/reactivity';
+  import { api } from '$lib/ipc';
+  import { parseMention, rankFiles } from '$lib/mentions';
+  import MentionAutocomplete from './MentionAutocomplete.svelte';
   import type { AttachmentDraft } from '$lib/types';
 
   interface Props {
     onSend: (text: string, attachments: AttachmentDraft[]) => void;
     disabled?: boolean;
+    /** Workspace whose worktree backs the @-mention autocomplete. When
+     *  absent, the mention dropdown stays disabled. */
+    workspaceId?: string;
   }
 
-  const { onSend, disabled = false }: Props = $props();
+  const { onSend, disabled = false, workspaceId }: Props = $props();
 
   let value = $state('');
   let attachments = $state<AttachmentDraft[]>([]);
@@ -22,6 +29,106 @@
   // (png, jpg, webp, gif). Drives both the OS file picker filter and the
   // mime inference below.
   const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif'];
+
+  // ── @-mention state ────────────────────────────────────────────────
+  let caretPos = $state(0);
+  let cachedFiles: string[] | null = $state(null);
+  let loadingFiles = $state(false);
+  let highlighted = $state(0);
+  // Index of the `@` the user has dismissed via Esc. While the
+  // current mention is anchored at the same `@`, suppress the
+  // dropdown. Cleared automatically when the user types a new
+  // mention at a different position.
+  let dismissedAt: number | null = $state(null);
+  // Component-instance cache so re-renders within the same workspace
+  // don't re-fetch. Reactive Map (SvelteMap) — non-reactive Map is
+  // flagged by lint rule `svelte/prefer-svelte-reactivity`.
+  const fileCache = new SvelteMap<string, string[]>();
+  // Current detected mention, or null. Driven by `value` + `caretPos`.
+  const mention = $derived(parseMention(value, caretPos));
+  // Ranked, top-N candidates. Recomputed cheaply on every keystroke.
+  const rankedFiles = $derived(mention && cachedFiles ? rankFiles(cachedFiles, mention.query) : []);
+  const mentionOpen = $derived(
+    mention !== null && workspaceId !== undefined && dismissedAt !== mention.start
+  );
+
+  async function ensureFilesLoaded(): Promise<void> {
+    if (!workspaceId) return;
+    const cached = fileCache.get(workspaceId);
+    if (cached !== undefined) {
+      cachedFiles = cached;
+      return;
+    }
+    if (loadingFiles) return;
+    loadingFiles = true;
+    try {
+      const files = await api.workspace.filesRecursive(workspaceId);
+      fileCache.set(workspaceId, files);
+      cachedFiles = files;
+    } catch {
+      // Best-effort: empty list lets the empty-state render, the user
+      // can still type a path manually.
+      cachedFiles = [];
+    } finally {
+      loadingFiles = false;
+    }
+  }
+
+  // Clear the dismissal flag when the textarea value changes. Esc
+  // dismisses for the duration of the current input — if the user
+  // keeps typing, they've changed their mind and the dropdown should
+  // re-open naturally on the next detected mention.
+  $effect(() => {
+    void value;
+    dismissedAt = null;
+  });
+
+  // Trigger fetch when a mention opens. Cheap — early-returns on cache hit.
+  $effect(() => {
+    if (mentionOpen) void ensureFilesLoaded();
+  });
+
+  // Reset cached files when workspace changes.
+  $effect(() => {
+    void workspaceId;
+    cachedFiles = workspaceId ? (fileCache.get(workspaceId) ?? null) : null;
+  });
+
+  // Keep highlighted index in range when the ranked list shrinks below it.
+  $effect(() => {
+    if (highlighted >= rankedFiles.length) highlighted = 0;
+  });
+
+  function syncCaret(): void {
+    if (textareaEl) caretPos = textareaEl.selectionStart;
+  }
+
+  function selectMention(path: string): void {
+    if (!mention || !textareaEl) return;
+    const before = value.slice(0, mention.start);
+    const after = value.slice(caretPos);
+    const replacement = `@${path} `;
+    value = before + replacement + after;
+    const newCaret = before.length + replacement.length;
+    // Defer caret placement until after Svelte writes the new value to
+    // the DOM. Without `queueMicrotask`, the textarea's selectionStart
+    // gets stomped by the input event.
+    queueMicrotask(() => {
+      if (textareaEl) {
+        textareaEl.selectionStart = newCaret;
+        textareaEl.selectionEnd = newCaret;
+        caretPos = newCaret;
+        textareaEl.focus();
+      }
+    });
+  }
+
+  function dismissMention(): void {
+    // Pin the dismissal to the current `@` position. The dropdown
+    // stays closed as long as the mention is anchored at this index.
+    // A new `@` elsewhere (different position) reopens automatically.
+    if (mention) dismissedAt = mention.start;
+  }
 
   function autoResize() {
     if (!textareaEl) return;
@@ -84,6 +191,33 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
+    // Mention navigation takes precedence — only when a mention is
+    // active AND we have results to navigate. Empty-results still
+    // intercepts Escape so the user has a way to bail out.
+    if (mentionOpen) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        dismissMention();
+        return;
+      }
+      if (rankedFiles.length > 0) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          highlighted = (highlighted + 1) % rankedFiles.length;
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          highlighted = (highlighted - 1 + rankedFiles.length) % rankedFiles.length;
+          return;
+        }
+        if (e.key === 'Enter' || e.key === 'Tab') {
+          e.preventDefault();
+          selectMention(rankedFiles[highlighted]);
+          return;
+        }
+      }
+    }
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
       e.preventDefault();
       handleSend();
@@ -131,16 +265,32 @@
   {/if}
 
   <label class="sr-only" for="message-input">Message</label>
-  <textarea
-    bind:this={textareaEl}
-    id="message-input"
-    rows="1"
-    class="w-full px-3 py-2 text-sm rounded bg-[var(--bg-card)] border border-[var(--border-light)] text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] resize-none min-h-[40px] leading-relaxed"
-    placeholder="Ask Claude…"
-    bind:value
-    onkeydown={handleKeydown}
-    {disabled}
-  ></textarea>
+  <div class="relative">
+    <textarea
+      bind:this={textareaEl}
+      id="message-input"
+      rows="1"
+      class="w-full px-3 py-2 text-sm rounded bg-[var(--bg-card)] border border-[var(--border-light)] text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] resize-none min-h-[40px] leading-relaxed"
+      placeholder="Ask Claude…"
+      bind:value
+      onkeydown={handleKeydown}
+      oninput={syncCaret}
+      onclick={syncCaret}
+      onkeyup={syncCaret}
+      {disabled}
+    ></textarea>
+    {#if mentionOpen}
+      <MentionAutocomplete
+        files={rankedFiles}
+        query={mention?.query ?? ''}
+        {highlighted}
+        loading={loadingFiles && cachedFiles === null}
+        onSelect={selectMention}
+        onHighlight={(i) => (highlighted = i)}
+        onDismiss={dismissMention}
+      />
+    {/if}
+  </div>
   <div class="flex items-center justify-between">
     <button
       type="button"

@@ -230,5 +230,5 @@
   </div>
 
   <TurnStatusBar {workspaceId} />
-  <MessageInput {onSend} disabled={inputDisabled} />
+  <MessageInput {onSend} disabled={inputDisabled} {workspaceId} />
 </section>

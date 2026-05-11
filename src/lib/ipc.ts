@@ -60,6 +60,13 @@ export const api = {
     files: (workspaceId: string, path?: string): Promise<FileEntry[]> =>
       invoke('workspace_files', { workspaceId, path }),
 
+    /** List ALL files (not directories) under the worktree recursively,
+     *  gitignore-aware, forward-slash normalized, capped at 5000. Used
+     *  by the @-mention autocomplete in the chat input — fetch once per
+     *  workspace, cache, filter client-side. */
+    filesRecursive: (workspaceId: string): Promise<string[]> =>
+      invoke('workspace_files_recursive', { workspaceId }),
+
     /** Stream filename-or-content hits. Emits a single
      *  `ripgrep_unavailable` sentinel when content mode is requested and
      *  the `rg` binary is missing. */

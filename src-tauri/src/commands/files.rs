@@ -139,6 +139,96 @@ pub async fn workspace_files(
     .map_err(|e| format!("files task join error: {e}"))?
 }
 
+// ── Phase 2c · workspace_files_recursive ────────────────────────────
+//
+// Returns ALL file paths (not directories) under the worktree in one
+// call, gitignore-aware and `/`-normalized. Used by the @-mention
+// autocomplete in the chat input: the frontend fetches once per
+// workspace, caches, and filters client-side per keystroke. Hard cap
+// to avoid pathological repos sending megabytes of paths over IPC.
+
+/// Hard cap on returned paths. Exceeding this is a sign the worktree
+/// has too many tracked files for an interactive autocomplete; we
+/// truncate (no error) and the frontend shows a "limited results"
+/// hint. 5000 is well past what fits in a usefully-rankable dropdown.
+const RECURSIVE_HARD_CAP: usize = 5000;
+
+pub fn workspace_files_recursive_inner(
+    workspace_id: &str,
+    state: Arc<Mutex<AppState>>,
+) -> Result<Vec<String>> {
+    let worktree_dir = {
+        let st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        let ws = st
+            .workspaces
+            .get(workspace_id)
+            .ok_or_else(|| AppError::NotFound(format!("workspace '{workspace_id}'")))?;
+        ws.worktree_dir.clone()
+    };
+
+    if !worktree_dir.exists() {
+        return Err(AppError::PathNotFound(worktree_dir));
+    }
+
+    let canonical_root = dunce::canonicalize(&worktree_dir)
+        .map_err(|e| AppError::Other(format!("canonicalize worktree: {e}")))?;
+
+    let mut paths: Vec<String> = Vec::new();
+    let walker = ignore::WalkBuilder::new(&worktree_dir)
+        .follow_links(false)
+        .standard_filters(true)
+        .build();
+
+    for result in walker {
+        let entry = match result {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if entry.depth() == 0 {
+            continue;
+        }
+        // Files only — directories aren't @-mention targets.
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let abs = entry.path();
+        let canonical = match dunce::canonicalize(abs) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if !canonical.starts_with(&canonical_root) {
+            continue;
+        }
+        let rel = match canonical.strip_prefix(&canonical_root) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        paths.push(rel_str);
+        if paths.len() >= RECURSIVE_HARD_CAP {
+            break;
+        }
+    }
+
+    // Alpha order so client-side ranking has a stable baseline for
+    // ties.
+    paths.sort_by_key(|a| a.to_lowercase());
+    Ok(paths)
+}
+
+#[tauri::command]
+pub async fn workspace_files_recursive(
+    workspace_id: String,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> std::result::Result<Vec<String>, String> {
+    let state = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        workspace_files_recursive_inner(&workspace_id, state).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("recursive files task join error: {e}"))?
+}
+
 // ── helpers ─────────────────────────────────────────────────────────
 
 pub(crate) fn resolve_within_worktree(worktree: &Path, rel: &str) -> Result<PathBuf> {
@@ -374,5 +464,128 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].path, "a/b.txt");
         assert!(!entries[0].path.contains('\\'));
+    }
+
+    // ── workspace_files_recursive ────────────────────────────────────
+
+    #[test]
+    fn workspace_files_recursive_inner_returns_nested_files() {
+        let (_tmp, wt) = make_worktree();
+        std::fs::create_dir_all(wt.join("src/lib")).unwrap();
+        std::fs::write(wt.join("README.md"), b"r").unwrap();
+        std::fs::write(wt.join("src/main.rs"), b"m").unwrap();
+        std::fs::write(wt.join("src/lib/util.rs"), b"u").unwrap();
+        let state = make_state("ws_rec", &wt);
+        let paths = workspace_files_recursive_inner("ws_rec", state).unwrap();
+        assert!(paths.contains(&"README.md".to_string()));
+        assert!(paths.contains(&"src/main.rs".to_string()));
+        assert!(paths.contains(&"src/lib/util.rs".to_string()));
+        // 3 files, no directories included.
+        assert_eq!(paths.len(), 3);
+    }
+
+    #[test]
+    fn workspace_files_recursive_inner_respects_gitignore() {
+        let (_tmp, wt) = make_worktree();
+        // gitignore is only honored inside a git repo (ignore crate
+        // semantic). Mirror the pattern used by workspace_files_inner.
+        let out = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git init failed");
+        std::fs::write(wt.join(".gitignore"), b"target/\nnode_modules/\n").unwrap();
+        std::fs::create_dir_all(wt.join("target")).unwrap();
+        std::fs::create_dir_all(wt.join("node_modules/foo")).unwrap();
+        std::fs::create_dir_all(wt.join("src")).unwrap();
+        std::fs::write(wt.join("target/x.bin"), b"x").unwrap();
+        std::fs::write(wt.join("node_modules/foo/lib.js"), b"j").unwrap();
+        std::fs::write(wt.join("src/main.rs"), b"m").unwrap();
+        let state = make_state("ws_recignore", &wt);
+        let paths = workspace_files_recursive_inner("ws_recignore", state).unwrap();
+        assert!(paths.iter().any(|p| p == "src/main.rs"));
+        assert!(!paths.iter().any(|p| p.starts_with("target/")));
+        assert!(!paths.iter().any(|p| p.starts_with("node_modules/")));
+    }
+
+    #[test]
+    fn workspace_files_recursive_inner_uses_forward_slash_on_all_os() {
+        let (_tmp, wt) = make_worktree();
+        std::fs::create_dir_all(wt.join("a/b/c")).unwrap();
+        std::fs::write(wt.join("a/b/c/d.txt"), b"d").unwrap();
+        let state = make_state("ws_recslash", &wt);
+        let paths = workspace_files_recursive_inner("ws_recslash", state).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "a/b/c/d.txt");
+        assert!(!paths[0].contains('\\'));
+    }
+
+    #[test]
+    fn workspace_files_recursive_inner_returns_files_only_not_directories() {
+        let (_tmp, wt) = make_worktree();
+        std::fs::create_dir_all(wt.join("emptydir")).unwrap();
+        std::fs::write(wt.join("file.txt"), b"f").unwrap();
+        let state = make_state("ws_filesonly", &wt);
+        let paths = workspace_files_recursive_inner("ws_filesonly", state).unwrap();
+        assert_eq!(paths, vec!["file.txt".to_string()]);
+    }
+
+    #[test]
+    fn workspace_files_recursive_inner_handles_empty_worktree() {
+        let (_tmp, wt) = make_worktree();
+        let state = make_state("ws_empty", &wt);
+        let paths = workspace_files_recursive_inner("ws_empty", state).unwrap();
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn workspace_files_recursive_inner_returns_paths_sorted_case_insensitive() {
+        let (_tmp, wt) = make_worktree();
+        std::fs::write(wt.join("Zebra.md"), b"z").unwrap();
+        std::fs::write(wt.join("apple.md"), b"a").unwrap();
+        std::fs::write(wt.join("Banana.md"), b"b").unwrap();
+        let state = make_state("ws_sort", &wt);
+        let paths = workspace_files_recursive_inner("ws_sort", state).unwrap();
+        assert_eq!(
+            paths,
+            vec![
+                "apple.md".to_string(),
+                "Banana.md".to_string(),
+                "Zebra.md".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_files_recursive_inner_returns_error_for_invalid_workspace_id() {
+        let state = Arc::new(Mutex::new(AppState::default()));
+        let err = workspace_files_recursive_inner("ws_missing_rec", state).unwrap_err();
+        assert!(err.to_string().contains("ws_missing_rec"));
+    }
+
+    #[test]
+    fn workspace_files_recursive_inner_returns_error_for_missing_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wt = tmp.path().join("never_created");
+        let state = make_state("ws_rec_gone", &wt);
+        let err = workspace_files_recursive_inner("ws_rec_gone", state).unwrap_err();
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("path") || msg.contains("not found"),
+            "expected path-not-found-style error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn workspace_files_recursive_inner_caps_results_at_hard_cap() {
+        let (_tmp, wt) = make_worktree();
+        // Create RECURSIVE_HARD_CAP + 10 files. Verify result is capped.
+        for i in 0..(RECURSIVE_HARD_CAP + 10) {
+            std::fs::write(wt.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        let state = make_state("ws_recap", &wt);
+        let paths = workspace_files_recursive_inner("ws_recap", state).unwrap();
+        assert_eq!(paths.len(), RECURSIVE_HARD_CAP);
     }
 }

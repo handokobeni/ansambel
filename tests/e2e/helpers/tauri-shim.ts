@@ -487,6 +487,19 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
             return [];
           }
 
+          case 'workspace_files_recursive': {
+            // Flat file list for @-mention autocomplete (Phase 2c).
+            // Mirrors the workspace_files mock tree but recursive +
+            // files-only. Used by MessageInput's mention dropdown.
+            return [
+              'README.md',
+              'src/app.ts',
+              'src/lib/handlers.ts',
+              'src/lib/types.ts',
+              'tests/app.spec.ts',
+            ];
+          }
+
           case 'workspace_search': {
             const channel = args.channel as { onmessage?: (hit: unknown) => void };
             const query = (args.query as string).toLowerCase();

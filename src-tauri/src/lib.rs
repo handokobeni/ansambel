@@ -75,6 +75,7 @@ pub fn run() {
             crate::commands::agent::reattach_agent,
             crate::commands::diff::workspace_diff,
             crate::commands::files::workspace_files,
+            crate::commands::files::workspace_files_recursive,
             crate::commands::search::workspace_search,
             crate::commands::scripts::script_list,
             crate::commands::scripts::script_set,
@@ -145,6 +146,11 @@ mod tests {
     #[test]
     fn workspace_files_command_is_registered() {
         let _ = std::any::type_name_of_val(&crate::commands::files::workspace_files);
+    }
+
+    #[test]
+    fn workspace_files_recursive_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::files::workspace_files_recursive);
     }
 
     #[test]

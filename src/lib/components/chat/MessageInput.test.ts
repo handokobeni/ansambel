@@ -12,11 +12,24 @@ vi.mock('@tauri-apps/api/core', () => ({
   convertFileSrc: (path: string) => `mock-asset://${path}`,
 }));
 
+// Mock the IPC wrapper for filesRecursive — mention autocomplete fetches
+// on first @-trigger. Tests that exercise mentions override this.
+const filesRecursiveMock = vi.fn(async (_workspaceId: string): Promise<string[]> => []);
+vi.mock('$lib/ipc', () => ({
+  api: {
+    workspace: {
+      filesRecursive: (workspaceId: string) => filesRecursiveMock(workspaceId),
+    },
+  },
+}));
+
 import { open } from '@tauri-apps/plugin-dialog';
 import MessageInput from './MessageInput.svelte';
 
 beforeEach(() => {
   vi.mocked(open).mockReset();
+  filesRecursiveMock.mockReset();
+  filesRecursiveMock.mockResolvedValue([]);
 });
 
 describe('MessageInput', () => {
@@ -274,6 +287,134 @@ describe('MessageInput', () => {
         return c;
       });
       expect(chip.textContent).toContain('abc.png');
+    });
+  });
+
+  describe('@-mentions', () => {
+    async function typeMention(
+      ta: HTMLTextAreaElement,
+      text: string,
+      caret: number = text.length
+    ): Promise<void> {
+      // selectionStart is set by the browser when value changes via
+      // user input. In jsdom we set it explicitly.
+      await fireEvent.input(ta, { target: { value: text } });
+      ta.selectionStart = caret;
+      ta.selectionEnd = caret;
+      await fireEvent.keyUp(ta, { key: 'a' });
+    }
+
+    it('does NOT render the autocomplete without workspaceId', async () => {
+      const onSend = vi.fn();
+      const { getByLabelText, queryByTestId } = render(MessageInput, {
+        props: { onSend },
+      });
+      const ta = getByLabelText('Message') as HTMLTextAreaElement;
+      await typeMention(ta, '@src');
+      expect(queryByTestId('mention-autocomplete')).toBeNull();
+    });
+
+    it('shows autocomplete with ranked files after typing @ with workspaceId', async () => {
+      filesRecursiveMock.mockResolvedValue(['src/main.ts', 'src/lib.ts', 'README.md']);
+      const onSend = vi.fn();
+      const { getByLabelText, findAllByTestId } = render(MessageInput, {
+        props: { onSend, workspaceId: 'ws_x' },
+      });
+      const ta = getByLabelText('Message') as HTMLTextAreaElement;
+      await typeMention(ta, '@src');
+      const rows = await findAllByTestId('mention-row');
+      // Both src/* paths should be present; order ranked.
+      const texts = rows.map((r) => r.textContent?.trim());
+      expect(texts.some((t) => t?.includes('src/main.ts'))).toBe(true);
+      expect(texts.some((t) => t?.includes('src/lib.ts'))).toBe(true);
+      expect(texts.some((t) => t?.includes('README.md'))).toBe(false);
+    });
+
+    it('replaces @<query> with the selected path + trailing space', async () => {
+      filesRecursiveMock.mockResolvedValue(['src/lib.ts']);
+      const onSend = vi.fn();
+      const { getByLabelText, findByTestId } = render(MessageInput, {
+        props: { onSend, workspaceId: 'ws_y' },
+      });
+      const ta = getByLabelText('Message') as HTMLTextAreaElement;
+      await typeMention(ta, '@src');
+      // Wait for autocomplete to mount.
+      await findByTestId('mention-autocomplete');
+      await fireEvent.keyDown(ta, { key: 'Enter' });
+      // Caret placement is queued in a microtask — flush it.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(ta.value).toBe('@src/lib.ts ');
+    });
+
+    it('Esc dismisses the autocomplete', async () => {
+      filesRecursiveMock.mockResolvedValue(['src/lib.ts']);
+      const onSend = vi.fn();
+      const { getByLabelText, findByTestId, queryByTestId } = render(MessageInput, {
+        props: { onSend, workspaceId: 'ws_e' },
+      });
+      const ta = getByLabelText('Message') as HTMLTextAreaElement;
+      await typeMention(ta, '@s');
+      await findByTestId('mention-autocomplete');
+      await fireEvent.keyDown(ta, { key: 'Escape' });
+      // After Escape, caret jumps to end-of-text; parseMention returns
+      // null → autocomplete unmounts on next reactive update.
+      await waitFor(() => expect(queryByTestId('mention-autocomplete')).toBeNull());
+    });
+
+    it('ArrowDown moves highlight to the next row', async () => {
+      filesRecursiveMock.mockResolvedValue(['a.ts', 'b.ts', 'c.ts']);
+      const onSend = vi.fn();
+      const { getByLabelText, findAllByTestId } = render(MessageInput, {
+        props: { onSend, workspaceId: 'ws_nav' },
+      });
+      const ta = getByLabelText('Message') as HTMLTextAreaElement;
+      await typeMention(ta, '@');
+      const rowsBefore = await findAllByTestId('mention-row');
+      expect(rowsBefore[0].getAttribute('aria-selected')).toBe('true');
+      await fireEvent.keyDown(ta, { key: 'ArrowDown' });
+      const rowsAfter = await findAllByTestId('mention-row');
+      expect(rowsAfter[1].getAttribute('aria-selected')).toBe('true');
+    });
+
+    it('does not trigger autocomplete for email-shaped @', async () => {
+      filesRecursiveMock.mockResolvedValue(['src/main.ts']);
+      const onSend = vi.fn();
+      const { getByLabelText, queryByTestId } = render(MessageInput, {
+        props: { onSend, workspaceId: 'ws_email' },
+      });
+      const ta = getByLabelText('Message') as HTMLTextAreaElement;
+      await typeMention(ta, 'email@host');
+      expect(queryByTestId('mention-autocomplete')).toBeNull();
+    });
+
+    it('Ctrl+Enter still sends when no mention is active', async () => {
+      const onSend = vi.fn();
+      const { getByLabelText } = render(MessageInput, {
+        props: { onSend, workspaceId: 'ws_send' },
+      });
+      const ta = getByLabelText('Message') as HTMLTextAreaElement;
+      await fireEvent.input(ta, { target: { value: 'hi' } });
+      ta.selectionStart = 2;
+      ta.selectionEnd = 2;
+      await fireEvent.keyDown(ta, { key: 'Enter', ctrlKey: true });
+      expect(onSend).toHaveBeenCalledWith('hi', []);
+    });
+
+    it('only calls filesRecursive once per workspace (caches)', async () => {
+      filesRecursiveMock.mockResolvedValue(['a.ts']);
+      const onSend = vi.fn();
+      const { getByLabelText, findByTestId } = render(MessageInput, {
+        props: { onSend, workspaceId: 'ws_cache' },
+      });
+      const ta = getByLabelText('Message') as HTMLTextAreaElement;
+      await typeMention(ta, '@');
+      await findByTestId('mention-autocomplete');
+      // Dismiss, then re-type — should still hit cache (no second call).
+      await fireEvent.keyDown(ta, { key: 'Escape' });
+      await fireEvent.input(ta, { target: { value: '' } });
+      await typeMention(ta, '@a');
+      await findByTestId('mention-autocomplete');
+      expect(filesRecursiveMock).toHaveBeenCalledTimes(1);
     });
   });
 });
