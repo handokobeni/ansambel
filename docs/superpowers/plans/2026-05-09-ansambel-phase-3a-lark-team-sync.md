@@ -62,9 +62,20 @@ Wire Ansambel ke Lark Bitable supaya workflow "AI Lembur" team-scale jalan:
 ```
 
 Tiap Ansambel jadi penghubung Lark ↔ local execution. Tidak ada P2P antara PC
-engineer — sync semua via Lark API. Filter visibility = (repo yang ke-add di
-sidebar) ∩ (Bitable table yang ke-config). Privacy escape = `private` toggle per
-workspace (state tidak di-publish).
+engineer — sync semua via Lark API.
+
+**Visibility (strict per-repo scope):** engineer hanya lihat row Bitable yang
+`repo_id`-nya ada di list repo lokal mereka. Engineer non-pemilik repo **tidak
+melihat row sama sekali** — bahkan tidak tahu task itu exist via Team Activity
+sidebar. Filter dilakukan client-side di
+`src/lib/stores/team-activity.svelte.ts` (`row.repo_id ∈ self.local_repos`). Ini
+UX-level enforcement: data tetap di Bitable, kalau engineer buka Lark web UI
+langsung dia masih bisa lihat semua row. Asumsi: anggota Bitable table sudah
+dalam circle of trust di level Lark workspace.
+
+**Privacy escape:** `private` toggle per workspace (state tidak di-publish, row
+Bitable existing di-clear). Per-table membership di Settings memberi boundary
+tambahan (engineer cuma connect ke Bitable table yang relevan).
 
 ## Tech stack
 
@@ -303,24 +314,31 @@ real-time supaya tim lain lihat siapa lagi kerja apa.
 ### 3a-4 — Team Activity sidebar + watch view (P0, ~5 hari)
 
 **Why:** Surface yang bikin sync layer terasa bagi engineer. "Saya buka sidebar,
-langsung tau siapa lagi kerja apa di tim."
+langsung tau siapa lagi kerja apa di tim — terbatas hanya untuk repo yang saya
+punya."
 
 **Frontend:**
 
 - [ ] `src/lib/stores/team-activity.svelte.ts` — fetch + cache Bitable rows
-      dengan `assignee_machine != self`. Polling 5 detik (configurable).
+      dengan **strict client-side filter**:
+  - `assignee_machine != self` (jangan tampilkan workspace milik sendiri di
+    panel "team")
+  - `row.repo_id ∈ repos.list().map(r => r.id)` — hanya tampil row dari repo
+    yang ada di local Ansambel
+  - Re-evaluate filter saat `repos` store berubah (add/remove repo) — Sidebar
+    update real-time tanpa restart
+  - Polling 5 detik (configurable)
 - [ ] `src/lib/components/sidebar/TeamActivityPanel.svelte` — nested di Sidebar
       di bawah "WORKSPACES":
-  - Group by `repo_id`
+  - Group by `repo_id` (hanya repo yang engineer punya yang muncul sebagai group
+    header)
   - Tiap row: status dot + title + assignee + last_activity_at "2m ago"
-  - Filter dropdown: "All repos / Current repo only / Repo X / Repo Y"
-  - Default filter: "Repos I have"
-- [ ] Klik row task `repo_id` yang **engineer punya** → buka
-      `TeamWorkspaceMirror` (read-only)
-- [ ] Klik row task `repo_id` yang **engineer tidak punya** → modal:
-  - "View on Lark" link
-  - "View PR on GitHub" link kalau `pr_url` ada
-  - "Add this repo to Ansambel" shortcut (Phase 0 add_repo)
+  - **Tidak ada filter dropdown** — scope sudah hard ke local_repos
+  - Empty state kalau engineer tidak punya repo overlap: "No team activity in
+    your repos right now."
+- [ ] Klik row → buka `TeamWorkspaceMirror` (read-only). Karena semua row di
+      sidebar guaranteed engineer punya repo-nya, tidak ada branching "punya" vs
+      "tidak punya" — modal/"Add this repo" prompt dihapus.
 
 **Frontend (mirror view):**
 
@@ -338,10 +356,12 @@ langsung tau siapa lagi kerja apa di tim."
 
 - [ ] `team_activity_store_polls_bitable_every_5s`
 - [ ] `team_activity_store_filters_self_machine`
+- [ ] `team_activity_store_filters_to_local_repos_only`
+- [ ] `team_activity_store_re_evaluates_when_repo_added`
+- [ ] `team_activity_store_drops_rows_when_repo_removed`
 - [ ] `team_activity_panel_groups_by_repo`
-- [ ] `team_activity_panel_filter_current_repo_only`
-- [ ] `team_activity_panel_click_known_repo_opens_mirror`
-- [ ] `team_activity_panel_click_unknown_repo_opens_addrepo_modal`
+- [ ] `team_activity_panel_shows_empty_state_when_no_overlap`
+- [ ] `team_activity_panel_click_row_opens_mirror`
 - [ ] `mirror_renders_message_preview_from_bitable`
 - [ ] `mirror_renders_pr_link_when_present`
 - [ ] `mirror_refresh_button_re_fetches`
@@ -427,16 +447,18 @@ event.
 
 ---
 
-### 3a-7 — Settings + privacy controls (P0, ~3 hari)
+### 3a-7 — Settings + privacy controls (P0, ~2-3 hari)
 
-**Why:** Engineer butuh control yang granular: per-workspace privacy + repo
-filter di sidebar + Bitable table membership.
+**Why:** Per-workspace privacy escape hatch + Bitable table membership +
+default-private toggle. Repo filter sudah hard di 3a-4 (tidak ada UI knob).
 
 **Frontend:**
 
 - [ ] `src/lib/components/settings/` — Settings panel grow:
   - Tab "Lark Integration" (sudah ada dari 3a-1) — extend dengan multi-table
-    support: list of `{ app_token, table_id, name }` instead of single
+    support: list of `{ app_token, table_id, name }` instead of single. Hanya
+    table yang ke-add di sini yang Ansambel poll — boundary tambahan supaya
+    engineer cuma terima data dari tim yang relevan.
   - Tab "Privacy" — defaults toggle:
     - "New workspaces are private by default" (default off)
     - "Sanitize regex patterns" — daftar regex extra (selain default secret
@@ -444,15 +466,12 @@ filter di sidebar + Bitable table membership.
 - [ ] `src/lib/components/workspace/PrivacyToggle.svelte` — ikon kunci di header
       workspace, klik → toggle Bitable `private`. Tooltip jelaskan "When
       private, no state is published to Lark"
-- [ ] `src/lib/components/sidebar/TeamActivityPanel.svelte` — repo filter
-      dropdown (Phase 3a-4 nge-implement; di sini-nya finalisasi default
-      behavior dan UX polish)
 
 **Backend:**
 
 - [ ] `commands/team_activity.rs` —
-      `set_workspace_private(workspace_id,     private)` command, trigger
-      publisher cleanup kalau dari false → true
+      `set_workspace_private(workspace_id, private)` command, trigger publisher
+      cleanup kalau dari false → true
 
 **Tests:**
 
@@ -460,8 +479,7 @@ filter di sidebar + Bitable table membership.
 - [ ] `privacy_toggle_clears_publisher_state_when_enabled`
 - [ ] `default_private_setting_applies_to_new_workspaces`
 - [ ] `multi_table_settings_persists`
-- [ ] `repo_filter_default_is_my_repos`
-- [ ] `repo_filter_persists_per_user`
+- [ ] `removing_table_from_settings_stops_polling_its_rows`
 
 ---
 
@@ -520,12 +538,22 @@ engineer B (di shift sore atau besok) lanjutin tanpa AI "lupa" history.
 **Frontend:**
 
 - [ ] `src/lib/components/workspace/HandoffDialog.svelte` — modal "Hand off to":
-  - Picker: pilih engineer dari registered user list (dari settings) atau
-    "Anyone in team"
+  - Picker: pilih engineer dari kandidat yang **also has the repo lokal**. Cara
+    deteksi: scan Bitable rows untuk `repo_id == self.workspace.repo_id` dan
+    `assignee_machine != self`, collect distinct `assignee_machine` values.
+    Tampilkan sebagai dropdown.
+  - Pilihan tambahan "Anyone with this repo" (`*`) — kalau target match engineer
+    manapun yang `repo_id`-nya overlap.
+  - Kalau tidak ada kandidat (engineer tunggal dengan repo ini): surface warning
+    "No teammate has this repo yet. Bundle will be uploaded but no one can
+    accept — share repo first."
   - Optional message: "Continue from … please"
   - Confirm button → progress indicator → success / error
 - [ ] Sidebar Team Activity — task dengan status `pending_handoff` munculin
-      "Accept handoff" button kalau target match self atau "\*"
+      "Accept handoff" button kalau:
+  - Engineer punya repo (`row.repo_id ∈ self.local_repos` — sudah dijamin karena
+    strict scope di 3a-4)
+  - Dan `handoff_target` match self machine atau `*`
 - [ ] `src/lib/stores/handoff.svelte.ts` — manage bundle download progress,
       apply state
 
@@ -539,11 +567,14 @@ engineer B (di shift sore atau besok) lanjutin tanpa AI "lupa" history.
 - [ ] `bundle_creation_handles_only_uncommitted_no_untracked`
 - [ ] `bundle_creation_handles_only_untracked`
 - [ ] `bundle_size_cap_enforced_at_50mb`
+- [ ] `handoff_picker_lists_only_engineers_with_same_repo`
+- [ ] `handoff_picker_warns_when_no_candidate_exists`
 - [ ] `accept_rejects_when_repo_not_added_locally`
 - [ ] `accept_rolls_back_on_mid_apply_failure`
 - [ ] `accept_creates_new_workspace_with_history_intact`
 - [ ] `accept_clears_handoff_fields_in_bitable`
 - [ ] `accept_handles_target_anyone_correctly`
+- [ ] `accept_button_hidden_when_repo_not_local`
 - [ ] `e2e_round_trip_a_to_b_preserves_conversation`
 - [ ] `e2e_b_can_continue_chat_after_accept`
 
@@ -569,27 +600,40 @@ engineer B (di shift sore atau besok) lanjutin tanpa AI "lupa" history.
    lolos. Mitigasi lapis: per-workspace `private` toggle (default off), dan
    default-private mode opsional di setting. Doc jelas peringatkan.
 
-4. **Bitable schema drift** — kalau engineer manual ubah field di Bitable
+4. **Repo scope = UX-only, bukan data-level enforcement** — strict client-side
+   filter di 3a-4 menyembunyikan row dari engineer non-pemilik repo di sidebar
+   Ansambel. Tapi **data masih ada di Bitable** — kalau engineer non-pemilik
+   buka Lark web UI / Lark mobile, dia tetap bisa lihat row tersebut beserta
+   `last_message_preview`, `pr_url`, dll. Mitigasi:
+   - Asumsi: anggota Bitable table sudah di-trust di level workspace Lark.
+   - Per-table membership di Settings (3a-7) memberi second-line defense —
+     engineer cuma poll table yang dia config.
+   - Per-workspace `private` toggle untuk workspace sensitif.
+   - Kalau perlu data-level enforcement: defer ke "Phase 3a-9 Bitable view
+     filter" (out-of-scope sekarang) atau split one Bitable per repo
+     (operational overhead).
+
+5. **Bitable schema drift** — kalau engineer manual ubah field di Bitable
    (rename, hapus), Ansambel error. Mitigasi: setup script `bun run setup-lark`
    yang validate schema on startup, surface specific error "field X missing".
 
-5. **Multi-machine identity collision** — `assignee_machine` format
+6. **Multi-machine identity collision** — `assignee_machine` format
    `user@hostname`. Kalau user pakai laptop A pagi + desktop B sore, 2 identity.
    Bisa confuse Team Activity. Mitigasi: settings input "machine alias" untuk
    manual override. Default: `{whoami}@{hostname}`.
 
-6. **Handoff race** — A bundle, B accept bersamaan dengan A masih ngebundle.
+7. **Handoff race** — A bundle, B accept bersamaan dengan A masih ngebundle.
    Mitigasi: status `pending_handoff` jadi gating — A baru set status itu
    setelah upload sukses. Sebelum itu state masih `running` (assigned to A). B
    hanya lihat "Accept" button setelah status `pending_handoff` muncul.
 
-7. **PR auto-target main bypassing review** — Phase 3a TIDAK ship auto-PR (defer
+8. **PR auto-target main bypassing review** — Phase 3a TIDAK ship auto-PR (defer
    ke Phase 7-mini). Tapi state publisher publish `pr_url` yang engineer create
    manual via `gh pr create`. Manual flow → review tetap masuk. Hard-block
    direct push ke main BISA implement di sini (3a-8 sudah reject branch == main
    untuk handoff bundle creation).
 
-8. **`git push` error saat handoff** — engineer tanpa internet, push gagal,
+9. **`git push` error saat handoff** — engineer tanpa internet, push gagal,
    bundle creation gagal. Mitigasi: surface clear error "push failed, fix
    network and retry". State Bitable tidak di-update sebelum push sukses.
 
