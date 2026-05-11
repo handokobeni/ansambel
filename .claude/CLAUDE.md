@@ -109,6 +109,12 @@ nice-to-have). Full design spec in
 
 ---
 
+## Platform quirks
+
+Cross-platform gotchas (Windows ConPTY, line endings, env inheritance, Tauri
+IPC, xterm.js mount, etc.) are documented in `docs/platform-quirks.md`. Read
+before debugging OS-specific bugs; add to it whenever you fix one.
+
 ## Architecture
 
 See `docs/superpowers/specs/2026-04-17-ansambel-design.md` for the full
