@@ -76,17 +76,43 @@ pub fn spawn_terminal_inner(
     // /bin/sh; Windows uses cmd.exe. xterm.js's interactive UX assumes
     // a shell prompt, so this is what the user expects.
     let cmd = build_shell_command(&worktree_dir);
-
     let session = pty::spawn(cmd)?;
+    spawn_terminal_inner_with_pty(workspace_id, Box::new(session), cols, rows, state)
+}
+
+/// Test-friendly variant that takes a pre-built PTY. Production code
+/// path goes through `spawn_terminal_inner` (above) which builds a real
+/// shell command and spawns a `PortablePty`. Unit tests inject a
+/// `MockPty` so the threading / state-machine logic can be verified
+/// without spawning a real process.
+pub fn spawn_terminal_inner_with_pty(
+    workspace_id: &str,
+    pty: Box<dyn pty::Pty + Send>,
+    cols: u16,
+    rows: u16,
+    state: Arc<Mutex<AppState>>,
+) -> Result<broadcast::Receiver<TerminalChunk>> {
+    // Double-check no terminal already active. `spawn_terminal_inner`
+    // (the production wrapper) already does this before spawning, but
+    // tests can call `_with_pty` directly so we re-check here.
+    {
+        let st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        if st.terminals.contains_key(workspace_id) {
+            return Err(AppError::InvalidState(format!(
+                "terminal already active for workspace '{workspace_id}' — call reattach instead"
+            )));
+        }
+    }
+
     // Resize before starting threads so the first prompt renders at
     // the requested dimensions.
     let cols = cols.clamp(MIN_DIM, MAX_DIM);
     let rows = rows.clamp(MIN_DIM, MAX_DIM);
-    let _ = session.resize(rows, cols);
+    let _ = pty.resize(rows, cols);
 
-    let reader = session.reader()?;
-    let writer = session.writer()?;
-    let session = Arc::new(Mutex::new(session));
+    let reader = pty.reader()?;
+    let writer = pty.writer()?;
+    let session: Arc<Mutex<Box<dyn pty::Pty + Send>>> = Arc::new(Mutex::new(pty));
 
     let (event_tx, event_rx) = broadcast::channel::<TerminalChunk>(BROADCAST_CAPACITY);
     let (stdin_tx, stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -100,9 +126,9 @@ pub fn spawn_terminal_inner(
         Arc::clone(&session),
     );
     // Windows ConPTY doesn't reliably deliver EOF when the child exits
-    // cleanly (e.g., user types `exit\n`). The watchdog polls
-    // `try_wait` and force-kills the PTY when the child has exited so
-    // the reader's blocking read returns and the Exited chunk fires.
+    // cleanly (e.g., user types `exit\r`). The watchdog polls
+    // `try_wait` and force-closes the master when the child has exited
+    // so the reader's blocking read returns and the Exited chunk fires.
     spawn_exit_watchdog(Arc::clone(&session), Arc::clone(&cancel));
 
     let handle = TerminalHandle {
@@ -300,7 +326,7 @@ fn spawn_writer_thread(
 /// reader blocked on a read that never returns. `child.kill()` alone
 /// does not close the master on Windows — only dropping the master
 /// (`close_master()`) propagates EOF to the reader.
-fn spawn_exit_watchdog(session: Arc<Mutex<pty::PtySession>>, cancel: Arc<AtomicBool>) {
+fn spawn_exit_watchdog(session: Arc<Mutex<Box<dyn pty::Pty + Send>>>, cancel: Arc<AtomicBool>) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_millis(100));
         if cancel.load(Ordering::SeqCst) {
@@ -325,7 +351,7 @@ fn spawn_reader_thread(
     mut reader: Box<dyn std::io::Read + Send>,
     event_tx: broadcast::Sender<TerminalChunk>,
     cancel: Arc<AtomicBool>,
-    session: Arc<Mutex<pty::PtySession>>,
+    session: Arc<Mutex<Box<dyn pty::Pty + Send>>>,
 ) {
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -406,6 +432,7 @@ fn forward_to_channel(mut rx: broadcast::Receiver<TerminalChunk>, channel: Chann
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::pty::{MockPty, Pty};
     use crate::state::{KanbanColumn, WorkspaceInfo, WorkspaceStatus};
     use std::path::PathBuf;
     use std::time::Duration;
@@ -486,57 +513,121 @@ mod tests {
             .any(|c| matches!(c, TerminalChunk::Exited { .. }))
     }
 
+    /// Spawn a terminal in `state` backed by a `MockPty`. Returns the
+    /// broadcaster receiver + the mock handle so the test can push
+    /// stdout, trigger exit, etc. Avoids spawning a real shell —
+    /// deterministic, OS-independent, instant.
+    fn spawn_with_mock(
+        workspace_id: &str,
+        state: &Arc<Mutex<AppState>>,
+    ) -> (
+        broadcast::Receiver<TerminalChunk>,
+        crate::platform::pty::MockPtyHandle,
+    ) {
+        let (mock, handle) = MockPty::new(1234);
+        let rx =
+            spawn_terminal_inner_with_pty(workspace_id, Box::new(mock), 80, 24, Arc::clone(state))
+                .unwrap();
+        (rx, handle)
+    }
+
     // ── spawn ────────────────────────────────────────────────────────
 
     #[test]
+    fn spawn_terminal_streams_bytes_and_exit_chunk() {
+        // MockPty-driven: deterministic on all OS. Verifies the
+        // state-machine + threading logic without spawning a real shell.
+        let state = Arc::new(Mutex::new(AppState::default()));
+        let (rx, mock) = spawn_with_mock("ws_spawn", &state);
+
+        // Push some bytes, then signal exit. The watchdog (100ms poll)
+        // will detect exit and close the master, the reader thread will
+        // EOF, and the Exited chunk will fire.
+        mock.push_stdout(b"hello\r\n");
+        mock.set_exited(0);
+
+        let chunks = drain_until(rx, Duration::from_secs(3), has_exit);
+        assert!(
+            has_exit(&chunks),
+            "expected an Exited chunk, got: {chunks:?}"
+        );
+        let bytes = collected_bytes(&chunks);
+        assert!(
+            bytes.windows(5).any(|w| w == b"hello"),
+            "expected 'hello' in bytes, got: {bytes:?}"
+        );
+
+        kill_terminal_inner("ws_spawn", state).unwrap();
+    }
+
+    #[test]
+    fn spawn_terminal_forwards_writes_to_pty() {
+        // Verify write_terminal_inner pipes bytes to the underlying
+        // PTY's writer. With MockPty we can inspect what landed there.
+        let state = Arc::new(Mutex::new(AppState::default()));
+        let (_rx, mock) = spawn_with_mock("ws_write", &state);
+
+        write_terminal_inner("ws_write", b"echo hi\r".to_vec(), Arc::clone(&state)).unwrap();
+
+        // Writer thread is async; poll the mock's collected stdin for
+        // up to ~1s. Beats hard-sleeping.
+        let mut got = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while std::time::Instant::now() < deadline {
+            got = mock.stdin_bytes();
+            if !got.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(got, b"echo hi\r");
+
+        kill_terminal_inner("ws_write", state).unwrap();
+    }
+
+    #[test]
     fn spawn_terminal_inner_starts_shell_and_streams_output() {
-        // Use a deterministic non-interactive shell command that exits
-        // quickly: `echo hello`. The Bytes chunk should contain "hello"
-        // and an Exited chunk should follow.
+        // Real-shell integration test — kept as a single happy-path
+        // check that build_shell_command + portable-pty actually work
+        // on this host. Detail-level state-machine assertions live in
+        // the MockPty-driven tests above.
         let (_tmp, wt) = make_worktree();
-        let state = make_state("ws_spawn", &wt);
+        let state = make_state("ws_spawn_real", &wt);
 
-        // Override SHELL so our build_shell_command picks an exit-fast
-        // shell. Doesn't matter on Windows because cmd.exe is used.
-        // We can't easily mock build_shell_command from tests, so this
-        // test runs against the user's real shell — if the user has
-        // a quirky $SHELL the test might be flaky. Cap with a short
-        // deadline so a hang surfaces fast.
-        let rx = spawn_terminal_inner("ws_spawn", 80, 24, Arc::clone(&state)).unwrap();
+        let rx = spawn_terminal_inner("ws_spawn_real", 80, 24, Arc::clone(&state)).unwrap();
 
-        // Push `exit` followed by CR+LF so the shell terminates quickly.
-        // cmd.exe treats `\r` as the line terminator (what xterm.js sends
-        // for Enter on Windows); bash/zsh on Unix accept both `\r` and
-        // `\n`. `\r\n` works everywhere.
-        write_terminal_inner("ws_spawn", b"exit\r\n".to_vec(), Arc::clone(&state)).unwrap();
+        // `\r\n` works on both Unix shells and cmd.exe in ConPTY.
+        write_terminal_inner("ws_spawn_real", b"exit\r\n".to_vec(), Arc::clone(&state)).unwrap();
 
         let chunks = drain_until(rx, Duration::from_secs(5), has_exit);
         assert!(
             has_exit(&chunks),
             "expected an Exited chunk, got: {chunks:?}"
         );
-        // Some bytes should have arrived (shell prompt or echo).
         let bytes = collected_bytes(&chunks);
         assert!(
             !bytes.is_empty(),
             "expected at least one Bytes chunk, got none"
         );
 
-        // Cleanup: remove the (now-exited) handle.
-        kill_terminal_inner("ws_spawn", state).unwrap();
+        kill_terminal_inner("ws_spawn_real", state).unwrap();
     }
 
     #[test]
     fn spawn_terminal_inner_rejects_double_spawn() {
-        let (_tmp, wt) = make_worktree();
-        let state = make_state("ws_dup", &wt);
+        let state = Arc::new(Mutex::new(AppState::default()));
+        let (_rx, _mock) = spawn_with_mock("ws_dup", &state);
 
-        let _rx = spawn_terminal_inner("ws_dup", 80, 24, Arc::clone(&state)).unwrap();
-        let err = spawn_terminal_inner("ws_dup", 80, 24, Arc::clone(&state)).unwrap_err();
+        // Second spawn (via with_pty, same workspace) must error.
+        let (mock2, _h2) = MockPty::new(2);
+        let err =
+            spawn_terminal_inner_with_pty("ws_dup", Box::new(mock2), 80, 24, Arc::clone(&state))
+                .unwrap_err();
         assert!(
             err.to_string().contains("already active"),
             "expected 'already active', got: {err}"
         );
+
         kill_terminal_inner("ws_dup", state).unwrap();
     }
 
@@ -576,15 +667,20 @@ mod tests {
 
     #[test]
     fn resize_terminal_inner_clamps_extreme_values_and_returns_ok_for_active_session() {
-        let (_tmp, wt) = make_worktree();
-        let state = make_state("ws_resize", &wt);
-        let _rx = spawn_terminal_inner("ws_resize", 80, 24, Arc::clone(&state)).unwrap();
+        let state = Arc::new(Mutex::new(AppState::default()));
+        let (_rx, mock) = spawn_with_mock("ws_resize", &state);
 
         // Both extremes should clamp internally and not error.
         resize_terminal_inner("ws_resize", 0, 0, Arc::clone(&state)).unwrap();
         // u16::MAX exercises the upper-clamp branch.
         resize_terminal_inner("ws_resize", u16::MAX, u16::MAX, Arc::clone(&state)).unwrap();
         resize_terminal_inner("ws_resize", 120, 40, Arc::clone(&state)).unwrap();
+
+        // The mock records the last resize; confirm it was forwarded
+        // with clamped values (cols=120, rows=40 in that order on the
+        // last call). This proves resize_terminal_inner actually calls
+        // through to the PTY rather than silently swallowing.
+        assert_eq!(mock.last_resize(), Some((40, 120)));
 
         kill_terminal_inner("ws_resize", state).unwrap();
     }
@@ -603,9 +699,8 @@ mod tests {
 
     #[test]
     fn kill_terminal_inner_is_idempotent() {
-        let (_tmp, wt) = make_worktree();
-        let state = make_state("ws_kill", &wt);
-        let _rx = spawn_terminal_inner("ws_kill", 80, 24, Arc::clone(&state)).unwrap();
+        let state = Arc::new(Mutex::new(AppState::default()));
+        let (_rx, _mock) = spawn_with_mock("ws_kill", &state);
 
         kill_terminal_inner("ws_kill", Arc::clone(&state)).unwrap();
         // Second call: handle is gone, but inner returns Ok.
@@ -616,9 +711,8 @@ mod tests {
 
     #[test]
     fn kill_terminal_inner_drops_handle() {
-        let (_tmp, wt) = make_worktree();
-        let state = make_state("ws_drop", &wt);
-        let _rx = spawn_terminal_inner("ws_drop", 80, 24, Arc::clone(&state)).unwrap();
+        let state = Arc::new(Mutex::new(AppState::default()));
+        let (_rx, _mock) = spawn_with_mock("ws_drop", &state);
         assert!(state.lock().unwrap().terminals.contains_key("ws_drop"));
         kill_terminal_inner("ws_drop", Arc::clone(&state)).unwrap();
         assert!(!state.lock().unwrap().terminals.contains_key("ws_drop"));
@@ -638,21 +732,23 @@ mod tests {
 
     #[test]
     fn reattach_terminal_inner_delivers_subsequent_chunks_to_new_subscriber() {
-        let (_tmp, wt) = make_worktree();
-        let state = make_state("ws_re", &wt);
-        let _initial = spawn_terminal_inner("ws_re", 80, 24, Arc::clone(&state)).unwrap();
+        let state = Arc::new(Mutex::new(AppState::default()));
+        let (_initial, mock) = spawn_with_mock("ws_re", &state);
 
-        // Subscribe a fresh receiver via reattach. The next bytes the
-        // shell emits (via our `exit\n` push) must arrive on the new
-        // receiver — proves reattach plugs into the broadcaster, not a
-        // private channel.
+        // Subscribe a fresh receiver via reattach. Bytes pushed AFTER
+        // the reattach must arrive on the new receiver — proves
+        // reattach plugs into the broadcaster, not a private channel.
         let rx = reattach_terminal_inner("ws_re", Arc::clone(&state)).unwrap();
-        // CR+LF: cmd.exe needs `\r` to treat as Enter; Unix shells accept
-        // either. See the spawn test for the full rationale.
-        write_terminal_inner("ws_re", b"exit\r\n".to_vec(), Arc::clone(&state)).unwrap();
+        mock.push_stdout(b"after-reattach\r\n");
+        mock.set_exited(0);
 
-        let chunks = drain_until(rx, Duration::from_secs(5), has_exit);
+        let chunks = drain_until(rx, Duration::from_secs(3), has_exit);
         assert!(has_exit(&chunks), "expected Exited on reattached rx");
+        let bytes = collected_bytes(&chunks);
+        assert!(
+            bytes.windows(14).any(|w| w == b"after-reattach"),
+            "expected post-reattach bytes, got: {bytes:?}"
+        );
 
         kill_terminal_inner("ws_re", state).unwrap();
     }

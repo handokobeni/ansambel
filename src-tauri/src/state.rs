@@ -99,8 +99,9 @@ pub struct TerminalHandle {
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// PTY master — kept around so `terminal_resize` and
     /// `terminal_kill` can call into it. Wrapped in a Mutex because the
-    /// PtySession itself is `!Sync` (master is `Send` but not shared).
-    pub pty: std::sync::Arc<std::sync::Mutex<crate::platform::pty::PtySession>>,
+    /// concrete PTY is `!Sync` (master is `Send` but not shared).
+    /// Trait object so tests can inject `MockPty`.
+    pub pty: std::sync::Arc<std::sync::Mutex<Box<dyn crate::platform::pty::Pty + Send>>>,
 }
 
 /// Runtime-only handle to a spawned Claude agent process. Not persisted —

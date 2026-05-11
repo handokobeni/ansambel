@@ -107,7 +107,7 @@ pub fn script_run_inner<F>(
     workspace_id: &str,
     script_id: &str,
     state: Arc<Mutex<AppState>>,
-    mut emit: F,
+    emit: F,
 ) -> crate::error::Result<()>
 where
     F: FnMut(TerminalChunk) + Send + 'static,
@@ -158,8 +158,18 @@ where
     cmd.env("TERM", "xterm-256color");
 
     let session = pty::spawn(cmd)?;
-    let reader = session.reader()?;
-    let session = Arc::new(Mutex::new(session));
+    run_pty_with_emit(Box::new(session), emit)
+}
+
+/// Test-friendly variant: take a pre-built PTY and run the reader +
+/// watchdog threads against it. Production code path spawns a real
+/// `PortablePty`; tests inject `MockPty`.
+pub fn run_pty_with_emit<F>(pty: Box<dyn pty::Pty + Send>, mut emit: F) -> crate::error::Result<()>
+where
+    F: FnMut(TerminalChunk) + Send + 'static,
+{
+    let reader = pty.reader()?;
+    let session: Arc<Mutex<Box<dyn pty::Pty + Send>>> = Arc::new(Mutex::new(pty));
 
     // Watchdog: poll `try_wait` and force-close the master PTY when the
     // child has exited. Without this the Windows ConPTY reader stays
@@ -500,10 +510,48 @@ mod tests {
     }
 
     #[test]
-    fn script_run_inner_streams_output_and_emits_exit_chunk() {
+    fn run_pty_with_emit_streams_output_and_emits_exit_chunk() {
+        // MockPty-driven: tests the reader + watchdog + emit pipeline
+        // without spawning a real shell. Deterministic on all OS.
+        use crate::platform::pty::MockPty;
+
+        let (mock, handle) = MockPty::new(42);
+        let (tx, rx) = std::sync::mpsc::channel::<TerminalChunk>();
+        let emit = move |chunk: TerminalChunk| {
+            let _ = tx.send(chunk);
+        };
+        run_pty_with_emit(Box::new(mock), emit).unwrap();
+
+        // Push output then signal exit. Watchdog picks it up within
+        // ~100ms and closes the master so the reader EOFs.
+        handle.push_stdout(b"hello\r\n");
+        handle.set_exited(0);
+
+        let chunks = collect_chunks_until_exit(rx, Duration::from_secs(3));
+        assert!(
+            chunks.len() >= 2,
+            "expected ≥2 chunks (bytes + exit), got {chunks:?}"
+        );
+        assert!(matches!(chunks.last(), Some(TerminalChunk::Exited { .. })));
+        let combined: Vec<u8> = chunks
+            .iter()
+            .filter_map(|c| match c {
+                TerminalChunk::Bytes { bytes } => Some(bytes.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let text = String::from_utf8_lossy(&combined);
+        assert!(text.contains("hello"), "expected 'hello' in: {text:?}");
+    }
+
+    #[test]
+    fn script_run_inner_resolves_workspace_and_script_then_spawns() {
+        // Real-shell integration test — kept as the one happy-path
+        // check that build_shell_command + portable-pty work end-to-end
+        // on this host. State-machine assertions live in the MockPty
+        // test above.
         let (_tmp, wt) = make_worktree();
-        // Cross-platform "echo hello" — on Windows we'd use a different
-        // command but `echo hello` works in cmd /c too.
         let scripts = vec![RepoScript {
             id: "sc_echo".into(),
             name: "Echo".into(),
@@ -518,23 +566,12 @@ mod tests {
         script_run_inner("ws_a", "sc_echo", state, emit).unwrap();
 
         let chunks = collect_chunks_until_exit(rx, Duration::from_secs(5));
-        // At minimum we expect one Bytes chunk + one Exited chunk.
         assert!(
-            chunks.len() >= 2,
-            "expected ≥2 chunks (bytes + exit), got {chunks:?}"
+            chunks
+                .iter()
+                .any(|c| matches!(c, TerminalChunk::Exited { .. })),
+            "expected an Exited chunk eventually, got: {chunks:?}"
         );
-        assert!(matches!(chunks.last(), Some(TerminalChunk::Exited { .. })));
-        // The output should include "hello" somewhere.
-        let combined: Vec<u8> = chunks
-            .iter()
-            .filter_map(|c| match c {
-                TerminalChunk::Bytes { bytes } => Some(bytes.clone()),
-                _ => None,
-            })
-            .flatten()
-            .collect();
-        let text = String::from_utf8_lossy(&combined);
-        assert!(text.contains("hello"), "expected 'hello' in: {text:?}");
     }
 
     #[test]
