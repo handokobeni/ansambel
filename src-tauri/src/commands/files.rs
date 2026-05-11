@@ -141,7 +141,7 @@ pub async fn workspace_files(
 
 // ── helpers ─────────────────────────────────────────────────────────
 
-fn resolve_within_worktree(worktree: &Path, rel: &str) -> Result<PathBuf> {
+pub(crate) fn resolve_within_worktree(worktree: &Path, rel: &str) -> Result<PathBuf> {
     // Reject obviously-absolute inputs *before* the join. On Unix
     // `PathBuf::join("/etc")` resets to "/etc"; on Windows it instead
     // becomes `<drive>:/etc` which then fails canonicalize with

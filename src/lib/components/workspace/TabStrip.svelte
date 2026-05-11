@@ -61,4 +61,28 @@
   >
     Files <span class="ml-2 text-xs text-[var(--text-muted)]" aria-hidden="true">⌃3</span>
   </button>
+  <button
+    type="button"
+    role="tab"
+    data-testid="tab-editor"
+    aria-selected={active === 'editor'}
+    aria-controls="tabpanel-editor"
+    tabindex={active === 'editor' ? 0 : -1}
+    onclick={() => onSelect('editor')}
+    class={classFor('editor')}
+  >
+    Editor <span class="ml-2 text-xs text-[var(--text-muted)]" aria-hidden="true">⌃4</span>
+  </button>
+  <button
+    type="button"
+    role="tab"
+    data-testid="tab-terminal"
+    aria-selected={active === 'terminal'}
+    aria-controls="tabpanel-terminal"
+    tabindex={active === 'terminal' ? 0 : -1}
+    onclick={() => onSelect('terminal')}
+    class={classFor('terminal')}
+  >
+    Terminal <span class="ml-2 text-xs text-[var(--text-muted)]" aria-hidden="true">⌃5</span>
+  </button>
 </div>

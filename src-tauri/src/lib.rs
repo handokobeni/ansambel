@@ -33,6 +33,7 @@ pub fn run() {
                 workspaces,
                 tasks,
                 agents: std::collections::HashMap::new(),
+                terminals: std::collections::HashMap::new(),
                 settings,
             };
 
@@ -75,6 +76,16 @@ pub fn run() {
             crate::commands::diff::workspace_diff,
             crate::commands::files::workspace_files,
             crate::commands::search::workspace_search,
+            crate::commands::scripts::script_list,
+            crate::commands::scripts::script_set,
+            crate::commands::terminal::terminal_spawn,
+            crate::commands::terminal::terminal_write,
+            crate::commands::terminal::terminal_resize,
+            crate::commands::terminal::terminal_kill,
+            crate::commands::terminal::terminal_reattach,
+            crate::commands::file_io::file_read,
+            crate::commands::file_io::file_write,
+            crate::commands::scripts::script_run,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -102,12 +113,13 @@ mod tests {
     fn app_state_construction_includes_tasks_field() {
         use crate::state::{AppSettings, AppState};
         use std::collections::HashMap;
-        // Verify the struct literal compiles with all three entity maps.
+        // Verify the struct literal compiles with all entity maps.
         let state = AppState {
             repos: HashMap::new(),
             workspaces: HashMap::new(),
             tasks: HashMap::new(),
             agents: HashMap::new(),
+            terminals: HashMap::new(),
             settings: AppSettings::default(),
         };
         assert!(state.tasks.is_empty());
@@ -141,6 +153,56 @@ mod tests {
     }
 
     #[test]
+    fn script_list_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::scripts::script_list);
+    }
+
+    #[test]
+    fn script_set_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::scripts::script_set);
+    }
+
+    #[test]
+    fn terminal_spawn_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::terminal::terminal_spawn);
+    }
+
+    #[test]
+    fn terminal_write_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::terminal::terminal_write);
+    }
+
+    #[test]
+    fn terminal_resize_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::terminal::terminal_resize);
+    }
+
+    #[test]
+    fn terminal_kill_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::terminal::terminal_kill);
+    }
+
+    #[test]
+    fn terminal_reattach_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::terminal::terminal_reattach);
+    }
+
+    #[test]
+    fn file_read_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::file_io::file_read);
+    }
+
+    #[test]
+    fn file_write_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::file_io::file_write);
+    }
+
+    #[test]
+    fn script_run_command_is_registered() {
+        let _ = std::any::type_name_of_val(&crate::commands::scripts::script_run);
+    }
+
+    #[test]
     fn all_agent_commands_are_accessible() {
         // Compile-time check that all five command functions are pub and accessible
         use crate::commands::agent::{
@@ -162,8 +224,10 @@ mod tests {
             workspaces: HashMap::new(),
             tasks: HashMap::new(),
             agents: HashMap::new(),
+            terminals: HashMap::new(),
             settings: AppSettings::default(),
         };
         assert!(state.agents.is_empty());
+        assert!(state.terminals.is_empty());
     }
 }

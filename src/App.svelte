@@ -60,6 +60,15 @@
       searchMode = 'content';
       searchOpen = true;
     });
+    // Phase 2b: workspace tab shortcuts. ⌃1-3 are claimed by mode/plan
+    // shortcuts above; tabs 4 (Editor) and 5 (Terminal) get keyboard
+    // bindings here. Both are no-ops without a selected workspace.
+    registry.register('ctrl+4', () => {
+      if (selectedWorkspace) workspaceTabs.setActive(selectedWorkspace.id, 'editor');
+    });
+    registry.register('ctrl+5', () => {
+      if (selectedWorkspace) workspaceTabs.setActive(selectedWorkspace.id, 'terminal');
+    });
 
     await repos.load();
     // Cold-start auto-select: selectedRepoId is in-memory only, so on every
@@ -168,8 +177,9 @@
     onClose={() => (searchOpen = false)}
     onJump={(path) => {
       if (selectedWorkspace) {
-        // Switch to the Files tab and stamp the path so the FileBrowser
-        // highlights the row. Editor / line-jump arrives in Phase 2b.
+        // Switch to Files and stamp the path so the tree highlights and
+        // expands ancestors. The user clicks the row to actually open it
+        // in the Editor — the FileBrowser onOpen wire handles that.
         workspaceTabs.setActive(selectedWorkspace.id, 'files');
         highlightedFile = path;
       }

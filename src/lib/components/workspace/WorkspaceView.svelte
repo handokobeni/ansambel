@@ -3,10 +3,16 @@
   import { api, agentChannel } from '$lib/ipc';
   import { messages } from '$lib/stores/messages.svelte';
   import { workspaceTabs } from '$lib/stores/workspace-tabs.svelte';
+  import { editorTabs } from '$lib/stores/editor-tabs.svelte';
+  import { addToast } from '$lib/stores/toasts.svelte';
   import ChatPanel from '$lib/components/chat/ChatPanel.svelte';
   import TabStrip from './TabStrip.svelte';
   import DiffView from './DiffView.svelte';
   import FileBrowser from './FileBrowser.svelte';
+  import Editor from './Editor.svelte';
+  import EditorTabBar from './EditorTabBar.svelte';
+  import Terminal from './Terminal.svelte';
+  import ScriptPicker from './ScriptPicker.svelte';
   import type { AgentEvent, Attachment, AttachmentDraft, WorkspaceInfo } from '$lib/types';
 
   interface Props {
@@ -135,6 +141,16 @@
     }
   }
 
+  async function handleFileOpen(path: string): Promise<void> {
+    try {
+      const r = await api.file.read(workspace.id, path);
+      editorTabs.openFile(workspace.id, path, r.content, r.sha1, r.is_binary);
+      workspaceTabs.setActive(workspace.id, 'editor');
+    } catch (err) {
+      addToast(`Open failed: ${String(err)}`, 'error');
+    }
+  }
+
   function statusLabel(s: string): string {
     if (s === 'running') return 'Running';
     if (s === 'waiting') return 'Waiting';
@@ -208,7 +224,35 @@
       aria-labelledby="tab-files"
       class="absolute inset-0"
     >
-      <FileBrowser workspaceId={workspace.id} selectedPath={highlightedFile} />
+      <FileBrowser
+        workspaceId={workspace.id}
+        selectedPath={highlightedFile}
+        onOpen={handleFileOpen}
+      />
+    </div>
+    <div
+      id="tabpanel-editor"
+      class:hidden={activeTab !== 'editor'}
+      role="tabpanel"
+      aria-labelledby="tab-editor"
+      class="absolute inset-0 flex flex-col"
+    >
+      <EditorTabBar workspaceId={workspace.id} />
+      <div class="flex-1 overflow-hidden">
+        <Editor workspaceId={workspace.id} />
+      </div>
+    </div>
+    <div
+      id="tabpanel-terminal"
+      class:hidden={activeTab !== 'terminal'}
+      role="tabpanel"
+      aria-labelledby="tab-terminal"
+      class="absolute inset-0 flex flex-col"
+    >
+      <ScriptPicker repoId={workspace.repo_id} workspaceId={workspace.id} />
+      <div class="flex-1 overflow-hidden">
+        <Terminal workspaceId={workspace.id} />
+      </div>
     </div>
   </div>
 </section>

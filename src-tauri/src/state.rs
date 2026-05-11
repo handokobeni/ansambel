@@ -66,6 +66,44 @@ pub struct Task {
     pub updated_at: i64,
 }
 
+/// One streamed slice of terminal output. Tagged so the frontend (and
+/// future tests) can pattern-match without an extra discriminator.
+#[derive(Serialize, Clone, Debug)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TerminalChunk {
+    /// Raw bytes from PTY stdout. xterm.js wants bytes (not strings) so
+    /// it can parse ANSI escape sequences without UTF-8 round-tripping.
+    Bytes { bytes: Vec<u8> },
+    /// PTY child has exited. The frontend renders an inline
+    /// `[process exited with code N]` marker and stops accepting input.
+    Exited { code: Option<i32> },
+}
+
+/// Runtime-only handle to a per-workspace terminal session. Mirrors the
+/// `AgentHandle` shape — same broadcaster + cancel pattern so the
+/// frontend can switch workspaces and reattach without losing buffer.
+/// Not persisted; dies on app restart.
+#[derive(Debug)]
+pub struct TerminalHandle {
+    pub workspace_id: String,
+    /// Sends raw bytes (typically keystrokes) to the PTY's stdin writer
+    /// thread. Bytes-typed because terminal input is opaque — even
+    /// keystrokes can be ANSI escape sequences.
+    pub stdin_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    /// Broadcast sender for terminal output. The reader thread emits
+    /// into this; `terminal_spawn` and `terminal_reattach` both
+    /// subscribe and forward chunks to a Tauri Channel. Buffer of 256
+    /// matches `AgentHandle.event_tx`.
+    pub event_tx: tokio::sync::broadcast::Sender<TerminalChunk>,
+    /// Cancel signal for the reader thread.
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// PTY master — kept around so `terminal_resize` and
+    /// `terminal_kill` can call into it. Wrapped in a Mutex because the
+    /// concrete PTY is `!Sync` (master is `Send` but not shared).
+    /// Trait object so tests can inject `MockPty`.
+    pub pty: std::sync::Arc<std::sync::Mutex<Box<dyn crate::platform::pty::Pty + Send>>>,
+}
+
 /// Runtime-only handle to a spawned Claude agent process. Not persisted —
 /// dies on app restart, so workspace status resets Running → Waiting.
 #[derive(Debug)]
@@ -94,7 +132,22 @@ pub struct AppState {
     pub workspaces: std::collections::HashMap<String, WorkspaceInfo>,
     pub tasks: std::collections::HashMap<String, Task>,
     pub agents: std::collections::HashMap<String, AgentHandle>, // runtime-only
+    /// Per-workspace terminal sessions (Phase 2b). Runtime-only — dies
+    /// on app restart. Keyed by workspace id.
+    pub terminals: std::collections::HashMap<String, TerminalHandle>,
     pub settings: AppSettings,
+}
+
+/// A user-configured script per repo. The script runner picks one of
+/// these and spawns the command via PTY rooted at the worktree dir.
+/// Phase 2b ships read-only listing; the set command is wired so a
+/// future settings UI (Phase 8) can mutate without further backend
+/// work.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RepoScript {
+    pub id: String,
+    pub name: String,
+    pub command: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -106,6 +159,11 @@ pub struct RepoInfo {
     pub default_branch: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Per-repo scripts surfaced in the workspace Terminal tab. Empty
+    /// for repos persisted before Phase 2b — the `#[serde(default)]`
+    /// keeps older `repos.json` files loading without migration.
+    #[serde(default)]
+    pub scripts: Vec<RepoScript>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -489,6 +547,11 @@ mod tests {
             default_branch: "main".into(),
             created_at: 1_776_000_000,
             updated_at: 1_776_099_000,
+            scripts: vec![RepoScript {
+                id: "sc_test".into(),
+                name: "Run tests".into(),
+                command: "bun test".into(),
+            }],
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: RepoInfo = serde_json::from_str(&json).unwrap();
@@ -505,6 +568,7 @@ mod tests {
             default_branch: "main".into(),
             created_at: 0,
             updated_at: 0,
+            scripts: Vec::new(),
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"gh_profile\":null"));
@@ -827,8 +891,32 @@ mod tests {
             workspaces: std::collections::HashMap::new(),
             tasks: std::collections::HashMap::new(),
             agents: std::collections::HashMap::new(),
+            terminals: std::collections::HashMap::new(),
             settings: AppSettings::default(),
         };
+    }
+
+    #[test]
+    fn terminal_chunk_bytes_serializes_with_kind_tag() {
+        let c = TerminalChunk::Bytes {
+            bytes: vec![0x68, 0x69],
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"kind\":\"bytes\""), "got: {json}");
+        // bytes serialize as a JSON number array — preserves binary-safety
+        // for ANSI escapes that aren't valid UTF-8.
+        assert!(json.contains("[104,105]"), "got: {json}");
+    }
+
+    #[test]
+    fn terminal_chunk_exited_serializes_with_kind_tag_and_optional_code() {
+        let c = TerminalChunk::Exited { code: Some(0) };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"kind\":\"exited\""));
+        assert!(json.contains("\"code\":0"));
+        let c2 = TerminalChunk::Exited { code: None };
+        let json2 = serde_json::to_string(&c2).unwrap();
+        assert!(json2.contains("\"code\":null"));
     }
 
     #[test]

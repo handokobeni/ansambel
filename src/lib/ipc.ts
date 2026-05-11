@@ -15,6 +15,10 @@ import type {
   FileEntry,
   SearchHit,
   SearchMode,
+  RepoScript,
+  TerminalChunk,
+  FileReadResponse,
+  FileWriteResponse,
 } from './types';
 
 export type ListMessagesOpts = {
@@ -115,6 +119,70 @@ export const api = {
         limit: opts.limit ?? null,
         beforeId: opts.beforeId ?? null,
       }),
+  },
+
+  // ── Phase 2b: interactive surfaces ─────────────────────────────────
+
+  terminal: {
+    /** Spawn a per-workspace shell rooted at the worktree dir. Stream
+     *  raw bytes (xterm.js needs them ANSI-intact) over the channel. */
+    spawn: (
+      workspaceId: string,
+      channel: Channel<TerminalChunk>,
+      cols?: number,
+      rows?: number
+    ): Promise<void> => invoke('terminal_spawn', { workspaceId, channel, cols, rows }),
+
+    /** Push raw bytes (typically keystrokes) onto the terminal's stdin. */
+    write: (workspaceId: string, bytes: number[]): Promise<void> =>
+      invoke('terminal_write', { workspaceId, bytes }),
+
+    /** Reflow the PTY to new dimensions. Backend clamps to [1, 1000]. */
+    resize: (workspaceId: string, cols: number, rows: number): Promise<void> =>
+      invoke('terminal_resize', { workspaceId, cols, rows }),
+
+    /** Kill the workspace's terminal. Idempotent. */
+    kill: (workspaceId: string): Promise<void> => invoke('terminal_kill', { workspaceId }),
+
+    /** Subscribe a fresh channel to the existing broadcaster — used on
+     *  workspace switch + back, the same shape as agent reattach. */
+    reattach: (workspaceId: string, channel: Channel<TerminalChunk>): Promise<void> =>
+      invoke('terminal_reattach', { workspaceId, channel }),
+  },
+
+  file: {
+    /** Read a file's contents (worktree-relative path). Returns binary
+     *  detection + sha1 for round-trip race-detect on save. */
+    read: (workspaceId: string, path: string): Promise<FileReadResponse> =>
+      invoke('file_read', { workspaceId, path }),
+
+    /** Atomically write `content` to `path`. Pass back the `expected_sha1`
+     *  from the last `read()` so the backend can reject when the file
+     *  changed under us. Empty `expected_sha1` skips the check (new
+     *  file). */
+    write: (
+      workspaceId: string,
+      path: string,
+      content: string,
+      expectedSha1: string
+    ): Promise<FileWriteResponse> =>
+      invoke('file_write', { workspaceId, path, content, expectedSha1 }),
+  },
+
+  script: {
+    /** List the configured scripts for a repo. */
+    list: (repoId: string): Promise<RepoScript[]> => invoke('script_list', { repoId }),
+
+    /** Replace the repo's scripts atomically. Phase 8 settings UI uses
+     *  this; Phase 2b ships read-only. */
+    set: (repoId: string, scripts: RepoScript[]): Promise<void> =>
+      invoke('script_set', { repoId, scripts }),
+
+    /** Run a script via PTY rooted at the workspace's worktree. Output
+     *  streams as TerminalChunks — the frontend feeds these into the
+     *  same xterm.js buffer the interactive shell writes to. */
+    run: (workspaceId: string, scriptId: string, channel: Channel<TerminalChunk>): Promise<void> =>
+      invoke('script_run', { workspaceId, scriptId, channel }),
   },
 };
 

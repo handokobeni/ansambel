@@ -39,6 +39,7 @@ mod tests {
             default_branch: "main".into(),
             created_at: 1_000_000,
             updated_at: 1_000_001,
+            scripts: Vec::new(),
         }
     }
 
@@ -59,6 +60,63 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let loaded = load_repos(tmp.path()).unwrap();
         assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn legacy_repos_json_without_scripts_field_loads_with_empty_vec() {
+        // Phase 2b regression guard: pre-Phase-2b repos.json files
+        // omit the `scripts` field entirely. `#[serde(default)]` on
+        // RepoInfo.scripts must let them load with an empty vec.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = crate::platform::paths::repos_file(tmp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let legacy_json = r#"{
+  "schema_version": 1,
+  "repos": {
+    "repo_legacy": {
+      "id": "repo_legacy",
+      "name": "legacy",
+      "path": "/tmp/legacy",
+      "gh_profile": null,
+      "default_branch": "main",
+      "created_at": 1,
+      "updated_at": 2
+    }
+  }
+}"#;
+        std::fs::write(&path, legacy_json).unwrap();
+        let loaded = load_repos(tmp.path()).unwrap();
+        assert_eq!(
+            loaded["repo_legacy"].scripts,
+            Vec::<crate::state::RepoScript>::new()
+        );
+    }
+
+    #[test]
+    fn save_and_load_round_trips_scripts_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut map = HashMap::new();
+        let mut repo = make_repo("repo_with_scripts");
+        repo.scripts = vec![
+            crate::state::RepoScript {
+                id: "sc_1".into(),
+                name: "Run tests".into(),
+                command: "bun test".into(),
+            },
+            crate::state::RepoScript {
+                id: "sc_2".into(),
+                name: "Lint".into(),
+                command: "bun run lint".into(),
+            },
+        ];
+        map.insert("repo_with_scripts".into(), repo);
+        save_repos(tmp.path(), &map).unwrap();
+
+        let loaded = load_repos(tmp.path()).unwrap();
+        let scripts = &loaded["repo_with_scripts"].scripts;
+        assert_eq!(scripts.len(), 2);
+        assert_eq!(scripts[0].name, "Run tests");
+        assert_eq!(scripts[1].command, "bun run lint");
     }
 
     #[test]
