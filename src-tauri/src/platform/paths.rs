@@ -46,6 +46,9 @@ pub fn sessions_file(data_dir: &Path) -> PathBuf {
 pub fn app_settings_file(data_dir: &Path) -> PathBuf {
     data_dir.join("app_settings.json")
 }
+pub fn lark_settings_file(data_dir: &Path) -> PathBuf {
+    data_dir.join("lark_settings.json")
+}
 pub fn context_meta_file(data_dir: &Path) -> PathBuf {
     data_dir.join("context_meta.json")
 }
@@ -174,6 +177,13 @@ mod tests {
         let data = PathBuf::from("/tmp/ansambel");
         let p = app_settings_file(&data);
         assert_eq!(p, PathBuf::from("/tmp/ansambel/app_settings.json"));
+    }
+
+    #[test]
+    fn lark_settings_file_is_at_data_dir_root() {
+        let data = PathBuf::from("/tmp/ansambel");
+        let p = lark_settings_file(&data);
+        assert_eq!(p, PathBuf::from("/tmp/ansambel/lark_settings.json"));
     }
 
     #[test]

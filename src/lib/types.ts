@@ -244,6 +244,28 @@ export type FileWriteResponse = {
   size: number;
 };
 
+// --- Lark types (Phase 3a) ---
+
+/** Configuration status returned by the backend. The actual app_secret
+ *  never crosses the IPC boundary — `has_secret` only reports whether
+ *  one is stored. */
+export type LarkStatus = {
+  configured: boolean;
+  app_id: string | null;
+  app_token: string | null;
+  table_id: string | null;
+  base_url: string;
+  has_secret: boolean;
+};
+
+export type SetLarkCredentialsArgs = {
+  appId: string;
+  appSecret: string;
+  appToken: string;
+  tableId: string;
+  baseUrl?: string;
+};
+
 export type TurnState = {
   startedAt: number;
   /** Cumulative `input_tokens + cache_creation_input_tokens` — bytes

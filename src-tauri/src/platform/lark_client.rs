@@ -30,6 +30,17 @@ pub const DEFAULT_BASE_URL: &str = "https://open.larksuite.com";
 /// never serve a stale token to a request that's about to fly.
 pub const REFRESH_MARGIN_SECS: u64 = 10 * 60;
 
+/// Lark's published rate limit for tenant-level API: 200 requests per
+/// minute per app. We model this as a token bucket with capacity 200
+/// and refill rate 200/60 ≈ 3.33 tokens/sec. The bucket starts full.
+pub const RATE_LIMIT_CAPACITY: f64 = 200.0;
+pub const RATE_LIMIT_REFILL_PER_SEC: f64 = 200.0 / 60.0;
+
+/// Default delay before retrying after a 429 response when the
+/// `Retry-After` header is absent or unparseable. Picked to give the
+/// server a chance to recover without making the user wait long.
+pub const DEFAULT_429_RETRY_SECS: u64 = 1;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct LarkConfig {
     pub app_id: String,
@@ -62,11 +73,94 @@ struct CachedToken {
     expires_at: Instant,
 }
 
+/// Token-bucket rate limiter. Pure async — `acquire()` resolves when a
+/// token is available, sleeping if needed. Capacity & refill rate are
+/// fixed at construction. The bucket internals are public-by-fn for
+/// testability; tests drive `try_acquire`/`refill` against an injected
+/// `Instant` so we never have to actually wait wall-clock during a
+/// unit test.
+#[derive(Debug)]
+pub struct RateLimiter {
+    inner: Arc<Mutex<TokenBucket>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TokenBucket {
+    pub capacity: f64,
+    pub tokens: f64,
+    pub refill_per_sec: f64,
+    pub last_refill: Instant,
+}
+
+impl RateLimiter {
+    pub fn new(capacity: f64, refill_per_sec: f64) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(TokenBucket {
+                capacity,
+                tokens: capacity, // start full
+                refill_per_sec,
+                last_refill: Instant::now(),
+            })),
+        }
+    }
+
+    /// Lark-defaults factory.
+    pub fn lark_default() -> Self {
+        Self::new(RATE_LIMIT_CAPACITY, RATE_LIMIT_REFILL_PER_SEC)
+    }
+
+    /// Acquire one token, sleeping if the bucket is empty. Multiple
+    /// concurrent acquirers serialize via the inner mutex.
+    pub async fn acquire(&self) {
+        loop {
+            let wait = {
+                let mut bucket = self.inner.lock().await;
+                match try_acquire(&mut bucket, Instant::now()) {
+                    Ok(()) => return,
+                    Err(d) => d,
+                }
+            };
+            tokio::time::sleep(wait).await;
+        }
+    }
+}
+
+/// Refill the bucket up to `capacity` based on elapsed time since the
+/// last refill. Pure — no clock side effects.
+pub fn refill(bucket: &mut TokenBucket, now: Instant) {
+    if now <= bucket.last_refill {
+        return;
+    }
+    let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+    let added = elapsed * bucket.refill_per_sec;
+    bucket.tokens = (bucket.tokens + added).min(bucket.capacity);
+    bucket.last_refill = now;
+}
+
+/// Try to take one token from the bucket. On success, decrement and
+/// return Ok. On failure, return the `Duration` the caller must sleep
+/// before the bucket would have one token available. Pure.
+pub fn try_acquire(bucket: &mut TokenBucket, now: Instant) -> std::result::Result<(), Duration> {
+    refill(bucket, now);
+    if bucket.tokens >= 1.0 {
+        bucket.tokens -= 1.0;
+        Ok(())
+    } else {
+        let needed = 1.0 - bucket.tokens;
+        let wait_secs = needed / bucket.refill_per_sec;
+        // Floor at 1ms so a degenerate caller can't busy-spin even on
+        // a misconfigured bucket.
+        let wait = Duration::from_secs_f64(wait_secs.max(0.001));
+        Err(wait)
+    }
+}
+
 #[derive(Debug)]
 pub struct LarkClient {
     config: LarkConfig,
     http: reqwest::Client,
     token_cache: Arc<Mutex<Option<CachedToken>>>,
+    limiter: Arc<RateLimiter>,
 }
 
 impl LarkClient {
@@ -78,11 +172,42 @@ impl LarkClient {
                 .build()
                 .expect("reqwest client builds with default config"),
             token_cache: Arc::new(Mutex::new(None)),
+            limiter: Arc::new(RateLimiter::lark_default()),
         }
     }
 
     pub fn config(&self) -> &LarkConfig {
         &self.config
+    }
+
+    /// Acquire one rate-limit token, send the request, and on a 429
+    /// response sleep then retry exactly once. `build` is invoked
+    /// per attempt (so each call constructs a fresh RequestBuilder)
+    /// — keep it cheap. `label` is a short string prefixed to error
+    /// messages so callers don't have to wrap. The returned Response
+    /// has not had its body consumed; callers extract text/bytes as
+    /// needed.
+    async fn send_with_retry<F>(&self, label: &str, build: F) -> Result<reqwest::Response>
+    where
+        F: Fn() -> reqwest::RequestBuilder,
+    {
+        self.limiter.acquire().await;
+        let first = build()
+            .send()
+            .await
+            .map_err(|e| AppError::Lark(format!("{label} request: {e}")))?;
+        if first.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Ok(first);
+        }
+        let wait = parse_retry_after(first.headers())
+            .unwrap_or(Duration::from_secs(DEFAULT_429_RETRY_SECS));
+        drop(first);
+        tokio::time::sleep(wait).await;
+        self.limiter.acquire().await;
+        build()
+            .send()
+            .await
+            .map_err(|e| AppError::Lark(format!("{label} retry request: {e}")))
     }
 
     /// Returns a valid tenant_access_token, fetching a new one only
@@ -117,12 +242,8 @@ impl LarkClient {
             "app_secret": self.config.app_secret,
         });
         let resp = self
-            .http
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AppError::Lark(format!("tenant_access_token request: {e}")))?;
+            .send_with_retry("tenant_access_token", || self.http.post(&url).json(&body))
+            .await?;
         let status = resp.status();
         let text = resp
             .text()
@@ -185,6 +306,19 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         format!("{}…", &s[..max])
     }
+}
+
+/// Parse the `Retry-After` header into a `Duration`. Lark's docs say
+/// it'll be sent as a non-negative integer "seconds" (no HTTP-date
+/// form). We accept any parseable integer and clamp the result to a
+/// reasonable upper bound — a misbehaving server returning
+/// "Retry-After: 3600" should not pause the whole app for an hour.
+pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let v = headers.get(reqwest::header::RETRY_AFTER)?;
+    let s = v.to_str().ok()?;
+    let secs: u64 = s.trim().parse().ok()?;
+    // Cap at 60s — anything longer is server confusion, not signal.
+    Some(Duration::from_secs(secs.min(60)))
 }
 
 // ── Bitable CRUD ─────────────────────────────────────────────────────
@@ -264,21 +398,22 @@ impl LarkClient {
                 "{}/open-apis/bitable/v1/apps/{}/tables/{}/records",
                 self.config.base_url, app_token, table_id
             );
-            let mut req = self
-                .http
-                .get(&url)
-                .bearer_auth(&token)
-                .query(&[("page_size", DEFAULT_PAGE_SIZE.to_string())]);
-            if let Some(f) = filter {
-                req = req.query(&[("filter", f)]);
-            }
-            if let Some(pt) = page_token.as_ref() {
-                req = req.query(&[("page_token", pt.as_str())]);
-            }
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| AppError::Lark(format!("bitable_list request: {e}")))?;
+            let resp = self
+                .send_with_retry("bitable_list", || {
+                    let mut req = self
+                        .http
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .query(&[("page_size", DEFAULT_PAGE_SIZE.to_string())]);
+                    if let Some(f) = filter {
+                        req = req.query(&[("filter", f)]);
+                    }
+                    if let Some(pt) = page_token.as_ref() {
+                        req = req.query(&[("page_token", pt.as_str())]);
+                    }
+                    req
+                })
+                .await?;
             let status = resp.status();
             let text = resp
                 .text()
@@ -330,14 +465,12 @@ impl LarkClient {
             "{}/open-apis/bitable/v1/apps/{}/tables/{}/records",
             self.config.base_url, app_token, table_id
         );
+        let body = serde_json::json!({ "fields": fields });
         let resp = self
-            .http
-            .post(&url)
-            .bearer_auth(&token)
-            .json(&serde_json::json!({ "fields": fields }))
-            .send()
-            .await
-            .map_err(|e| AppError::Lark(format!("bitable_create request: {e}")))?;
+            .send_with_retry("bitable_create", || {
+                self.http.post(&url).bearer_auth(&token).json(&body)
+            })
+            .await?;
         let status = resp.status();
         let text = resp
             .text()
@@ -382,14 +515,12 @@ impl LarkClient {
             "{}/open-apis/bitable/v1/apps/{}/tables/{}/records/{}",
             self.config.base_url, app_token, table_id, record_id
         );
+        let body = serde_json::json!({ "fields": fields });
         let resp = self
-            .http
-            .put(&url)
-            .bearer_auth(&token)
-            .json(&serde_json::json!({ "fields": fields }))
-            .send()
-            .await
-            .map_err(|e| AppError::Lark(format!("bitable_update request: {e}")))?;
+            .send_with_retry("bitable_update", || {
+                self.http.put(&url).bearer_auth(&token).json(&body)
+            })
+            .await?;
         let status = resp.status();
         let text = resp
             .text()
@@ -428,12 +559,10 @@ impl LarkClient {
             self.config.base_url, app_token, table_id, record_id
         );
         let resp = self
-            .http
-            .delete(&url)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .map_err(|e| AppError::Lark(format!("bitable_delete request: {e}")))?;
+            .send_with_retry("bitable_delete", || {
+                self.http.delete(&url).bearer_auth(&token)
+            })
+            .await?;
         let status = resp.status();
         let text = resp
             .text()
@@ -507,6 +636,11 @@ impl LarkClient {
                 "file",
                 reqwest::multipart::Part::bytes(bytes).file_name(file_name.to_string()),
             );
+        // Multipart form bodies own their bytes and are consumed by send().
+        // Rebuilding inside an Fn closure would force us to clone potentially
+        // large blobs on every attempt, so we honour the rate limit but skip
+        // the 429-retry helper for this one endpoint.
+        self.limiter.acquire().await;
         let resp = self
             .http
             .post(&url)
@@ -559,12 +693,10 @@ impl LarkClient {
             self.config.base_url, file_token
         );
         let resp = self
-            .http
-            .get(&url)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .map_err(|e| AppError::Lark(format!("attachment_download request: {e}")))?;
+            .send_with_retry("attachment_download", || {
+                self.http.get(&url).bearer_auth(&token)
+            })
+            .await?;
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
@@ -614,19 +746,20 @@ impl LarkClient {
     ) -> Result<String> {
         let token = self.tenant_access_token().await?;
         let url = format!("{}/open-apis/im/v1/messages", self.config.base_url);
+        let body = serde_json::json!({
+            "receive_id": receive_id,
+            "msg_type": msg_type,
+            "content": content,
+        });
         let resp = self
-            .http
-            .post(&url)
-            .bearer_auth(&token)
-            .query(&[("receive_id_type", receive_id_type)])
-            .json(&serde_json::json!({
-                "receive_id": receive_id,
-                "msg_type": msg_type,
-                "content": content,
-            }))
-            .send()
-            .await
-            .map_err(|e| AppError::Lark(format!("im_send_message request: {e}")))?;
+            .send_with_retry("im_send_message", || {
+                self.http
+                    .post(&url)
+                    .bearer_auth(&token)
+                    .query(&[("receive_id_type", receive_id_type)])
+                    .json(&body)
+            })
+            .await?;
         let status = resp.status();
         let text = resp
             .text()
@@ -1214,6 +1347,250 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("bot disabled"), "{err}");
+    }
+
+    // ── rate limiter (pure) ──────────────────────────────────────
+
+    #[test]
+    fn rate_limiter_try_acquire_succeeds_when_bucket_has_tokens() {
+        let now = Instant::now();
+        let mut bucket = TokenBucket {
+            capacity: 5.0,
+            tokens: 3.0,
+            refill_per_sec: 1.0,
+            last_refill: now,
+        };
+        assert!(try_acquire(&mut bucket, now).is_ok());
+        assert!((bucket.tokens - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rate_limiter_try_acquire_returns_wait_when_empty() {
+        let now = Instant::now();
+        let mut bucket = TokenBucket {
+            capacity: 5.0,
+            tokens: 0.0,
+            refill_per_sec: 2.0, // 2 tokens/sec → 1 token in 0.5s
+            last_refill: now,
+        };
+        let wait = try_acquire(&mut bucket, now).unwrap_err();
+        // 0.5s ± floor, comfortably above the 1ms floor.
+        assert!(wait >= Duration::from_millis(450));
+        assert!(wait <= Duration::from_millis(550));
+    }
+
+    #[test]
+    fn rate_limiter_refill_caps_at_capacity() {
+        let earlier = Instant::now();
+        let later = earlier + Duration::from_secs(1000);
+        let mut bucket = TokenBucket {
+            capacity: 5.0,
+            tokens: 0.0,
+            refill_per_sec: 1.0,
+            last_refill: earlier,
+        };
+        refill(&mut bucket, later);
+        // 1000 s × 1 tok/s = 1000, capped at capacity 5.
+        assert!((bucket.tokens - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rate_limiter_refill_noop_when_now_is_not_after_last() {
+        let now = Instant::now();
+        let mut bucket = TokenBucket {
+            capacity: 5.0,
+            tokens: 2.0,
+            refill_per_sec: 1.0,
+            last_refill: now,
+        };
+        refill(&mut bucket, now);
+        assert!((bucket.tokens - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rate_limiter_try_acquire_uses_at_least_1ms_floor() {
+        let now = Instant::now();
+        let mut bucket = TokenBucket {
+            capacity: 5.0,
+            tokens: 0.999_999,           // almost full
+            refill_per_sec: 1_000_000.0, // would compute < 1µs naively
+            last_refill: now,
+        };
+        let wait = try_acquire(&mut bucket, now).unwrap_err();
+        assert!(wait >= Duration::from_millis(1), "got {wait:?}");
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_acquire_returns_immediately_when_tokens_available() {
+        let limiter = RateLimiter::new(5.0, 1.0);
+        let start = Instant::now();
+        limiter.acquire().await;
+        // Should be effectively instant; allow up to 50ms of scheduler jitter.
+        assert!(start.elapsed() < Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn rate_limiter_acquire_sleeps_when_bucket_empty() {
+        // Capacity 1, refill 10 tok/s → after taking the initial token,
+        // next acquire must wait ~100ms.
+        let limiter = RateLimiter::new(1.0, 10.0);
+        limiter.acquire().await; // drain
+        let start = Instant::now();
+        limiter.acquire().await;
+        let elapsed = start.elapsed();
+        // Allow generous bounds — schedulers are noisy in CI.
+        assert!(
+            elapsed >= Duration::from_millis(50),
+            "expected ≥50ms wait, got {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn lark_default_rate_limiter_matches_constants() {
+        let limiter = RateLimiter::lark_default();
+        // Inspect via Debug — we don't expose the bucket directly.
+        let s = format!("{limiter:?}");
+        assert!(s.contains("200"), "{s}");
+    }
+
+    // ── parse_retry_after ────────────────────────────────────────
+
+    #[test]
+    fn parse_retry_after_parses_integer_seconds() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "5".parse().unwrap());
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn parse_retry_after_trims_whitespace() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "  7 ".parse().unwrap());
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn parse_retry_after_caps_at_60_seconds() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "3600".parse().unwrap());
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn parse_retry_after_returns_none_when_missing() {
+        let headers = reqwest::header::HeaderMap::new();
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn parse_retry_after_returns_none_for_http_date() {
+        // HTTP-date form is valid per RFC 7231 but Lark sends integers
+        // only; we accept None and fall back to DEFAULT_429_RETRY_SECS.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::RETRY_AFTER,
+            "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn parse_retry_after_returns_none_for_negative() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "-3".parse().unwrap());
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    // ── 429 retry through send_with_retry ────────────────────────
+
+    #[tokio::test]
+    async fn send_with_retry_retries_429_then_succeeds() {
+        let server = MockServer::start().await;
+        // First response: 429 with Retry-After: 1. The client must wait
+        // (we'll cap to <2s wall-clock for the test) and retry, getting
+        // the success body on attempt #2.
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "1")
+                    .set_body_string("rate limited"),
+            )
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "msg": "ok",
+                "tenant_access_token": "t_after_retry",
+                "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let start = Instant::now();
+        let token = client.tenant_access_token().await.unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(token, "t_after_retry");
+        // Confirms the retry path actually slept.
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "expected ≥900ms wait, got {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_surfaces_429_when_retry_also_429() {
+        let server = MockServer::start().await;
+        // Both attempts get 429 → final response surfaced as error.
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("Retry-After", "1")
+                    .set_body_string("still rate limited"),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let err = client.tenant_access_token().await.unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("429"), "{s}");
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_uses_default_when_retry_after_missing() {
+        let server = MockServer::start().await;
+        // 429 with NO Retry-After header → falls back to
+        // DEFAULT_429_RETRY_SECS (1s).
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("limited"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "tenant_access_token": "t_default_retry",
+                "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let start = Instant::now();
+        let token = client.tenant_access_token().await.unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(token, "t_default_retry");
+        // Default is 1s — confirm we waited at least most of it.
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "expected ≥900ms wait, got {elapsed:?}"
+        );
     }
 
     #[tokio::test]

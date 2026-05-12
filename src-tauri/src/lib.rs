@@ -87,6 +87,10 @@ pub fn run() {
             crate::commands::file_io::file_read,
             crate::commands::file_io::file_write,
             crate::commands::scripts::script_run,
+            crate::commands::lark_auth::set_lark_credentials,
+            crate::commands::lark_auth::get_lark_status,
+            crate::commands::lark_auth::test_lark_connection,
+            crate::commands::lark_auth::clear_lark_credentials,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
