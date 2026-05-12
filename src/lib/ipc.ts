@@ -19,6 +19,8 @@ import type {
   TerminalChunk,
   FileReadResponse,
   FileWriteResponse,
+  LarkStatus,
+  SetLarkCredentialsArgs,
 } from './types';
 
 export type ListMessagesOpts = {
@@ -174,6 +176,36 @@ export const api = {
       expectedSha1: string
     ): Promise<FileWriteResponse> =>
       invoke('file_write', { workspaceId, path, content, expectedSha1 }),
+  },
+
+  // ── Phase 3a: Lark Open Platform credentials ─────────────────────
+
+  lark: {
+    /** Persist the four required fields. `appSecret` lands in the OS
+     *  keyring; the other three (plus `baseUrl`) go into
+     *  `lark_settings.json`. Returns the post-write status so the UI can
+     *  re-render without a follow-up `getStatus()`. */
+    setCredentials: (args: SetLarkCredentialsArgs): Promise<LarkStatus> =>
+      invoke('set_lark_credentials', {
+        appId: args.appId,
+        appSecret: args.appSecret,
+        appToken: args.appToken,
+        tableId: args.tableId,
+        baseUrl: args.baseUrl ?? null,
+      }),
+
+    /** Returns whether Lark is configured, plus the non-secret fields
+     *  so the form can pre-populate. The `app_secret` itself never
+     *  crosses IPC — only `has_secret: bool`. */
+    getStatus: (): Promise<LarkStatus> => invoke('get_lark_status'),
+
+    /** Round-trip the credentials by issuing one tenant_access_token
+     *  request. Resolves on success, rejects with the Lark API error
+     *  on failure. Never logs the resulting token. */
+    testConnection: (): Promise<void> => invoke('test_lark_connection'),
+
+    /** Wipe both the keyring entry and the on-disk settings. Idempotent. */
+    clear: (): Promise<void> => invoke('clear_lark_credentials'),
   },
 
   script: {

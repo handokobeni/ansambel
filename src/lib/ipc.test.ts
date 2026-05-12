@@ -359,6 +359,84 @@ describe('api.agent', () => {
   });
 });
 
+describe('api.lark', () => {
+  const mockStatus = {
+    configured: true,
+    app_id: 'cli_test',
+    app_token: 'bascn',
+    table_id: 'tbl',
+    base_url: 'https://open.larksuite.com',
+    has_secret: true,
+  };
+
+  it('setCredentials: forwards camelCase args and returns LarkStatus', async () => {
+    vi.mocked(invoke).mockResolvedValue(mockStatus);
+    const out = await api.lark.setCredentials({
+      appId: 'cli_test',
+      appSecret: 'shh',
+      appToken: 'bascn',
+      tableId: 'tbl',
+    });
+    expect(invoke).toHaveBeenCalledWith('set_lark_credentials', {
+      appId: 'cli_test',
+      appSecret: 'shh',
+      appToken: 'bascn',
+      tableId: 'tbl',
+      baseUrl: null,
+    });
+    expect(out).toEqual(mockStatus);
+  });
+
+  it('setCredentials: forwards baseUrl when provided', async () => {
+    vi.mocked(invoke).mockResolvedValue(mockStatus);
+    await api.lark.setCredentials({
+      appId: 'cli',
+      appSecret: 's',
+      appToken: 'b',
+      tableId: 't',
+      baseUrl: 'https://open.feishu.cn',
+    });
+    expect(invoke).toHaveBeenCalledWith('set_lark_credentials', {
+      appId: 'cli',
+      appSecret: 's',
+      appToken: 'b',
+      tableId: 't',
+      baseUrl: 'https://open.feishu.cn',
+    });
+  });
+
+  it('setCredentials: propagates rejection on validation error', async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error('Lark API: app_id must not be empty'));
+    await expect(
+      api.lark.setCredentials({ appId: '', appSecret: 's', appToken: 'b', tableId: 't' })
+    ).rejects.toThrow('app_id must not be empty');
+  });
+
+  it('getStatus: invokes get_lark_status with no args and returns LarkStatus', async () => {
+    vi.mocked(invoke).mockResolvedValue(mockStatus);
+    const out = await api.lark.getStatus();
+    expect(invoke).toHaveBeenCalledWith('get_lark_status');
+    expect(out).toEqual(mockStatus);
+  });
+
+  it('testConnection: invokes test_lark_connection with no args', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.lark.testConnection();
+    expect(invoke).toHaveBeenCalledWith('test_lark_connection');
+  });
+
+  it('testConnection: rejects with Lark API error', async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error('Lark API: tenant_access_token code 99991663'));
+    await expect(api.lark.testConnection()).rejects.toThrow('99991663');
+  });
+
+  it('clear: invokes clear_lark_credentials with no args', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.lark.clear();
+    expect(invoke).toHaveBeenCalledWith('clear_lark_credentials');
+  });
+});
+
 describe('agentChannel', () => {
   it('returns a Tauri Channel-shaped object with onmessage setter', () => {
     const ch = agentChannel();
