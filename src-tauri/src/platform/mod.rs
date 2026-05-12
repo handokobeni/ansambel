@@ -1,4 +1,5 @@
 pub mod binary;
+pub mod lark_client;
 pub mod paths;
 pub mod pty;
 

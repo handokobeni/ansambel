@@ -32,6 +32,9 @@ pub enum AppError {
 
     #[error("parse {what} failed: {msg}")]
     ParseFailed { what: String, msg: String },
+
+    #[error("Lark API: {0}")]
+    Lark(String),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;
