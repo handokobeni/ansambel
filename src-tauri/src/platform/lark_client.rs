@@ -461,6 +461,199 @@ impl LarkClient {
     }
 }
 
+// ── Drive: attachment upload + download ─────────────────────────────
+
+#[derive(Deserialize)]
+struct AttachmentUploadResponse {
+    code: i64,
+    #[serde(default)]
+    msg: String,
+    #[serde(default)]
+    data: Option<AttachmentUploadData>,
+}
+
+#[derive(Deserialize)]
+struct AttachmentUploadData {
+    #[serde(default)]
+    file_token: String,
+}
+
+impl LarkClient {
+    /// Upload bytes as a media file. Returns the `file_token` Lark
+    /// assigns; we persist that in the Bitable attachment field so the
+    /// row references the file. `parent_node` is the destination
+    /// (typically the Bitable app_token) and `parent_type` is the
+    /// Lark resource kind (e.g. `bitable_file`). `file_name` is what
+    /// users see in the file viewer.
+    pub async fn attachment_upload(
+        &self,
+        parent_node: &str,
+        parent_type: &str,
+        file_name: &str,
+        bytes: Vec<u8>,
+    ) -> Result<String> {
+        let token = self.tenant_access_token().await?;
+        let url = format!(
+            "{}/open-apis/drive/v1/medias/upload_all",
+            self.config.base_url
+        );
+        let size = bytes.len();
+        let form = reqwest::multipart::Form::new()
+            .text("file_name", file_name.to_string())
+            .text("parent_type", parent_type.to_string())
+            .text("parent_node", parent_node.to_string())
+            .text("size", size.to_string())
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(bytes).file_name(file_name.to_string()),
+            );
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| AppError::Lark(format!("attachment_upload request: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| AppError::Lark(format!("attachment_upload body: {e}")))?;
+        if !status.is_success() {
+            return Err(AppError::Lark(format!(
+                "attachment_upload http {status}: {}",
+                truncate(&text, 200)
+            )));
+        }
+        let parsed: AttachmentUploadResponse = serde_json::from_str(&text).map_err(|e| {
+            AppError::Lark(format!(
+                "attachment_upload parse: {e}; body={}",
+                truncate(&text, 200)
+            ))
+        })?;
+        if parsed.code != 0 {
+            return Err(AppError::Lark(format!(
+                "attachment_upload code {}: {}",
+                parsed.code, parsed.msg
+            )));
+        }
+        let file_token = parsed.data.map(|d| d.file_token).unwrap_or_default();
+        if file_token.is_empty() {
+            return Err(AppError::Lark(
+                "attachment_upload returned empty file_token".into(),
+            ));
+        }
+        Ok(file_token)
+    }
+
+    /// Download a file by its Lark `file_token`. Returns raw bytes.
+    /// Note: for Bitable attachments specifically, the caller may need
+    /// to pass additional `extra` query params — this method exposes
+    /// the simple form sufficient for non-Bitable media. The
+    /// upcoming sync layer wraps this with the Bitable-specific shape.
+    pub async fn attachment_download(&self, file_token: &str) -> Result<Vec<u8>> {
+        let token = self.tenant_access_token().await?;
+        let url = format!(
+            "{}/open-apis/drive/v1/medias/{}/download",
+            self.config.base_url, file_token
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| AppError::Lark(format!("attachment_download request: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(AppError::Lark(format!(
+                "attachment_download http {status}: {}",
+                truncate(&text, 200)
+            )));
+        }
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| AppError::Lark(format!("attachment_download body: {e}")))?;
+        Ok(bytes.to_vec())
+    }
+}
+
+// ── IM: send message ───────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ImSendResponse {
+    code: i64,
+    #[serde(default)]
+    msg: String,
+    #[serde(default)]
+    data: Option<ImSendData>,
+}
+
+#[derive(Deserialize)]
+struct ImSendData {
+    #[serde(default)]
+    message_id: String,
+}
+
+impl LarkClient {
+    /// Send an IM message. `receive_id_type` is the kind of the
+    /// receiver id (`open_id` / `chat_id` / `user_id` / `email`).
+    /// `msg_type` matches Lark's message kinds (`text` / `post` /
+    /// `interactive`, etc). `content` is JSON-stringified per the
+    /// Lark spec — callers serialize. Returns the assigned
+    /// `message_id`.
+    pub async fn im_send_message(
+        &self,
+        receive_id_type: &str,
+        receive_id: &str,
+        msg_type: &str,
+        content: &str,
+    ) -> Result<String> {
+        let token = self.tenant_access_token().await?;
+        let url = format!("{}/open-apis/im/v1/messages", self.config.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&token)
+            .query(&[("receive_id_type", receive_id_type)])
+            .json(&serde_json::json!({
+                "receive_id": receive_id,
+                "msg_type": msg_type,
+                "content": content,
+            }))
+            .send()
+            .await
+            .map_err(|e| AppError::Lark(format!("im_send_message request: {e}")))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| AppError::Lark(format!("im_send_message body: {e}")))?;
+        if !status.is_success() {
+            return Err(AppError::Lark(format!(
+                "im_send_message http {status}: {}",
+                truncate(&text, 200)
+            )));
+        }
+        let parsed: ImSendResponse = serde_json::from_str(&text).map_err(|e| {
+            AppError::Lark(format!(
+                "im_send_message parse: {e}; body={}",
+                truncate(&text, 200)
+            ))
+        })?;
+        if parsed.code != 0 {
+            return Err(AppError::Lark(format!(
+                "im_send_message code {}: {}",
+                parsed.code, parsed.msg
+            )));
+        }
+        Ok(parsed.data.map(|d| d.message_id).unwrap_or_default())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -898,6 +1091,129 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("record_not_found"), "{err}");
+    }
+
+    // ── attachment upload ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn attachment_upload_returns_file_token() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/drive/v1/medias/upload_all"))
+            .and(header("authorization", "Bearer t_xyz"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "file_token": "boxn_abcdef" }
+            })))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let token = client
+            .attachment_upload("bascntest", "bitable_file", "bundle.tar.gz", vec![1, 2, 3])
+            .await
+            .unwrap();
+        assert_eq!(token, "boxn_abcdef");
+    }
+
+    #[tokio::test]
+    async fn attachment_upload_empty_file_token_is_error() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/drive/v1/medias/upload_all"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {}
+            })))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let err = client
+            .attachment_upload("bascntest", "bitable_file", "x.bin", vec![])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("empty file_token"), "{err}");
+    }
+
+    // ── attachment download ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn attachment_download_returns_bytes() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/open-apis/drive/v1/medias/boxn_test/download"))
+            .and(header("authorization", "Bearer t_xyz"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hello world".as_ref()))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let bytes = client.attachment_download("boxn_test").await.unwrap();
+        assert_eq!(bytes, b"hello world");
+    }
+
+    #[tokio::test]
+    async fn attachment_download_surfaces_404() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/open-apis/drive/v1/medias/boxn_nope/download"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let err = client.attachment_download("boxn_nope").await.unwrap_err();
+        assert!(err.to_string().contains("404"), "{err}");
+    }
+
+    // ── im send ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn im_send_message_returns_message_id() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/im/v1/messages"))
+            .and(query_param("receive_id_type", "open_id"))
+            .and(header("authorization", "Bearer t_xyz"))
+            .and(body_json(serde_json::json!({
+                "receive_id": "ou_abc",
+                "msg_type": "text",
+                "content": "{\"text\":\"hi\"}"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "message_id": "om_xyz" }
+            })))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let msg_id = client
+            .im_send_message("open_id", "ou_abc", "text", "{\"text\":\"hi\"}")
+            .await
+            .unwrap();
+        assert_eq!(msg_id, "om_xyz");
+    }
+
+    #[tokio::test]
+    async fn im_send_message_surfaces_non_zero_code() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/im/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 230002,
+                "msg": "bot disabled"
+            })))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let err = client
+            .im_send_message("open_id", "ou_x", "text", "{}")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("bot disabled"), "{err}");
     }
 
     #[tokio::test]
