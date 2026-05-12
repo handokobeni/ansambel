@@ -2,14 +2,25 @@
 //
 // All tests in this file are `#[ignore]` by default so the standard
 // `cargo test` / CI run never touches the network or a real tenant. Run
-// them locally with:
+// them locally with credentials provided via a project-root `.env`
+// file (auto-loaded by `dotenvy`) or exported in the shell:
 //
+//   # Either approach:
+//   cp ../.env.example ../.env && $EDITOR ../.env   # fill in values
+//   # ...or...
 //   export LARK_APP_ID=cli_xxxxxxxxxxxxxxxx
 //   export LARK_APP_SECRET=...        # never commit
 //   export LARK_APP_TOKEN=bascn...    # Bitable app token
 //   export LARK_TABLE_ID=tbl...       # Bitable table id
 //   export LARK_BASE_URL=https://open.larksuite.com   # optional
+//
 //   cargo test --test lark_smoke -- --ignored --nocapture
+//
+// `dotenvy::dotenv()` walks up from the test's working directory
+// (`src-tauri/`), so a `.env` at the workspace root is picked up
+// automatically. Vars already exported in the shell take precedence
+// over `.env` values — that lets you override one without editing the
+// file.
 //
 // Each test reads its env at runtime; if a required variable is missing
 // it prints a hint and returns `Ok` rather than failing, so partial-env
@@ -19,10 +30,27 @@
 // without leaking credentials.
 
 use ansambel_lib::platform::lark_client::{LarkClient, LarkConfig, DEFAULT_BASE_URL};
+use std::sync::Once;
+
+/// Load `.env` exactly once per process. `cargo test` runs each
+/// `#[tokio::test]` on its own task but inside the same process, so a
+/// `Once` is enough to dedupe. `dotenvy::dotenv()` walks up from the
+/// current working directory, which is `src-tauri/` under `cargo test
+/// --test ...`, so a project-root `.env` is picked up automatically.
+/// Missing `.env` is fine — env vars set directly in the shell still
+/// win, and missing-required-var is reported per-test via skip.
+static LOAD_DOTENV: Once = Once::new();
+
+fn ensure_dotenv_loaded() {
+    LOAD_DOTENV.call_once(|| {
+        let _ = dotenvy::dotenv();
+    });
+}
 
 /// Pull a `LarkConfig` from env. Returns `None` (with an informative
 /// stderr message) when any required variable is missing.
 fn lark_config_from_env() -> Option<LarkConfig> {
+    ensure_dotenv_loaded();
     let app_id = match std::env::var("LARK_APP_ID") {
         Ok(v) if !v.is_empty() => v,
         _ => {
@@ -115,6 +143,7 @@ async fn smoke_bitable_create_then_delete() {
     // to write a single text-like field named per the LARK_SMOKE_FIELD
     // env var; if missing we skip the create+delete test rather than
     // pollute a real table with rows the user didn't sanction.
+    ensure_dotenv_loaded();
     let field_name = match std::env::var("LARK_SMOKE_FIELD") {
         Ok(v) if !v.is_empty() => v,
         _ => {
