@@ -10,6 +10,43 @@ pub mod platform;
 pub mod state;
 pub mod task_provider;
 
+fn build_initial_provider(
+    settings: &crate::state::AppSettings,
+    data_dir: &std::path::Path,
+) -> std::sync::Arc<dyn crate::task_provider::TaskProvider> {
+    match settings.task_source {
+        crate::state::TaskSource::Local => std::sync::Arc::new(
+            crate::task_provider::local::LocalProvider::new(data_dir.to_path_buf()),
+        ),
+        crate::state::TaskSource::Lark => {
+            // Try to construct LarkProvider; fall back to LocalProvider
+            // if credentials are missing. The frontend banner will nudge
+            // the user to configure Lark.
+            let store = crate::commands::lark_auth::KeyringStore;
+            match crate::commands::lark_auth::load_lark_config_inner(data_dir, &store) {
+                Ok(cfg) => {
+                    let app_token = cfg.app_token.clone();
+                    let table_id = cfg.table_id.clone();
+                    let client =
+                        std::sync::Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
+                    std::sync::Arc::new(crate::task_provider::lark::LarkProvider::new(
+                        client, app_token, table_id,
+                    ))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "task_source=lark but credentials missing; falling back to LocalProvider"
+                    );
+                    std::sync::Arc::new(crate::task_provider::local::LocalProvider::new(
+                        data_dir.to_path_buf(),
+                    ))
+                }
+            }
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -29,6 +66,10 @@ pub fn run() {
             let tasks = crate::persistence::tasks::load_tasks(&data_dir)?;
             let settings = crate::persistence::settings::load_settings(&data_dir)?;
 
+            // Clone settings before it moves into AppState so we can pass it
+            // to build_initial_provider below.
+            let settings_for_provider = settings.clone();
+
             let state = crate::state::AppState {
                 repos,
                 workspaces,
@@ -40,16 +81,40 @@ pub fn run() {
 
             app.manage(std::sync::Arc::new(std::sync::Mutex::new(state)));
 
-            // Phase 3a-2: provider handle is separate from AppState so async
-            // trait calls don't hold the AppState lock. For now we always init
-            // LocalProvider; Task 7+8 wire the Lark/Local switch from settings.
+            // Phase 3a-2: pick the right provider based on task_source setting.
+            // provider_handle is separate from AppState so async trait calls
+            // don't hold the AppState lock.
             let provider: std::sync::Arc<dyn crate::task_provider::TaskProvider> =
-                std::sync::Arc::new(crate::task_provider::local::LocalProvider::new(
-                    data_dir.clone(),
-                ));
+                build_initial_provider(&settings_for_provider, &data_dir);
             let provider_handle: crate::state::TaskProviderHandle =
-                std::sync::Arc::new(tokio::sync::RwLock::new(provider));
-            app.manage(provider_handle);
+                std::sync::Arc::new(tokio::sync::RwLock::new(provider.clone()));
+            app.manage(provider_handle.clone());
+
+            // Initial hydrate: pull tasks from provider and populate AppState mirror.
+            // Done as a spawned async task so setup() doesn't block on the network
+            // when Lark is the source.
+            {
+                let state_arc = app
+                    .try_state::<std::sync::Arc<std::sync::Mutex<crate::state::AppState>>>()
+                    .expect("AppState managed")
+                    .inner()
+                    .clone();
+                tauri::async_runtime::spawn(async move {
+                    match provider.list_tasks(None).await {
+                        Ok(tasks) => {
+                            if let Ok(mut st) = state_arc.lock() {
+                                st.tasks.clear();
+                                for t in tasks {
+                                    st.tasks.insert(t.id.clone(), t);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "initial task hydrate failed");
+                        }
+                    }
+                });
+            }
 
             // Debounced message writer — collapses bursts of stream events
             // into a single disk write per workspace per ~500 ms window.
