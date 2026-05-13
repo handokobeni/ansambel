@@ -413,6 +413,34 @@ pub async fn clear_lark_credentials(app: tauri::AppHandle) -> std::result::Resul
     clear_lark_credentials_inner(&data_dir, &store).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub async fn verify_lark_schema(
+    app: tauri::AppHandle,
+) -> std::result::Result<crate::task_provider::schema::SchemaCheckResult, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let store = KeyringStore;
+    verify_lark_schema_inner(&data_dir, &store)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+pub async fn verify_lark_schema_inner(
+    data_dir: &std::path::Path,
+    store: &dyn SecretStore,
+) -> crate::error::Result<crate::task_provider::schema::SchemaCheckResult> {
+    let cfg = load_lark_config_inner(data_dir, store)?;
+    let app_token = cfg.app_token.clone();
+    let table_id = cfg.table_id.clone();
+    let client = crate::platform::lark_client::LarkClient::new(cfg);
+    crate::task_provider::schema::verify_schema(
+        &client,
+        &app_token,
+        &table_id,
+        &crate::task_provider::schema::required_fields_phase_3a2(),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
