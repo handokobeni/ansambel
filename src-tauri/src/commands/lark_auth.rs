@@ -96,6 +96,55 @@ pub struct SetLarkCredentialsArgs {
     pub base_url: Option<String>,
 }
 
+/// Optional credentials passed by the frontend when the user clicks
+/// Test Connection BEFORE Save — so they can verify form input without
+/// committing to keyring/disk. When any required field is missing or
+/// empty, we fall back to the stored config; that way the saved-state
+/// "click Test on the loaded form" UX keeps working unchanged.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct TestConnectionOverride {
+    #[serde(default)]
+    pub app_id: Option<String>,
+    #[serde(default)]
+    pub app_secret: Option<String>,
+    #[serde(default)]
+    pub app_token: Option<String>,
+    #[serde(default)]
+    pub table_id: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+impl TestConnectionOverride {
+    /// Build a `LarkConfig` from override fields when all four required
+    /// values are present and non-empty. Returns `None` to signal "fall
+    /// back to stored credentials".
+    pub fn to_config(&self) -> Option<LarkConfig> {
+        let app_id = self.app_id.as_deref()?.trim();
+        let app_secret = self.app_secret.as_deref()?.trim();
+        let app_token = self.app_token.as_deref()?.trim();
+        let table_id = self.table_id.as_deref()?.trim();
+        if app_id.is_empty() || app_secret.is_empty() || app_token.is_empty() || table_id.is_empty()
+        {
+            return None;
+        }
+        let base_url = self
+            .base_url
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(default_base_url_string);
+        Some(LarkConfig {
+            app_id: app_id.to_string(),
+            app_secret: app_secret.to_string(),
+            app_token: app_token.to_string(),
+            table_id: table_id.to_string(),
+            base_url,
+        })
+    }
+}
+
 /// Pluggable secret store so unit tests can run without a real OS
 /// keyring. The real impl wraps `keyring::Entry`.
 pub trait SecretStore: Send + Sync {
@@ -272,8 +321,15 @@ pub fn load_lark_config_inner(data_dir: &Path, store: &dyn SecretStore) -> Resul
     })
 }
 
-pub async fn test_lark_connection_inner(data_dir: &Path, store: &dyn SecretStore) -> Result<()> {
-    let cfg = load_lark_config_inner(data_dir, store)?;
+pub async fn test_lark_connection_inner(
+    override_cfg: TestConnectionOverride,
+    data_dir: &Path,
+    store: &dyn SecretStore,
+) -> Result<()> {
+    let cfg = match override_cfg.to_config() {
+        Some(c) => c,
+        None => load_lark_config_inner(data_dir, store)?,
+    };
     let client = LarkClient::new(cfg);
     // tenant_access_token() round-trips the credentials against the
     // real Lark API. Discarding the returned String here is deliberate
@@ -328,10 +384,24 @@ pub async fn get_lark_status(app: tauri::AppHandle) -> std::result::Result<LarkS
 }
 
 #[tauri::command]
-pub async fn test_lark_connection(app: tauri::AppHandle) -> std::result::Result<(), String> {
+pub async fn test_lark_connection(
+    app_id: Option<String>,
+    app_secret: Option<String>,
+    app_token: Option<String>,
+    table_id: Option<String>,
+    base_url: Option<String>,
+    app: tauri::AppHandle,
+) -> std::result::Result<(), String> {
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let store = KeyringStore;
-    test_lark_connection_inner(&data_dir, &store)
+    let override_cfg = TestConnectionOverride {
+        app_id,
+        app_secret,
+        app_token,
+        table_id,
+        base_url,
+    };
+    test_lark_connection_inner(override_cfg, &data_dir, &store)
         .await
         .map_err(|e| e.to_string())
 }
@@ -658,7 +728,7 @@ mod tests {
         let mut args = make_args();
         args.base_url = Some(server.uri());
         set_lark_credentials_inner(args, tmp.path(), &store).unwrap();
-        test_lark_connection_inner(tmp.path(), &store)
+        test_lark_connection_inner(TestConnectionOverride::default(), tmp.path(), &store)
             .await
             .unwrap();
     }
@@ -667,7 +737,7 @@ mod tests {
     async fn test_connection_surfaces_error_when_unconfigured() {
         let tmp = tempfile::tempdir().unwrap();
         let store = InMemorySecretStore::new();
-        let err = test_lark_connection_inner(tmp.path(), &store)
+        let err = test_lark_connection_inner(TestConnectionOverride::default(), tmp.path(), &store)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("app_secret"), "{err}");
@@ -689,10 +759,112 @@ mod tests {
         let mut args = make_args();
         args.base_url = Some(server.uri());
         set_lark_credentials_inner(args, tmp.path(), &store).unwrap();
-        let err = test_lark_connection_inner(tmp.path(), &store)
+        let err = test_lark_connection_inner(TestConnectionOverride::default(), tmp.path(), &store)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("app not found"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_connection_uses_override_when_provided() {
+        // Nothing in keyring/disk. Override passed in directly succeeds.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "tenant_access_token": "t_override",
+                "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = InMemorySecretStore::new();
+        let override_cfg = TestConnectionOverride {
+            app_id: Some("cli_override".into()),
+            app_secret: Some("secret_override".into()),
+            app_token: Some("bascn_override".into()),
+            table_id: Some("tbl_override".into()),
+            base_url: Some(server.uri()),
+        };
+        test_lark_connection_inner(override_cfg, tmp.path(), &store)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_connection_falls_back_to_stored_when_override_incomplete() {
+        // Partial override (missing app_secret) → fall back to stored.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "tenant_access_token": "t_stored",
+                "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = InMemorySecretStore::new();
+        let mut args = make_args();
+        args.base_url = Some(server.uri());
+        set_lark_credentials_inner(args, tmp.path(), &store).unwrap();
+        let partial = TestConnectionOverride {
+            app_id: Some("cli_x".into()),
+            app_secret: None,
+            app_token: Some("bascn".into()),
+            table_id: Some("tbl".into()),
+            base_url: None,
+        };
+        test_lark_connection_inner(partial, tmp.path(), &store)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn test_connection_override_to_config_returns_none_when_any_field_missing() {
+        let mut o = TestConnectionOverride {
+            app_id: Some("cli".into()),
+            app_secret: Some("s".into()),
+            app_token: Some("b".into()),
+            table_id: Some("t".into()),
+            base_url: None,
+        };
+        assert!(o.to_config().is_some());
+        for clear in [
+            |o: &mut TestConnectionOverride| o.app_id = None,
+            |o: &mut TestConnectionOverride| o.app_secret = None,
+            |o: &mut TestConnectionOverride| o.app_token = None,
+            |o: &mut TestConnectionOverride| o.table_id = None,
+        ] {
+            let mut snapshot = o.clone();
+            clear(&mut snapshot);
+            assert!(
+                snapshot.to_config().is_none(),
+                "expected None: {snapshot:?}"
+            );
+        }
+        // Blank string for any field also counts as missing.
+        o.app_id = Some("   ".into());
+        assert!(o.to_config().is_none());
+    }
+
+    #[test]
+    fn test_connection_override_to_config_trims_and_defaults_base_url() {
+        let o = TestConnectionOverride {
+            app_id: Some("  cli  ".into()),
+            app_secret: Some("  s  ".into()),
+            app_token: Some(" b ".into()),
+            table_id: Some(" t ".into()),
+            base_url: Some("   ".into()),
+        };
+        let cfg = o.to_config().unwrap();
+        assert_eq!(cfg.app_id, "cli");
+        assert_eq!(cfg.app_secret, "s");
+        assert_eq!(cfg.app_token, "b");
+        assert_eq!(cfg.table_id, "t");
+        assert_eq!(cfg.base_url, DEFAULT_BASE_URL);
     }
 
     #[test]

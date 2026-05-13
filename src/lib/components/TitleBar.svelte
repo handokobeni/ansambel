@@ -7,6 +7,7 @@
   import { addToast } from '$lib/stores/toasts.svelte';
   import { theme } from '$lib/stores/theme.svelte';
   import { tooltip } from '$lib/actions';
+  import SettingsDialog from './SettingsDialog.svelte';
   import type { Mode } from '$lib/types';
 
   // Reading `theme.colorMode` (a `$state` field) inside this $derived
@@ -22,6 +23,7 @@
   } = $props();
 
   let adding = $state(false);
+  let settingsOpen = $state(false);
 
   const selectedRepo = $derived(repos.getSelected());
 
@@ -149,6 +151,31 @@
       {/if}
     </button>
     <button
+      type="button"
+      class="flex items-center justify-center w-7 h-7 rounded text-[var(--text-dim)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
+      onclick={() => (settingsOpen = true)}
+      aria-label="Open settings"
+      data-testid="open-settings"
+      use:tooltip={{ text: 'Settings' }}
+    >
+      <svg
+        viewBox="0 0 24 24"
+        width="14"
+        height="14"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <circle cx="12" cy="12" r="3" />
+        <path
+          d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+        />
+      </svg>
+    </button>
+    <button
       class="flex items-center gap-1 px-2 py-1 text-xs font-semibold rounded bg-[var(--bg-card)] border border-[var(--border-light)] text-[var(--text-dim)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
       onclick={handleAddRepo}
       disabled={adding}
@@ -158,3 +185,5 @@
     </button>
   </div>
 </header>
+
+<SettingsDialog open={settingsOpen} onClose={() => (settingsOpen = false)} />

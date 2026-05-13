@@ -8,6 +8,22 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: vi.fn(),
 }));
 
+// SettingsDialog → LarkSettings calls invoke('get_lark_status') on mount;
+// stub it so opening the dialog in tests doesn't hit the network.
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: vi.fn(() =>
+    Promise.resolve({
+      configured: false,
+      app_id: null,
+      app_token: null,
+      table_id: null,
+      base_url: 'https://open.larksuite.com',
+      has_secret: false,
+    })
+  ),
+  Channel: class {},
+}));
+
 // Mock the repos store
 vi.mock('$lib/stores/repos.svelte', () => ({
   repos: {
@@ -214,5 +230,29 @@ describe('TitleBar mode toggle', () => {
     });
     await fireEvent.click(screen.getByRole('button', { name: /^work$/i }));
     expect(onModeChange).toHaveBeenCalledWith('work');
+  });
+});
+
+describe('TitleBar settings button', () => {
+  it('renders a settings button', () => {
+    render(TitleBar);
+    expect(screen.getByTestId('open-settings')).toBeTruthy();
+  });
+
+  it('clicking settings button opens the settings dialog', async () => {
+    render(TitleBar);
+    // Dialog is hidden initially.
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await fireEvent.click(screen.getByTestId('open-settings'));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(screen.getByText('Settings')).toBeTruthy();
+  });
+
+  it('closing the dialog returns focus to title bar (dialog unmounts)', async () => {
+    render(TitleBar);
+    await fireEvent.click(screen.getByTestId('open-settings'));
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('settings-close'));
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });
