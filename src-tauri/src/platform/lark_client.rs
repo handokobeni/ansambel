@@ -329,6 +329,17 @@ pub fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duratio
 pub struct BitableRecord {
     pub record_id: String,
     pub fields: serde_json::Value,
+    /// Lark returns these as top-level fields on the record object.
+    /// Stored as opaque JSON so we can pull `created_time` /
+    /// `last_modified_time` without explicit fields here.
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+impl BitableRecord {
+    pub fn extra_i64(&self, key: &str) -> Option<i64> {
+        self.extra.get(key).and_then(|v| v.as_i64())
+    }
 }
 
 /// Hard pagination cap so a runaway loop can't keep fetching forever.
@@ -542,6 +553,54 @@ impl LarkClient {
             .data
             .and_then(|d| d.record)
             .ok_or_else(|| AppError::Lark("bitable_create missing record in response".into()))
+    }
+
+    /// Fetch a single record by its `record_id`. Used by callers that
+    /// need canonical row state after a mutation (Bitable's PUT/PATCH
+    /// endpoints don't include row metadata in their responses).
+    pub async fn bitable_get_record(
+        &self,
+        app_token: &str,
+        table_id: &str,
+        record_id: &str,
+    ) -> Result<BitableRecord> {
+        let token = self.tenant_access_token().await?;
+        let url = format!(
+            "{}/open-apis/bitable/v1/apps/{}/tables/{}/records/{}",
+            self.config.base_url, app_token, table_id, record_id
+        );
+        let resp = self
+            .send_with_retry("bitable_get_record", || {
+                self.http.get(&url).bearer_auth(&token)
+            })
+            .await?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| AppError::Lark(format!("bitable_get_record body: {e}")))?;
+        if !status.is_success() {
+            return Err(AppError::Lark(format!(
+                "bitable_get_record http {status}: {}",
+                truncate(&text, 200)
+            )));
+        }
+        let parsed: BitableSingleResponse = serde_json::from_str(&text).map_err(|e| {
+            AppError::Lark(format!(
+                "bitable_get_record parse: {e}; body={}",
+                truncate(&text, 200)
+            ))
+        })?;
+        if parsed.code != 0 {
+            return Err(AppError::Lark(format!(
+                "bitable_get_record code {}: {}",
+                parsed.code, parsed.msg
+            )));
+        }
+        parsed
+            .data
+            .and_then(|d| d.record)
+            .ok_or_else(|| AppError::Lark("bitable_get_record missing record in response".into()))
     }
 
     /// Patch one record's fields. The body matches Bitable's
@@ -1366,6 +1425,39 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("record_not_found"), "{err}");
+    }
+
+    // ── bitable get record ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn bitable_get_record_returns_single_record_by_id() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records/rec_xyz",
+            ))
+            .and(header("authorization", "Bearer t_xyz"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "record": {
+                        "record_id": "rec_xyz",
+                        "fields": { "title": "Hello" },
+                        "created_time": 1700000000000_i64,
+                        "last_modified_time": 1700000001000_i64
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let rec = client
+            .bitable_get_record("bascntest", "tbltest", "rec_xyz")
+            .await
+            .unwrap();
+        assert_eq!(rec.record_id, "rec_xyz");
+        assert_eq!(rec.extra_i64("created_time"), Some(1_700_000_000_000));
     }
 
     // ── attachment upload ────────────────────────────────────────
