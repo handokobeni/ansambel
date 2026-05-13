@@ -201,8 +201,31 @@ export const api = {
 
     /** Round-trip the credentials by issuing one tenant_access_token
      *  request. Resolves on success, rejects with the Lark API error
-     *  on failure. Never logs the resulting token. */
-    testConnection: (): Promise<void> => invoke('test_lark_connection'),
+     *  on failure. Never logs the resulting token.
+     *
+     *  When `override` is provided with all four required fields, the
+     *  backend tests those values directly — letting the user verify
+     *  form input BEFORE Save commits to keyring/disk. Pass `undefined`
+     *  to test the currently-stored credentials. */
+    testConnection: (override?: SetLarkCredentialsArgs): Promise<void> =>
+      invoke(
+        'test_lark_connection',
+        override
+          ? {
+              appId: override.appId,
+              appSecret: override.appSecret,
+              appToken: override.appToken,
+              tableId: override.tableId,
+              baseUrl: override.baseUrl ?? null,
+            }
+          : {
+              appId: null,
+              appSecret: null,
+              appToken: null,
+              tableId: null,
+              baseUrl: null,
+            }
+      ),
 
     /** Wipe both the keyring entry and the on-disk settings. Idempotent. */
     clear: (): Promise<void> => invoke('clear_lark_credentials'),

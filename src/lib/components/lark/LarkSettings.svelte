@@ -43,7 +43,16 @@
       tableId.trim().length > 0
   );
 
-  const canTest = $derived(!testing && status?.configured === true);
+  // Enabled when the user has typed a full credential set (validate
+  // BEFORE Save) OR when credentials are already stored (validate the
+  // saved set without re-typing the secret).
+  const canTestUnsaved = $derived(
+    appId.trim().length > 0 &&
+      appSecret.trim().length > 0 &&
+      appToken.trim().length > 0 &&
+      tableId.trim().length > 0
+  );
+  const canTest = $derived(!testing && (canTestUnsaved || status?.configured === true));
 
   onMount(async () => {
     await loadStatus();
@@ -102,7 +111,20 @@
     testing = true;
     banner = { kind: 'info', message: 'Testing connection...' };
     try {
-      await api.lark.testConnection();
+      // Prefer form values when the user has typed a complete set —
+      // lets them validate BEFORE Save. When the secret is blank
+      // (saved-config re-open) we fall through to undefined so the
+      // backend uses stored credentials.
+      const override = canTestUnsaved
+        ? {
+            appId: appId.trim(),
+            appSecret: appSecret.trim(),
+            appToken: appToken.trim(),
+            tableId: tableId.trim(),
+            baseUrl: baseUrl.trim() ? baseUrl.trim() : undefined,
+          }
+        : undefined;
+      await api.lark.testConnection(override);
       banner = { kind: 'success', message: 'Connection OK.' };
     } catch (e) {
       banner = { kind: 'error', message: `Connection failed: ${describe(e)}` };

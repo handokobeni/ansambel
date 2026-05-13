@@ -419,10 +419,51 @@ describe('api.lark', () => {
     expect(out).toEqual(mockStatus);
   });
 
-  it('testConnection: invokes test_lark_connection with no args', async () => {
+  it('testConnection: sends null sentinels when called with no override', async () => {
     vi.mocked(invoke).mockResolvedValue(undefined);
     await api.lark.testConnection();
-    expect(invoke).toHaveBeenCalledWith('test_lark_connection');
+    expect(invoke).toHaveBeenCalledWith('test_lark_connection', {
+      appId: null,
+      appSecret: null,
+      appToken: null,
+      tableId: null,
+      baseUrl: null,
+    });
+  });
+
+  it('testConnection: forwards override values for pre-save validation', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.lark.testConnection({
+      appId: 'cli',
+      appSecret: 'shh',
+      appToken: 'bascn',
+      tableId: 'tbl',
+    });
+    expect(invoke).toHaveBeenCalledWith('test_lark_connection', {
+      appId: 'cli',
+      appSecret: 'shh',
+      appToken: 'bascn',
+      tableId: 'tbl',
+      baseUrl: null,
+    });
+  });
+
+  it('testConnection: forwards baseUrl override when provided', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.lark.testConnection({
+      appId: 'cli',
+      appSecret: 'shh',
+      appToken: 'bascn',
+      tableId: 'tbl',
+      baseUrl: 'https://open.feishu.cn',
+    });
+    expect(invoke).toHaveBeenCalledWith('test_lark_connection', {
+      appId: 'cli',
+      appSecret: 'shh',
+      appToken: 'bascn',
+      tableId: 'tbl',
+      baseUrl: 'https://open.feishu.cn',
+    });
   });
 
   it('testConnection: rejects with Lark API error', async () => {

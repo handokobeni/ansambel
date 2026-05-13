@@ -94,7 +94,7 @@ describe('LarkSettings', () => {
     expect((screen.getByTestId('lark-save') as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it('Test connection is disabled when not configured', async () => {
+  it('Test connection is disabled when form empty and nothing stored', async () => {
     mockGetStatus(statusUnconfigured);
     render(LarkSettings);
     await flush();
@@ -108,6 +108,77 @@ describe('LarkSettings', () => {
     await flush();
     const testBtn = screen.getByTestId('lark-test') as HTMLButtonElement;
     expect(testBtn.disabled).toBe(false);
+  });
+
+  it('Test connection is enabled once all 4 form fields are filled (pre-save)', async () => {
+    mockGetStatus(statusUnconfigured);
+    render(LarkSettings);
+    await flush();
+    expect((screen.getByTestId('lark-test') as HTMLButtonElement).disabled).toBe(true);
+
+    await fireEvent.input(screen.getByLabelText(/app id/i), { target: { value: 'cli_x' } });
+    await fireEvent.input(screen.getByLabelText(/app secret/i), { target: { value: 'shh' } });
+    await fireEvent.input(screen.getByLabelText(/app token/i), { target: { value: 'bascn_x' } });
+    // Still missing table_id.
+    expect((screen.getByTestId('lark-test') as HTMLButtonElement).disabled).toBe(true);
+
+    await fireEvent.input(screen.getByLabelText(/table id/i), { target: { value: 'tbl_x' } });
+    expect((screen.getByTestId('lark-test') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('Test connection sends form values as override when filled pre-save', async () => {
+    const calls: Array<[string, unknown]> = [];
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+      calls.push([cmd, args]);
+      if (cmd === 'get_lark_status') return Promise.resolve(statusUnconfigured);
+      if (cmd === 'test_lark_connection') return Promise.resolve(undefined);
+      return Promise.resolve(undefined);
+    });
+    render(LarkSettings);
+    await flush();
+
+    await fireEvent.input(screen.getByLabelText(/app id/i), { target: { value: 'cli_x' } });
+    await fireEvent.input(screen.getByLabelText(/app secret/i), { target: { value: 'shh' } });
+    await fireEvent.input(screen.getByLabelText(/app token/i), { target: { value: 'bascn_x' } });
+    await fireEvent.input(screen.getByLabelText(/table id/i), { target: { value: 'tbl_x' } });
+    await fireEvent.click(screen.getByTestId('lark-test'));
+    await flush();
+
+    const call = calls.find((c) => c[0] === 'test_lark_connection');
+    expect(call?.[1]).toMatchObject({
+      appId: 'cli_x',
+      appSecret: 'shh',
+      appToken: 'bascn_x',
+      tableId: 'tbl_x',
+    });
+    expect(screen.getByTestId('lark-banner').textContent).toContain('Connection OK');
+  });
+
+  it('Test connection sends null overrides when secret is blank (saved-config flow)', async () => {
+    const calls: Array<[string, unknown]> = [];
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
+      calls.push([cmd, args]);
+      if (cmd === 'get_lark_status') return Promise.resolve(statusConfigured);
+      if (cmd === 'test_lark_connection') return Promise.resolve(undefined);
+      return Promise.resolve(undefined);
+    });
+    render(LarkSettings);
+    await flush();
+    // Secret left blank by design when loading saved config.
+    expect((screen.getByLabelText(/app secret/i) as HTMLInputElement).value).toBe('');
+
+    await fireEvent.click(screen.getByTestId('lark-test'));
+    await flush();
+
+    const call = calls.find((c) => c[0] === 'test_lark_connection');
+    // Sentinel-null payload signals "use stored credentials".
+    expect(call?.[1]).toMatchObject({
+      appId: null,
+      appSecret: null,
+      appToken: null,
+      tableId: null,
+      baseUrl: null,
+    });
   });
 
   it('Save calls set_lark_credentials and shows success banner', async () => {
