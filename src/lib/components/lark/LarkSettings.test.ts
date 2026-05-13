@@ -399,4 +399,30 @@ describe('LarkSettings schema section', () => {
     await flush();
     expect(screen.getByTestId('lark-schema-error').textContent).toContain('Forbidden');
   });
+
+  it('surfaces non-Error string rejections via describe()', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_lark_status') return Promise.resolve(statusConfigured);
+      if (cmd === 'verify_lark_schema') return Promise.reject('plain-string-error');
+      return Promise.resolve(undefined);
+    });
+    render(LarkSettings);
+    await flush();
+    await fireEvent.click(screen.getByTestId('lark-verify-schema'));
+    await flush();
+    expect(screen.getByTestId('lark-schema-error').textContent).toContain('plain-string-error');
+  });
+
+  it('JSON-stringifies non-Error non-string rejections via describe()', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_lark_status') return Promise.resolve(statusConfigured);
+      if (cmd === 'verify_lark_schema') return Promise.reject({ code: 91402 });
+      return Promise.resolve(undefined);
+    });
+    render(LarkSettings);
+    await flush();
+    await fireEvent.click(screen.getByTestId('lark-verify-schema'));
+    await flush();
+    expect(screen.getByTestId('lark-schema-error').textContent).toContain('91402');
+  });
 });
