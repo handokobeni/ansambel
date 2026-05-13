@@ -1,7 +1,8 @@
 use crate::error::{AppError, Result};
 use crate::state::{AppState, KanbanColumn, Task};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tauri::State;
+use tauri::{Manager, State};
 
 // ── Structs ──────────────────────────────────────────────────────────
 
@@ -80,9 +81,7 @@ pub async fn move_task(
     // auto-create a workspace, and workspace creation owns its own
     // persistence path (worktree dir + workspaces.json). The task
     // mutation itself goes through the provider.
-    let data_dir = tauri::Manager::path(&app)
-        .app_data_dir()
-        .map_err(|e| e.to_string())?;
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let provider = provider_handle.read().await.clone();
     move_task_inner(
         task_id,
@@ -179,6 +178,46 @@ pub(crate) fn list_tasks_inner(repo_id: String, state: Arc<Mutex<AppState>>) -> 
             .then_with(|| b.order.cmp(&a.order))
     });
 
+    Ok(tasks)
+}
+
+#[tauri::command]
+pub async fn refresh_tasks(
+    repo_id: Option<String>,
+    state: State<'_, Arc<Mutex<AppState>>>,
+    provider_handle: State<'_, crate::state::TaskProviderHandle>,
+) -> std::result::Result<Vec<Task>, String> {
+    refresh_tasks_inner(
+        repo_id,
+        state.inner().clone(),
+        provider_handle.read().await.clone(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "refresh_tasks failed");
+        e.to_string()
+    })
+}
+
+pub(crate) async fn refresh_tasks_inner(
+    repo_id: Option<String>,
+    state: Arc<Mutex<AppState>>,
+    provider: Arc<dyn crate::task_provider::TaskProvider>,
+) -> Result<Vec<Task>> {
+    let tasks = provider.list_tasks(repo_id.as_deref()).await?;
+    {
+        let mut st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        if let Some(rid) = repo_id.as_deref() {
+            st.tasks.retain(|_, t| t.repo_id != rid);
+        } else {
+            st.tasks.clear();
+        }
+        for t in &tasks {
+            st.tasks.insert(t.id.clone(), t.clone());
+        }
+    }
     Ok(tasks)
 }
 
@@ -318,6 +357,100 @@ pub(crate) async fn remove_task_inner(
         st.tasks.remove(&task_id);
     }
     tracing::info!(task_id = %task_id, "Removed task");
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_task_source(
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> std::result::Result<crate::state::TaskSource, String> {
+    let st = state
+        .lock()
+        .map_err(|e| format!("AppState lock poisoned: {e}"))?;
+    Ok(st.settings.task_source)
+}
+
+#[tauri::command]
+pub async fn set_task_source(
+    source: crate::state::TaskSource,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Mutex<AppState>>>,
+    provider_handle: State<'_, crate::state::TaskProviderHandle>,
+) -> std::result::Result<(), String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    set_task_source_inner(
+        source,
+        data_dir,
+        state.inner().clone(),
+        provider_handle.inner().clone(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "set_task_source failed");
+        e.to_string()
+    })?;
+    // Emit a Tauri event so the frontend store reloads tasks.
+    use tauri::Emitter;
+    let _ = app.emit("tasks-rehydrated", ());
+    Ok(())
+}
+
+pub(crate) async fn set_task_source_inner(
+    source: crate::state::TaskSource,
+    data_dir: PathBuf,
+    state: Arc<Mutex<AppState>>,
+    provider_handle: crate::state::TaskProviderHandle,
+) -> Result<()> {
+    // Build the new provider before we acquire the write lock, so a
+    // failure (e.g. missing Lark credentials) doesn't leave us
+    // partially swapped.
+    let new_provider: Arc<dyn crate::task_provider::TaskProvider> = match source {
+        crate::state::TaskSource::Local => Arc::new(
+            crate::task_provider::local::LocalProvider::new(data_dir.clone()),
+        ),
+        crate::state::TaskSource::Lark => {
+            let store = crate::commands::lark_auth::KeyringStore;
+            let cfg = crate::commands::lark_auth::load_lark_config_inner(&data_dir, &store)
+                .map_err(|e| {
+                    AppError::InvalidState(format!(
+                        "Cannot switch to Lark: {e}. Configure Lark credentials first."
+                    ))
+                })?;
+            let app_token = cfg.app_token.clone();
+            let table_id = cfg.table_id.clone();
+            let client = Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
+            Arc::new(crate::task_provider::lark::LarkProvider::new(
+                client, app_token, table_id,
+            ))
+        }
+    };
+
+    // Persist setting.
+    {
+        let mut st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        st.settings.task_source = source;
+        crate::persistence::settings::save_settings(&data_dir, &st.settings)?;
+    }
+
+    // Swap provider.
+    {
+        let mut guard = provider_handle.write().await;
+        *guard = new_provider.clone();
+    }
+
+    // Re-hydrate AppState.tasks.
+    let tasks = new_provider.list_tasks(None).await?;
+    {
+        let mut st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        st.tasks.clear();
+        for t in tasks {
+            st.tasks.insert(t.id.clone(), t);
+        }
+    }
     Ok(())
 }
 
@@ -1139,5 +1272,60 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+    }
+
+    fn make_state() -> Arc<Mutex<AppState>> {
+        Arc::new(Mutex::new(AppState::default()))
+    }
+
+    #[tokio::test]
+    async fn refresh_tasks_replaces_mirror_subset_for_repo() {
+        let tmp = tempdir().unwrap();
+        let provider = make_provider(tmp.path());
+        // Pre-populate via the provider directly.
+        for repo in ["repo_a", "repo_a", "repo_b"] {
+            provider
+                .create_task(crate::task_provider::CreateTaskArgs {
+                    repo_id: repo.into(),
+                    title: "t".into(),
+                    description: String::new(),
+                    column: None,
+                })
+                .await
+                .unwrap();
+        }
+        let state = make_state();
+        // Refresh only repo_a — pulls 2 tasks into mirror.
+        let tasks = refresh_tasks_inner(Some("repo_a".into()), state.clone(), provider.clone())
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 2);
+        let st = state.lock().unwrap();
+        assert_eq!(
+            st.tasks.values().filter(|t| t.repo_id == "repo_a").count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn set_task_source_lark_rejects_when_credentials_missing() {
+        let tmp = tempdir().unwrap();
+        let state = make_state();
+        let provider_handle = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(
+            crate::task_provider::local::LocalProvider::new(tmp.path().to_path_buf()),
+        )
+            as std::sync::Arc<dyn crate::task_provider::TaskProvider>));
+        let err = set_task_source_inner(
+            crate::state::TaskSource::Lark,
+            tmp.path().to_path_buf(),
+            state,
+            provider_handle,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("Configure Lark credentials"),
+            "{err}"
+        );
     }
 }
