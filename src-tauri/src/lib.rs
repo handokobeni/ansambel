@@ -8,6 +8,7 @@ pub mod panic;
 pub mod persistence;
 pub mod platform;
 pub mod state;
+pub mod task_provider;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
