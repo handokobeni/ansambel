@@ -379,6 +379,50 @@ struct BitableEmptyResponse {
     msg: String,
 }
 
+/// Field metadata as returned by Bitable. `field_type` is the numeric
+/// code Lark uses (1=Text, 2=Number, 3=SingleSelect, 5=DateTime,
+/// 7=Checkbox, 15=URL, 17=Attachment). Property is free-form JSON
+/// whose shape depends on the type.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct BitableField {
+    pub field_id: String,
+    pub field_name: String,
+    #[serde(rename = "type")]
+    pub field_type: u32,
+    #[serde(default)]
+    pub property: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct BitableFieldListResponse {
+    code: i64,
+    #[serde(default)]
+    msg: String,
+    #[serde(default)]
+    data: Option<BitableFieldListData>,
+}
+
+#[derive(Deserialize)]
+struct BitableFieldListData {
+    #[serde(default)]
+    items: Vec<BitableField>,
+}
+
+#[derive(Deserialize)]
+struct BitableCreateFieldResponse {
+    code: i64,
+    #[serde(default)]
+    msg: String,
+    #[serde(default)]
+    data: Option<BitableCreateFieldData>,
+}
+
+#[derive(Deserialize)]
+struct BitableCreateFieldData {
+    #[serde(default)]
+    field: Option<BitableField>,
+}
+
 impl LarkClient {
     /// List every record in a Bitable table, optionally filtered. The
     /// filter is passed through verbatim — see Lark Bitable docs for
@@ -587,6 +631,104 @@ impl LarkClient {
             )));
         }
         Ok(())
+    }
+
+    /// List all fields in a Bitable table. Used by the schema wizard.
+    pub async fn bitable_list_fields(
+        &self,
+        app_token: &str,
+        table_id: &str,
+    ) -> Result<Vec<BitableField>> {
+        let token = self.tenant_access_token().await?;
+        let url = format!(
+            "{}/open-apis/bitable/v1/apps/{}/tables/{}/fields",
+            self.config.base_url, app_token, table_id
+        );
+        let resp = self
+            .send_with_retry("bitable_list_fields", || {
+                self.http.get(&url).bearer_auth(&token)
+            })
+            .await?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| AppError::Lark(format!("bitable_list_fields body: {e}")))?;
+        if !status.is_success() {
+            return Err(AppError::Lark(format!(
+                "bitable_list_fields http {status}: {}",
+                truncate(&text, 200)
+            )));
+        }
+        let parsed: BitableFieldListResponse = serde_json::from_str(&text).map_err(|e| {
+            AppError::Lark(format!(
+                "bitable_list_fields parse: {e}; body={}",
+                truncate(&text, 200)
+            ))
+        })?;
+        if parsed.code != 0 {
+            return Err(AppError::Lark(format!(
+                "bitable_list_fields code {}: {}",
+                parsed.code, parsed.msg
+            )));
+        }
+        Ok(parsed.data.map(|d| d.items).unwrap_or_default())
+    }
+
+    /// Create one field in a Bitable table. `property` shape depends on
+    /// `field_type` — see Lark Open Platform docs.
+    pub async fn bitable_create_field(
+        &self,
+        app_token: &str,
+        table_id: &str,
+        field_name: &str,
+        field_type: u32,
+        property: Option<serde_json::Value>,
+    ) -> Result<BitableField> {
+        let token = self.tenant_access_token().await?;
+        let url = format!(
+            "{}/open-apis/bitable/v1/apps/{}/tables/{}/fields",
+            self.config.base_url, app_token, table_id
+        );
+        let mut body = serde_json::json!({
+            "field_name": field_name,
+            "type": field_type,
+        });
+        if let Some(prop) = &property {
+            body["property"] = prop.clone();
+        }
+        let resp = self
+            .send_with_retry("bitable_create_field", || {
+                self.http.post(&url).bearer_auth(&token).json(&body)
+            })
+            .await?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| AppError::Lark(format!("bitable_create_field body: {e}")))?;
+        if !status.is_success() {
+            return Err(AppError::Lark(format!(
+                "bitable_create_field http {status}: {}",
+                truncate(&text, 200)
+            )));
+        }
+        let parsed: BitableCreateFieldResponse = serde_json::from_str(&text).map_err(|e| {
+            AppError::Lark(format!(
+                "bitable_create_field parse: {e}; body={}",
+                truncate(&text, 200)
+            ))
+        })?;
+        if parsed.code != 0 {
+            return Err(AppError::Lark(format!(
+                "bitable_create_field code {}: {}",
+                parsed.code, parsed.msg
+            )));
+        }
+        parsed
+            .data
+            .and_then(|d| d.field)
+            .ok_or_else(|| AppError::Lark("bitable_create_field missing field in response".into()))
     }
 }
 
@@ -1591,6 +1733,146 @@ mod tests {
             elapsed >= Duration::from_millis(900),
             "expected ≥900ms wait, got {elapsed:?}"
         );
+    }
+
+    // ── bitable list fields ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn bitable_list_fields_returns_field_metadata() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/fields",
+            ))
+            .and(header("authorization", "Bearer t_xyz"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "field_id": "fld_a",
+                            "field_name": "title",
+                            "type": 1,
+                            "property": null
+                        },
+                        {
+                            "field_id": "fld_b",
+                            "field_name": "kanban_column",
+                            "type": 3,
+                            "property": {
+                                "options": [{"name": "todo", "id": "opt_1"}]
+                            }
+                        }
+                    ],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let fields = client
+            .bitable_list_fields("bascntest", "tbltest")
+            .await
+            .unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].field_name, "title");
+        assert_eq!(fields[0].field_type, 1);
+        assert_eq!(fields[1].field_name, "kanban_column");
+        assert_eq!(fields[1].field_type, 3);
+    }
+
+    // ── bitable create field ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn bitable_create_field_posts_field_definition() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/fields",
+            ))
+            .and(header("authorization", "Bearer t_xyz"))
+            .and(body_json(serde_json::json!({
+                "field_name": "kanban_column",
+                "type": 3,
+                "property": {
+                    "options": [
+                        {"name": "todo"},
+                        {"name": "in_progress"}
+                    ]
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "field": {
+                        "field_id": "fld_new",
+                        "field_name": "kanban_column",
+                        "type": 3,
+                        "property": {
+                            "options": [
+                                {"name": "todo", "id": "opt_1"},
+                                {"name": "in_progress", "id": "opt_2"}
+                            ]
+                        }
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let field = client
+            .bitable_create_field(
+                "bascntest",
+                "tbltest",
+                "kanban_column",
+                3,
+                Some(serde_json::json!({
+                    "options": [
+                        {"name": "todo"},
+                        {"name": "in_progress"}
+                    ]
+                })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(field.field_id, "fld_new");
+        assert_eq!(field.field_name, "kanban_column");
+        assert_eq!(field.field_type, 3);
+    }
+
+    #[tokio::test]
+    async fn bitable_create_field_omits_property_when_none() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/fields",
+            ))
+            .and(body_json(serde_json::json!({
+                "field_name": "repo_id",
+                "type": 1
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "field": {
+                        "field_id": "fld_repo",
+                        "field_name": "repo_id",
+                        "type": 1
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let field = client
+            .bitable_create_field("bascntest", "tbltest", "repo_id", 1, None)
+            .await
+            .unwrap();
+        assert_eq!(field.field_id, "fld_repo");
     }
 
     #[tokio::test]
