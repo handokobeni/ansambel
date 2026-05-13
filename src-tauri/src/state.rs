@@ -126,6 +126,13 @@ pub struct AgentHandle {
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Tauri-managed handle to the active task provider. Lives separately
+/// from AppState so async provider calls don't hold the AppState lock.
+/// Inner Arc is swap-able via write lock when the user changes the
+/// task source in Settings.
+pub type TaskProviderHandle =
+    std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<dyn crate::task_provider::TaskProvider>>>;
+
 #[derive(Default, Debug)]
 pub struct AppState {
     pub repos: std::collections::HashMap<String, RepoInfo>,

@@ -40,6 +40,17 @@ pub fn run() {
 
             app.manage(std::sync::Arc::new(std::sync::Mutex::new(state)));
 
+            // Phase 3a-2: provider handle is separate from AppState so async
+            // trait calls don't hold the AppState lock. For now we always init
+            // LocalProvider; Task 7+8 wire the Lark/Local switch from settings.
+            let provider: std::sync::Arc<dyn crate::task_provider::TaskProvider> =
+                std::sync::Arc::new(crate::task_provider::local::LocalProvider::new(
+                    data_dir.clone(),
+                ));
+            let provider_handle: crate::state::TaskProviderHandle =
+                std::sync::Arc::new(tokio::sync::RwLock::new(provider));
+            app.manage(provider_handle);
+
             // Debounced message writer — collapses bursts of stream events
             // into a single disk write per workspace per ~500 ms window.
             // Construction calls `tokio::spawn` for the debouncer worker,
