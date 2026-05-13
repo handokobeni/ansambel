@@ -335,3 +335,68 @@ describe('LarkSettings', () => {
     expect(screen.getByTestId('lark-banner').textContent).toContain('Failed to load status');
   });
 });
+
+describe('LarkSettings schema section', () => {
+  it('disables Verify button when credentials are not saved', async () => {
+    mockGetStatus(statusUnconfigured);
+    render(LarkSettings);
+    await flush();
+    const btn = screen.getByTestId('lark-verify-schema') as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+  });
+
+  it('renders created + already_present lists on success', async () => {
+    const result = {
+      ok: true,
+      created: ['kanban_column', 'order_within_column'],
+      already_present: ['title', 'description', 'repo_id'],
+      type_mismatches: [],
+    };
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_lark_status') return Promise.resolve(statusConfigured);
+      if (cmd === 'verify_lark_schema') return Promise.resolve(result);
+      return Promise.resolve(undefined);
+    });
+    render(LarkSettings);
+    await flush();
+    await fireEvent.click(screen.getByTestId('lark-verify-schema'));
+    await flush();
+    const block = screen.getByTestId('lark-schema-result');
+    expect(block.textContent).toContain('kanban_column');
+    expect(block.textContent).toContain('title');
+  });
+
+  it('renders type-mismatch warning when fields have wrong type', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_lark_status') return Promise.resolve(statusConfigured);
+      if (cmd === 'verify_lark_schema')
+        return Promise.resolve({
+          ok: false,
+          created: [],
+          already_present: [],
+          type_mismatches: ['kanban_column'],
+        });
+      return Promise.resolve(undefined);
+    });
+    render(LarkSettings);
+    await flush();
+    await fireEvent.click(screen.getByTestId('lark-verify-schema'));
+    await flush();
+    expect(screen.getByTestId('lark-schema-result').textContent).toContain('kanban_column');
+    expect(screen.getByTestId('lark-schema-result').textContent).toContain('mismatch');
+  });
+
+  it('surfaces backend error in error block', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_lark_status') return Promise.resolve(statusConfigured);
+      if (cmd === 'verify_lark_schema')
+        return Promise.reject(new Error('Lark API: 91403 Forbidden'));
+      return Promise.resolve(undefined);
+    });
+    render(LarkSettings);
+    await flush();
+    await fireEvent.click(screen.getByTestId('lark-verify-schema'));
+    await flush();
+    expect(screen.getByTestId('lark-schema-error').textContent).toContain('Forbidden');
+  });
+});

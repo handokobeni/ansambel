@@ -15,7 +15,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from '$lib/ipc';
-  import type { LarkStatus } from '$lib/types';
+  import type { LarkStatus, SchemaCheckResult } from '$lib/types';
 
   type Banner =
     | { kind: 'idle' }
@@ -53,6 +53,12 @@
       tableId.trim().length > 0
   );
   const canTest = $derived(!testing && (canTestUnsaved || status?.configured === true));
+
+  let schemaResult = $state<SchemaCheckResult | null>(null);
+  let verifying = $state(false);
+  let schemaError = $state<string | null>(null);
+
+  const canVerifySchema = $derived(!verifying && status?.configured === true);
 
   onMount(async () => {
     await loadStatus();
@@ -144,6 +150,20 @@
       banner = { kind: 'error', message: `Clear failed: ${describe(e)}` };
     } finally {
       saving = false;
+    }
+  }
+
+  async function handleVerifySchema() {
+    if (!canVerifySchema) return;
+    verifying = true;
+    schemaError = null;
+    try {
+      schemaResult = await api.lark.verifySchema();
+    } catch (e) {
+      schemaError = describe(e);
+      schemaResult = null;
+    } finally {
+      verifying = false;
     }
   }
 
@@ -327,5 +347,56 @@
         </button>
       </div>
     </form>
+
+    <section
+      class="flex flex-col gap-2 px-4 py-3 border-t border-[var(--border-light)]"
+      aria-labelledby="lark-schema-title"
+      data-testid="lark-schema-section"
+    >
+      <h3 id="lark-schema-title" class="text-sm font-semibold">Bitable schema</h3>
+      <p class="text-[11px] text-[var(--text-muted)]">
+        5 fields required for kanban sync. Verify creates any missing ones.
+      </p>
+
+      <button
+        type="button"
+        class="self-start px-3 py-1.5 text-xs font-semibold rounded bg-[var(--bg-hover)] text-[var(--text-dim)] hover:text-[var(--text-primary)] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+        onclick={handleVerifySchema}
+        disabled={!canVerifySchema}
+        data-testid="lark-verify-schema"
+      >
+        {verifying ? 'Verifying...' : 'Verify / Initialize schema'}
+      </button>
+
+      {#if schemaError}
+        <div
+          role="status"
+          class="text-[11px] px-2 py-1.5 rounded border border-red-500 text-red-400"
+          data-testid="lark-schema-error"
+        >
+          {schemaError}
+        </div>
+      {/if}
+
+      {#if schemaResult}
+        <div class="text-[11px] flex flex-col gap-1" data-testid="lark-schema-result">
+          {#if schemaResult.created.length > 0}
+            <div class="text-[var(--accent)]">
+              + Created: {schemaResult.created.join(', ')}
+            </div>
+          {/if}
+          {#if schemaResult.already_present.length > 0}
+            <div class="text-[var(--text-muted)]">
+              ✓ Already present: {schemaResult.already_present.join(', ')}
+            </div>
+          {/if}
+          {#if schemaResult.type_mismatches.length > 0}
+            <div class="text-red-400">
+              ✗ Type mismatch (fix in Bitable UI): {schemaResult.type_mismatches.join(', ')}
+            </div>
+          {/if}
+        </div>
+      {/if}
+    </section>
   {/if}
 </section>
