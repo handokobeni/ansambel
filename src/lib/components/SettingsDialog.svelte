@@ -13,9 +13,6 @@
 -->
 <script lang="ts">
   import LarkSettings from './lark/LarkGlobalSettings.svelte';
-  import { api } from '$lib/ipc';
-  import { addToast } from '$lib/stores/toasts.svelte';
-  import type { TaskSource } from '$lib/types';
 
   const {
     open,
@@ -24,33 +21,6 @@
     open: boolean;
     onClose: () => void;
   } = $props();
-
-  let source = $state<TaskSource>('local');
-  let saving = $state(false);
-
-  $effect(() => {
-    if (open) {
-      api.task
-        .getSource()
-        .then((s) => (source = s))
-        .catch(() => {});
-    }
-  });
-
-  async function handleSourceChange(next: TaskSource) {
-    if (next === source || saving) return;
-    saving = true;
-    const prev = source;
-    source = next; // optimistic
-    try {
-      await api.task.setSource(next);
-    } catch (e) {
-      source = prev;
-      addToast(`Cannot switch task source: ${e instanceof Error ? e.message : String(e)}`, 'error');
-    } finally {
-      saving = false;
-    }
-  }
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
@@ -107,37 +77,6 @@
           </svg>
         </button>
       </header>
-
-      <section class="px-4 py-3 border-b border-[var(--border-light)]">
-        <h3 class="text-sm font-semibold mb-1">Task source</h3>
-        <p class="text-[11px] text-[var(--text-muted)] mb-2">
-          Where Ansambel stores and syncs your kanban.
-        </p>
-        <label class="flex items-center gap-2 text-xs mb-1 cursor-pointer">
-          <input
-            type="radio"
-            name="task-source"
-            value="local"
-            checked={source === 'local'}
-            onchange={() => handleSourceChange('local')}
-            disabled={saving}
-            data-testid="task-source-local"
-          />
-          Local (tasks.json on this machine)
-        </label>
-        <label class="flex items-center gap-2 text-xs cursor-pointer">
-          <input
-            type="radio"
-            name="task-source"
-            value="lark"
-            checked={source === 'lark'}
-            onchange={() => handleSourceChange('lark')}
-            disabled={saving}
-            data-testid="task-source-lark"
-          />
-          Lark Bitable (shared with team)
-        </label>
-      </section>
 
       <div class="divide-y divide-[var(--border-light)]">
         {#key open}
