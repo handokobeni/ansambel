@@ -86,7 +86,7 @@ pub async fn update_task(
         st.tasks
             .get(&task_id)
             .map(|t| t.repo_id.clone())
-            .unwrap_or_default()
+            .ok_or_else(|| format!("Task '{task_id}' not found in mirror"))?
     };
     let provider = provider_for_repo(provider_handle.inner(), &data_dir, &repo_id).await;
     update_task_inner(task_id, patch, provider, state.inner().clone())
@@ -119,7 +119,7 @@ pub async fn move_task(
         st.tasks
             .get(&task_id)
             .map(|t| t.repo_id.clone())
-            .unwrap_or_default()
+            .ok_or_else(|| format!("Task '{task_id}' not found in mirror"))?
     };
     let provider = provider_for_repo(provider_handle.inner(), &data_dir, &repo_id).await;
     move_task_inner(
@@ -1478,5 +1478,35 @@ mod tests {
             err.to_string().contains("Configure Lark credentials"),
             "{err}"
         );
+    }
+
+    // ── provider_for_repo tests ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn provider_for_repo_returns_default_when_repo_not_in_handle() {
+        use std::collections::HashMap;
+        let tmp = tempdir().unwrap();
+        let handle: crate::state::TaskProviderHandle =
+            Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let provider = provider_for_repo(&handle, tmp.path(), "unknown_repo").await;
+        // The default fallback is a LocalProvider. Verify it doesn't crash
+        // and produces an empty task list for an unknown repo.
+        let tasks = provider.list_tasks(Some("unknown_repo")).await.unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_for_repo_returns_existing_provider_when_repo_present() {
+        use std::collections::HashMap;
+        let tmp = tempdir().unwrap();
+        let local: Arc<dyn crate::task_provider::TaskProvider> = Arc::new(
+            crate::task_provider::local::LocalProvider::new(tmp.path().to_path_buf()),
+        );
+        let mut map = HashMap::new();
+        map.insert("repo_x".to_string(), local.clone());
+        let handle: crate::state::TaskProviderHandle = Arc::new(tokio::sync::RwLock::new(map));
+        let p = provider_for_repo(&handle, tmp.path(), "repo_x").await;
+        // Same Arc — Arc::ptr_eq verifies it's the original instance, not a fresh fallback.
+        assert!(Arc::ptr_eq(&p, &local));
     }
 }
