@@ -212,13 +212,13 @@ fn record_to_task(
 
     // kanban_column: prefer canonical field, then any status-like alias.
     // Unknown values (or no status field at all) collapse to Todo so the
-    // task remains visible; a warn log carries the record id so the user
-    // can debug. This favours hydration completeness over strict schema
-    // enforcement — losing 1% of rows because of an unmappable status is
-    // worse than placing them in the backlog column for triage.
+    // task remains visible. Per-record diagnostics go to `debug!` (opt-in
+    // via RUST_LOG) — at WARN level we'd flood the log on Bitables with
+    // hundreds of un-triaged rows. The list_tasks caller emits a single
+    // summary at WARN level instead.
     let column = match find_kanban_value(fields) {
         Some(v) => parse_kanban_column(v).unwrap_or_else(|| {
-            tracing::warn!(
+            tracing::debug!(
                 record_id = %rec.record_id,
                 value = %v,
                 "kanban_column value did not match any taxonomy; defaulting to Todo"
@@ -226,7 +226,7 @@ fn record_to_task(
             KanbanColumn::Todo
         }),
         None => {
-            tracing::warn!(
+            tracing::debug!(
                 record_id = %rec.record_id,
                 "no kanban_column or status-like field set; defaulting to Todo"
             );
@@ -303,10 +303,32 @@ impl TaskProvider for LarkProvider {
             .bitable_list_records(&self.app_token, &self.table_id, None)
             .await?;
         let primary = self.primary_field_name().await;
+        let total = records.len();
+        let mut skipped = 0usize;
         let mut tasks: Vec<Task> = records
             .iter()
-            .map(|r| record_to_task(r, primary.as_deref(), repo_filter))
-            .collect::<Result<Vec<_>>>()?;
+            .filter_map(
+                |r| match record_to_task(r, primary.as_deref(), repo_filter) {
+                    Ok(t) => Some(t),
+                    Err(e) => {
+                        tracing::debug!(
+                            record_id = %r.record_id,
+                            error = %e,
+                            "skipping malformed Bitable record"
+                        );
+                        skipped += 1;
+                        None
+                    }
+                },
+            )
+            .collect();
+        if skipped > 0 {
+            tracing::warn!(
+                skipped,
+                total,
+                "skipped {skipped}/{total} Bitable records that could not be parsed (run with RUST_LOG=debug for per-record details)"
+            );
+        }
         if let Some(filter) = repo_filter {
             tasks.retain(|t| t.repo_id == filter);
         }
@@ -936,7 +958,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lark_provider_surfaces_missing_field_error_clearly() {
+    async fn lark_provider_skips_malformed_records_instead_of_failing_entire_list() {
+        // A single row without title (and no primary fallback available)
+        // must not abort the hydrate; it gets skipped (with a summary log)
+        // and the rest of the batch loads normally.
         let server = MockServer::start().await;
         mount_token(&server).await;
         Mock::given(method("GET"))
@@ -946,14 +971,24 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "code": 0,
                 "data": {
-                    "items": [{
-                        "record_id": "rec_broken",
-                        "fields": {
-                            "description": "",
-                            "kanban_column": "todo",
-                            "repo_id": "r"
+                    "items": [
+                        {
+                            "record_id": "rec_broken",
+                            "fields": {
+                                "description": "",
+                                "kanban_column": "todo",
+                                "repo_id": "r"
+                            }
+                        },
+                        {
+                            "record_id": "rec_ok",
+                            "fields": {
+                                "title": "Valid row",
+                                "kanban_column": "todo",
+                                "repo_id": "r"
+                            }
                         }
-                    }],
+                    ],
                     "has_more": false,
                     "page_token": ""
                 }
@@ -961,10 +996,9 @@ mod tests {
             .mount(&server)
             .await;
         let provider = make_provider(&server.uri());
-        let err = provider.list_tasks(None).await.unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("title"), "{msg}");
-        assert!(msg.contains("rec_broken"), "{msg}");
+        let tasks = provider.list_tasks(None).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "rec_ok");
     }
 
     /// When a record's `title` field is absent or empty, the provider should
