@@ -419,6 +419,7 @@ pub(crate) async fn set_task_source_inner(
             let app_token = cfg.app_token.clone();
             let table_id = cfg.table_id.clone();
             let client = Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
+            // FIXME(phase-3a-3 task-10): replace placeholder mappings with per-repo binding lookup.
             Arc::new(crate::task_provider::lark::LarkProvider::new(
                 client,
                 app_token,

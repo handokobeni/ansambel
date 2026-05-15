@@ -269,9 +269,6 @@ impl TaskProvider for LarkProvider {
                 "skipped {skipped}/{total} Bitable records that could not be parsed (run with RUST_LOG=debug for per-record details)"
             );
         }
-        if let Some(filter) = repo_filter {
-            tasks.retain(|t| t.repo_id == filter);
-        }
         // Same ordering convention as LocalProvider: column ASC then order DESC.
         tasks.sort_by(
             |a, b| match column_rank(&a.column).cmp(&column_rank(&b.column)) {
