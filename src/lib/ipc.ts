@@ -21,6 +21,8 @@ import type {
   FileWriteResponse,
   LarkStatus,
   SetLarkCredentialsArgs,
+  TaskSource,
+  SchemaCheckResult,
 } from './types';
 
 export type ListMessagesOpts = {
@@ -93,6 +95,19 @@ export const api = {
 
     remove: (taskId: string, force?: boolean): Promise<void> =>
       invoke('remove_task', { taskId, force }),
+
+    /** Pull fresh tasks from the active provider into the backend
+     *  mirror, then return them. Used by the manual Refresh button
+     *  and the window-focus listener. */
+    refresh: (repoId?: string): Promise<Task[]> => invoke('refresh_tasks', { repoId }),
+
+    /** Persist the chosen task source and rehydrate the kanban from
+     *  the new provider. Backend emits `tasks-rehydrated` after
+     *  success so frontend stores can re-load. */
+    setSource: (source: TaskSource): Promise<void> => invoke('set_task_source', { source }),
+
+    /** Read the currently-active task source from settings. */
+    getSource: (): Promise<TaskSource> => invoke('get_task_source'),
   },
 
   agent: {
@@ -229,6 +244,10 @@ export const api = {
 
     /** Wipe both the keyring entry and the on-disk settings. Idempotent. */
     clear: (): Promise<void> => invoke('clear_lark_credentials'),
+
+    /** Diff the configured Bitable table against the required fields
+     *  for Phase 3a-2; create missing ones. Idempotent. */
+    verifySchema: (): Promise<SchemaCheckResult> => invoke('verify_lark_schema'),
   },
 
   script: {

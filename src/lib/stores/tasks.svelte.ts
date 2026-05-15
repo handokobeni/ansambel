@@ -1,6 +1,7 @@
 // src/lib/stores/tasks.svelte.ts
 import { SvelteMap } from 'svelte/reactivity';
 import { api } from '$lib/ipc';
+import { addToast } from '$lib/stores/toasts.svelte';
 import type { Task, CreateTaskArgs, TaskPatch, KanbanColumn } from '$lib/types';
 
 export class TasksStore {
@@ -43,11 +44,58 @@ export class TasksStore {
   }
 
   async move(taskId: string, column: KanbanColumn, order: number): Promise<Task> {
-    const updated = await api.task.move(taskId, column, order);
-    // Use the backend's returned Task so we pick up auto-set workspace_id
-    // when moving into InProgress.
-    this.getOrCreate(updated.repo_id).set(updated.id, updated);
-    return updated;
+    // Find the task across all repo maps (same pattern as update/remove)
+    let repoIdOfTask: string | null = null;
+    let prev: Task | undefined;
+    for (const [repoId, map] of this.tasks) {
+      const existing = map.get(taskId);
+      if (existing) {
+        repoIdOfTask = repoId;
+        prev = existing;
+        break;
+      }
+    }
+    if (!prev || !repoIdOfTask) {
+      // Fall back — let backend handle missing-id; hydrate the returned task.
+      const updated = await api.task.move(taskId, column, order);
+      this.getOrCreate(updated.repo_id).set(updated.id, updated);
+      return updated;
+    }
+    // Optimistic write
+    this.getOrCreate(repoIdOfTask).set(taskId, { ...prev, column, order });
+    try {
+      // Use the backend's returned Task so we pick up auto-set workspace_id
+      // when moving into InProgress.
+      const updated = await api.task.move(taskId, column, order);
+      // Reconcile — backend may route task to a different repo map (defensive).
+      this.getOrCreate(updated.repo_id).set(updated.id, updated);
+      return updated;
+    } catch (err) {
+      // Revert on error
+      this.getOrCreate(repoIdOfTask).set(taskId, prev);
+      addToast(`Move failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
+      throw err;
+    }
+  }
+
+  async refresh(repoId?: string): Promise<void> {
+    const tasks = await api.task.refresh(repoId);
+    if (repoId !== undefined) {
+      // Clear only the entries for this repo then re-populate
+      const map = this.getOrCreate(repoId);
+      map.clear();
+      for (const task of tasks) {
+        this.getOrCreate(task.repo_id).set(task.id, task);
+      }
+    } else {
+      // Global refresh — clear all nested maps then re-populate by repo_id
+      for (const [, map] of this.tasks) {
+        map.clear();
+      }
+      for (const task of tasks) {
+        this.getOrCreate(task.repo_id).set(task.id, task);
+      }
+    }
   }
 
   async remove(taskId: string, force?: boolean): Promise<void> {

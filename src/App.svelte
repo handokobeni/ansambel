@@ -10,6 +10,7 @@
   import SearchModal from '$lib/components/workspace/SearchModal.svelte';
   import { workspaceTabs } from '$lib/stores/workspace-tabs.svelte';
   import type { SearchMode } from '$lib/types';
+  import { api } from '$lib/ipc';
   import { repos } from '$lib/stores/repos.svelte';
   import { workspaces } from '$lib/stores/workspaces.svelte';
   import { tasks } from '$lib/stores/tasks.svelte';
@@ -89,6 +90,28 @@
         tasks.loadForRepo(repos.selectedRepoId),
       ]);
     }
+  });
+
+  // Window-focus refresh: when the OS window regains focus and the active
+  // task source is 'lark', debounce 2 s then pull fresh tasks from Bitable.
+  onMount(() => {
+    let focusDebounce: ReturnType<typeof setTimeout> | null = null;
+
+    async function handleFocus() {
+      const source = await api.task.getSource().catch(() => 'local' as const);
+      if (source !== 'lark') return;
+      if (focusDebounce) clearTimeout(focusDebounce);
+      focusDebounce = setTimeout(() => {
+        const repo = repos.getSelected();
+        if (repo) tasks.refresh(repo.id).catch(() => {});
+      }, 2000);
+    }
+
+    window.addEventListener('focus', handleFocus);
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      if (focusDebounce) clearTimeout(focusDebounce);
+    };
   });
 
   onDestroy(() => {

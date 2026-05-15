@@ -22,6 +22,17 @@ pub enum KanbanColumn {
     Done,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskSource {
+    Local,
+    Lark,
+}
+
+fn default_task_source() -> TaskSource {
+    TaskSource::Local
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct AppSettings {
     pub schema_version: u32,
@@ -35,6 +46,10 @@ pub struct AppSettings {
     /// User-configured path to the Claude CLI binary; overrides PATH lookup when set.
     #[serde(default)]
     pub claude_binary_override: Option<PathBuf>,
+    /// Source for kanban data. `Local` reads/writes tasks.json;
+    /// `Lark` reads/writes a Lark Bitable table via `LarkProvider`.
+    #[serde(default = "default_task_source")]
+    pub task_source: TaskSource,
 }
 
 impl Default for AppSettings {
@@ -49,6 +64,7 @@ impl Default for AppSettings {
             window_height: 900,
             onboarding_completed: false,
             claude_binary_override: None,
+            task_source: default_task_source(),
         }
     }
 }
@@ -125,6 +141,13 @@ pub struct AgentHandle {
     /// stdin which usually forces EOF.
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// Tauri-managed handle to the active task provider. Lives separately
+/// from AppState so async provider calls don't hold the AppState lock.
+/// Inner Arc is swap-able via write lock when the user changes the
+/// task source in Settings.
+pub type TaskProviderHandle =
+    std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<dyn crate::task_provider::TaskProvider>>>;
 
 #[derive(Default, Debug)]
 pub struct AppState {
@@ -947,5 +970,48 @@ mod tests {
         .unwrap();
         assert!(sub_a.try_recv().is_ok());
         assert!(sub_b.try_recv().is_ok());
+    }
+
+    #[test]
+    fn task_source_serializes_snake_case() {
+        let local = serde_json::to_string(&TaskSource::Local).unwrap();
+        let lark = serde_json::to_string(&TaskSource::Lark).unwrap();
+        assert_eq!(local, "\"local\"");
+        assert_eq!(lark, "\"lark\"");
+    }
+
+    #[test]
+    fn app_settings_task_source_defaults_to_local() {
+        let s = AppSettings::default();
+        assert_eq!(s.task_source, TaskSource::Local);
+    }
+
+    #[test]
+    fn app_settings_round_trips_with_task_source() {
+        let s = AppSettings {
+            task_source: TaskSource::Lark,
+            ..AppSettings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.task_source, TaskSource::Lark);
+    }
+
+    #[test]
+    fn app_settings_loads_legacy_file_without_task_source_field() {
+        // Older app_settings.json files don't have task_source. Verify we
+        // deserialize them with the default.
+        let legacy = serde_json::json!({
+            "schema_version": 1,
+            "theme": "warm-dark",
+            "selected_repo_id": null,
+            "selected_workspace_id": null,
+            "recent_repos": [],
+            "window_width": 1400,
+            "window_height": 900,
+            "onboarding_completed": false
+        });
+        let s: AppSettings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(s.task_source, TaskSource::Local);
     }
 }

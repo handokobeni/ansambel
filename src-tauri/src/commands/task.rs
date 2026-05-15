@@ -1,6 +1,4 @@
 use crate::error::{AppError, Result};
-use crate::ids::task_id;
-use crate::persistence::tasks::save_tasks;
 use crate::state::{AppState, KanbanColumn, Task};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -18,23 +16,26 @@ pub struct TaskPatch {
 // ── Public Tauri commands ────────────────────────────────────────────
 
 #[tauri::command]
-pub fn add_task(
+pub async fn add_task(
     repo_id: String,
     title: String,
     description: String,
     column: Option<KanbanColumn>,
     app: tauri::AppHandle,
     state: State<'_, Arc<Mutex<AppState>>>,
+    provider_handle: State<'_, crate::state::TaskProviderHandle>,
 ) -> std::result::Result<Task, String> {
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let _ = app; // data_dir no longer needed — provider owns persistence
+    let provider = provider_handle.read().await.clone();
     add_task_inner(
         repo_id,
         title,
         description,
         column,
-        data_dir,
+        provider,
         state.inner().clone(),
     )
+    .await
     .map_err(|e| {
         tracing::error!(error = %e, "add_task failed");
         e.to_string()
@@ -50,17 +51,21 @@ pub fn list_tasks(
 }
 
 #[tauri::command]
-pub fn update_task(
+pub async fn update_task(
     task_id: String,
     patch: TaskPatch,
     app: tauri::AppHandle,
     state: State<'_, Arc<Mutex<AppState>>>,
+    provider_handle: State<'_, crate::state::TaskProviderHandle>,
 ) -> std::result::Result<Task, String> {
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    update_task_inner(task_id, patch, data_dir, state.inner().clone()).map_err(|e| {
-        tracing::error!(error = %e, "update_task failed");
-        e.to_string()
-    })
+    let _ = app; // data_dir no longer needed — provider owns persistence
+    let provider = provider_handle.read().await.clone();
+    update_task_inner(task_id, patch, provider, state.inner().clone())
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "update_task failed");
+            e.to_string()
+        })
 }
 
 #[tauri::command]
@@ -70,76 +75,81 @@ pub async fn move_task(
     order: i32,
     app: tauri::AppHandle,
     state: State<'_, Arc<Mutex<AppState>>>,
+    provider_handle: State<'_, crate::state::TaskProviderHandle>,
 ) -> std::result::Result<Task, String> {
+    // data_dir is still needed because moving Todo → InProgress can
+    // auto-create a workspace, and workspace creation owns its own
+    // persistence path (worktree dir + workspaces.json). The task
+    // mutation itself goes through the provider.
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    move_task_inner(task_id, column, order, data_dir, state.inner().clone())
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "move_task failed");
-            e.to_string()
-        })
-}
-
-#[tauri::command]
-pub fn remove_task(
-    task_id: String,
-    force: bool,
-    app: tauri::AppHandle,
-    state: State<'_, Arc<Mutex<AppState>>>,
-) -> std::result::Result<(), String> {
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    remove_task_inner(task_id, force, data_dir, state.inner().clone()).map_err(|e| {
-        tracing::error!(error = %e, "remove_task failed");
+    let provider = provider_handle.read().await.clone();
+    move_task_inner(
+        task_id,
+        column,
+        order,
+        data_dir,
+        provider,
+        state.inner().clone(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "move_task failed");
         e.to_string()
     })
 }
 
+#[tauri::command]
+pub async fn remove_task(
+    task_id: String,
+    force: bool,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Mutex<AppState>>>,
+    provider_handle: State<'_, crate::state::TaskProviderHandle>,
+) -> std::result::Result<(), String> {
+    let _ = app; // data_dir no longer needed — provider owns persistence
+    let provider = provider_handle.read().await.clone();
+    remove_task_inner(task_id, Some(force), provider, state.inner().clone())
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "remove_task failed");
+            e.to_string()
+        })
+}
+
 // ── Inner implementations ────────────────────────────────────────────
 
-pub(crate) fn add_task_inner(
+pub(crate) async fn add_task_inner(
     repo_id: String,
     title: String,
     description: String,
     column: Option<KanbanColumn>,
-    data_dir: PathBuf,
+    provider: Arc<dyn crate::task_provider::TaskProvider>,
     state: Arc<Mutex<AppState>>,
 ) -> Result<Task> {
-    use crate::commands::helpers::now_unix;
-
-    let col = column.unwrap_or_default();
-
-    let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
-
-    // Verify repo exists
-    if !st.repos.contains_key(&repo_id) {
-        return Err(AppError::NotFound(format!("repo '{}' not found", repo_id)));
+    // Verify repo exists before hitting the provider. Drop the lock
+    // before any await per the project's mutex discipline rule.
+    {
+        let st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        if !st.repos.contains_key(&repo_id) {
+            return Err(AppError::NotFound(format!("repo '{}' not found", repo_id)));
+        }
     }
 
-    // Compute order: max existing order in column + 1024
-    let max_order = st
-        .tasks
-        .values()
-        .filter(|t| t.repo_id == repo_id && t.column == col)
-        .map(|t| t.order)
-        .max()
-        .unwrap_or(0);
-
-    let now = now_unix();
-    let id = task_id();
-    let task = Task {
-        id: id.clone(),
+    let args = crate::task_provider::CreateTaskArgs {
         repo_id,
-        workspace_id: None,
         title,
         description,
-        column: col,
-        order: max_order + 1024,
-        created_at: now,
-        updated_at: now,
+        column,
     };
-
-    st.tasks.insert(id, task.clone());
-    save_tasks(&data_dir, &st.tasks)?;
+    let task = provider.create_task(args).await?;
+    {
+        let mut st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        st.tasks.insert(task.id.clone(), task.clone());
+    }
     tracing::info!(task_id = %task.id, column = ?task.column, "Created task");
     Ok(task)
 }
@@ -171,33 +181,64 @@ pub(crate) fn list_tasks_inner(repo_id: String, state: Arc<Mutex<AppState>>) -> 
     Ok(tasks)
 }
 
-pub(crate) fn update_task_inner(
+#[tauri::command]
+pub async fn refresh_tasks(
+    repo_id: Option<String>,
+    state: State<'_, Arc<Mutex<AppState>>>,
+    provider_handle: State<'_, crate::state::TaskProviderHandle>,
+) -> std::result::Result<Vec<Task>, String> {
+    refresh_tasks_inner(
+        repo_id,
+        state.inner().clone(),
+        provider_handle.read().await.clone(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "refresh_tasks failed");
+        e.to_string()
+    })
+}
+
+pub(crate) async fn refresh_tasks_inner(
+    repo_id: Option<String>,
+    state: Arc<Mutex<AppState>>,
+    provider: Arc<dyn crate::task_provider::TaskProvider>,
+) -> Result<Vec<Task>> {
+    let tasks = provider.list_tasks(repo_id.as_deref()).await?;
+    {
+        let mut st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        if let Some(rid) = repo_id.as_deref() {
+            st.tasks.retain(|_, t| t.repo_id != rid);
+        } else {
+            st.tasks.clear();
+        }
+        for t in &tasks {
+            st.tasks.insert(t.id.clone(), t.clone());
+        }
+    }
+    Ok(tasks)
+}
+
+pub(crate) async fn update_task_inner(
     task_id: String,
     patch: TaskPatch,
-    data_dir: PathBuf,
+    provider: Arc<dyn crate::task_provider::TaskProvider>,
     state: Arc<Mutex<AppState>>,
 ) -> Result<Task> {
-    use crate::commands::helpers::now_unix;
-
-    let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
-    let task = st
-        .tasks
-        .get_mut(&task_id)
-        .ok_or_else(|| AppError::NotFound(format!("task '{}' not found", task_id)))?;
-
-    if let Some(title) = patch.title {
-        task.title = title;
+    let provider_patch = crate::task_provider::TaskPatch {
+        title: patch.title,
+        description: patch.description,
+        order: patch.order,
+    };
+    let updated = provider.update_task(&task_id, provider_patch).await?;
+    {
+        let mut st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        st.tasks.insert(updated.id.clone(), updated.clone());
     }
-    if let Some(description) = patch.description {
-        task.description = description;
-    }
-    if let Some(order) = patch.order {
-        task.order = order;
-    }
-    task.updated_at = now_unix();
-
-    let updated = task.clone();
-    save_tasks(&data_dir, &st.tasks)?;
     tracing::info!(task_id = %updated.id, "Updated task");
     Ok(updated)
 }
@@ -206,14 +247,19 @@ pub(crate) async fn move_task_inner(
     task_id: String,
     column: KanbanColumn,
     order: i32,
-    data_dir: PathBuf,
+    data_dir: std::path::PathBuf,
+    provider: Arc<dyn crate::task_provider::TaskProvider>,
     state: Arc<Mutex<AppState>>,
 ) -> Result<Task> {
-    use crate::commands::helpers::now_unix;
-
-    // Extract task and check for auto-workspace conditions before any async work.
+    // Extract auto-workspace conditions before any async work. The
+    // auto-workspace path predates the TaskProvider abstraction; it
+    // still lives in the command layer because it crosses subsystems
+    // (workspace creation + task mutation) — providers only own task
+    // persistence.
     let (repo_id, task_title, task_desc, needs_workspace) = {
-        let st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        let st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
         let task = st
             .tasks
             .get(&task_id)
@@ -245,50 +291,187 @@ pub(crate) async fn move_task_inner(
         None
     };
 
-    // Now update the task.
-    let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
-    let task = st
-        .tasks
-        .get_mut(&task_id)
-        .ok_or_else(|| AppError::NotFound(format!("task '{}' not found", task_id)))?;
+    // Route the column/order update through the provider so persistence
+    // is owned by it (tasks.json for LocalProvider, Bitable for Lark).
+    let mut updated = provider.move_task(&task_id, column, order).await?;
 
-    task.column = column;
-    task.order = order;
+    // If we auto-created a workspace, stamp the workspace_id onto the
+    // task. The TaskProvider trait doesn't model workspace_id (it's a
+    // local-only concept for the orchestrator), so we patch the
+    // in-memory mirror here and re-save tasks.json directly so
+    // workspace_id is durable on disk. LarkProvider ignores
+    // workspace_id on its remote anyway, so this stays a local-only
+    // concern.
     if let Some(ws_id) = maybe_ws_id {
-        task.workspace_id = Some(ws_id);
+        updated.workspace_id = Some(ws_id);
+        let map = {
+            let mut st = state
+                .lock()
+                .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+            st.tasks.insert(updated.id.clone(), updated.clone());
+            st.tasks.clone()
+        };
+        crate::persistence::tasks::save_tasks(&data_dir, &map)?;
+    } else {
+        let mut st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        st.tasks.insert(updated.id.clone(), updated.clone());
     }
-    task.updated_at = now_unix();
-
-    let updated = task.clone();
-    save_tasks(&data_dir, &st.tasks)?;
     Ok(updated)
 }
 
-pub(crate) fn remove_task_inner(
+pub(crate) async fn remove_task_inner(
     task_id: String,
-    force: bool,
-    data_dir: PathBuf,
+    force: Option<bool>,
+    provider: Arc<dyn crate::task_provider::TaskProvider>,
     state: Arc<Mutex<AppState>>,
 ) -> Result<()> {
-    let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
-    let task = st
-        .tasks
-        .get(&task_id)
-        .ok_or_else(|| AppError::NotFound(format!("task '{}' not found", task_id)))?;
-
-    if task.workspace_id.is_some() && !force {
-        return Err(AppError::InvalidState(format!(
-            "task '{}' has a linked workspace '{}'. Use force=true to remove anyway, \
-             or remove the workspace via the sidebar first.",
-            task_id,
-            task.workspace_id.as_deref().unwrap_or("")
-        )));
+    let force = force.unwrap_or(false);
+    // Refuse delete when the task has an active workspace unless
+    // force=true. The check reads the AppState mirror so it works for
+    // both providers — LarkProvider returns workspace_id=None on
+    // hydrate, so this guard only fires for the local store.
+    {
+        let st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        if let Some(t) = st.tasks.get(&task_id) {
+            if t.workspace_id.is_some() && !force {
+                return Err(AppError::InvalidState(format!(
+                    "task '{}' has a linked workspace '{}'. Use force=true to remove anyway, \
+                     or remove the workspace via the sidebar first.",
+                    task_id,
+                    t.workspace_id.as_deref().unwrap_or("")
+                )));
+            }
+        } else {
+            return Err(AppError::NotFound(format!("task '{}' not found", task_id)));
+        }
     }
-
-    st.tasks.remove(&task_id);
-    save_tasks(&data_dir, &st.tasks)?;
+    provider.delete_task(&task_id).await?;
+    {
+        let mut st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        st.tasks.remove(&task_id);
+    }
     tracing::info!(task_id = %task_id, "Removed task");
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_task_source(
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> std::result::Result<crate::state::TaskSource, String> {
+    let st = state
+        .lock()
+        .map_err(|e| format!("AppState lock poisoned: {e}"))?;
+    Ok(st.settings.task_source)
+}
+
+#[tauri::command]
+pub async fn set_task_source(
+    source: crate::state::TaskSource,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Mutex<AppState>>>,
+    provider_handle: State<'_, crate::state::TaskProviderHandle>,
+) -> std::result::Result<(), String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    set_task_source_inner(
+        source,
+        data_dir,
+        state.inner().clone(),
+        provider_handle.inner().clone(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "set_task_source failed");
+        e.to_string()
+    })?;
+    // Emit a Tauri event so the frontend store reloads tasks.
+    use tauri::Emitter;
+    let _ = app.emit("tasks-rehydrated", ());
+    Ok(())
+}
+
+pub(crate) async fn set_task_source_inner(
+    source: crate::state::TaskSource,
+    data_dir: PathBuf,
+    state: Arc<Mutex<AppState>>,
+    provider_handle: crate::state::TaskProviderHandle,
+) -> Result<()> {
+    // Build the new provider before we acquire the write lock, so a
+    // failure (e.g. missing Lark credentials) doesn't leave us
+    // partially swapped.
+    let new_provider: Arc<dyn crate::task_provider::TaskProvider> = match source {
+        crate::state::TaskSource::Local => Arc::new(
+            crate::task_provider::local::LocalProvider::new(data_dir.clone()),
+        ),
+        crate::state::TaskSource::Lark => {
+            let store = crate::commands::lark_auth::KeyringStore;
+            let cfg = crate::commands::lark_auth::load_lark_config_inner(&data_dir, &store)
+                .map_err(|e| {
+                    AppError::InvalidState(format!(
+                        "Cannot switch to Lark: {e}. Configure Lark credentials first."
+                    ))
+                })?;
+            let app_token = cfg.app_token.clone();
+            let table_id = cfg.table_id.clone();
+            let client = Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
+            Arc::new(crate::task_provider::lark::LarkProvider::new(
+                client, app_token, table_id,
+            ))
+        }
+    };
+
+    // Persist setting.
+    {
+        let mut st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        st.settings.task_source = source;
+        crate::persistence::settings::save_settings(&data_dir, &st.settings)?;
+    }
+
+    // Swap provider.
+    {
+        let mut guard = provider_handle.write().await;
+        *guard = new_provider.clone();
+    }
+
+    // Re-hydrate AppState.tasks.
+    let tasks = new_provider.list_tasks(None).await?;
+    {
+        let mut st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        let default_repo = resolve_default_repo(&st);
+        st.tasks.clear();
+        for mut t in tasks {
+            if t.repo_id.is_empty() {
+                if let Some(ref r) = default_repo {
+                    t.repo_id = r.clone();
+                }
+            }
+            st.tasks.insert(t.id.clone(), t);
+        }
+    }
+    Ok(())
+}
+
+/// Picks a fallback `repo_id` to assign to tasks hydrated from a provider
+/// that returned rows with no `repo_id` set. Preference order: the user's
+/// currently selected repo, then the first repo registered in AppState.
+/// Returns `None` only when Ansambel has no repos at all — in that case
+/// the task stays with an empty `repo_id` and is unreachable until the
+/// user adds a repo.
+pub(crate) fn resolve_default_repo(state: &AppState) -> Option<String> {
+    state
+        .settings
+        .selected_repo_id
+        .clone()
+        .or_else(|| state.repos.keys().next().cloned())
 }
 
 #[cfg(test)]
@@ -298,6 +481,65 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+
+    #[test]
+    fn resolve_default_repo_prefers_selected_repo_id() {
+        let mut state = AppState::default();
+        state.repos.insert(
+            "repo_first".into(),
+            RepoInfo {
+                id: "repo_first".into(),
+                name: "first".into(),
+                path: PathBuf::from("/tmp/first"),
+                gh_profile: None,
+                default_branch: "main".into(),
+                created_at: 0,
+                updated_at: 0,
+                scripts: Vec::new(),
+            },
+        );
+        state.repos.insert(
+            "repo_selected".into(),
+            RepoInfo {
+                id: "repo_selected".into(),
+                name: "selected".into(),
+                path: PathBuf::from("/tmp/sel"),
+                gh_profile: None,
+                default_branch: "main".into(),
+                created_at: 0,
+                updated_at: 0,
+                scripts: Vec::new(),
+            },
+        );
+        state.settings.selected_repo_id = Some("repo_selected".into());
+        assert_eq!(resolve_default_repo(&state), Some("repo_selected".into()));
+    }
+
+    #[test]
+    fn resolve_default_repo_falls_back_to_first_repo_when_no_selection() {
+        let mut state = AppState::default();
+        state.repos.insert(
+            "repo_only".into(),
+            RepoInfo {
+                id: "repo_only".into(),
+                name: "only".into(),
+                path: PathBuf::from("/tmp/only"),
+                gh_profile: None,
+                default_branch: "main".into(),
+                created_at: 0,
+                updated_at: 0,
+                scripts: Vec::new(),
+            },
+        );
+        state.settings.selected_repo_id = None;
+        assert_eq!(resolve_default_repo(&state), Some("repo_only".into()));
+    }
+
+    #[test]
+    fn resolve_default_repo_returns_none_when_no_repos() {
+        let state = AppState::default();
+        assert_eq!(resolve_default_repo(&state), None);
+    }
 
     fn make_state_with_repo(data_dir: &std::path::Path) -> Arc<Mutex<AppState>> {
         let _ = data_dir; // used by caller for data_dir path
@@ -318,10 +560,16 @@ mod tests {
         Arc::new(Mutex::new(state))
     }
 
+    fn make_provider(data_dir: &std::path::Path) -> Arc<dyn crate::task_provider::TaskProvider> {
+        Arc::new(crate::task_provider::local::LocalProvider::new(
+            data_dir.to_path_buf(),
+        ))
+    }
+
     // ── Task 5: add_task tests ───────────────────────────────────────
 
-    #[test]
-    fn add_task_creates_task_with_correct_fields() {
+    #[tokio::test]
+    async fn add_task_creates_task_with_correct_fields() {
         let tmp = tempdir().unwrap();
         let state = make_state_with_repo(tmp.path());
 
@@ -330,9 +578,10 @@ mod tests {
             "Fix login".into(),
             "Auth fails".into(),
             None,
-            tmp.path().to_path_buf(),
+            make_provider(tmp.path()),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
 
         assert!(task.id.starts_with("tk_"));
@@ -344,8 +593,8 @@ mod tests {
         assert_eq!(task.order, 1024); // first task in column → 0 + 1024
     }
 
-    #[test]
-    fn add_task_uses_specified_column() {
+    #[tokio::test]
+    async fn add_task_uses_specified_column() {
         let tmp = tempdir().unwrap();
         let state = make_state_with_repo(tmp.path());
 
@@ -354,27 +603,30 @@ mod tests {
             "Review task".into(),
             String::new(),
             Some(KanbanColumn::Review),
-            tmp.path().to_path_buf(),
+            make_provider(tmp.path()),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
 
         assert_eq!(task.column, KanbanColumn::Review);
     }
 
-    #[test]
-    fn add_task_order_increments_by_1024() {
+    #[tokio::test]
+    async fn add_task_order_increments_by_1024() {
         let tmp = tempdir().unwrap();
         let state = make_state_with_repo(tmp.path());
+        let provider = make_provider(tmp.path());
 
         let t1 = add_task_inner(
             "repo_r1".into(),
             "Task 1".into(),
             String::new(),
             None,
-            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
         assert_eq!(t1.order, 1024);
 
@@ -383,9 +635,10 @@ mod tests {
             "Task 2".into(),
             String::new(),
             None,
-            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
         assert_eq!(t2.order, 2048);
 
@@ -394,15 +647,16 @@ mod tests {
             "Task 3".into(),
             String::new(),
             None,
-            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
         assert_eq!(t3.order, 3072);
     }
 
-    #[test]
-    fn add_task_persists_to_tasks_json() {
+    #[tokio::test]
+    async fn add_task_persists_to_tasks_json() {
         let tmp = tempdir().unwrap();
         let state = make_state_with_repo(tmp.path());
 
@@ -411,9 +665,10 @@ mod tests {
             "Persisted task".into(),
             String::new(),
             None,
-            tmp.path().to_path_buf(),
+            make_provider(tmp.path()),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
 
         let tasks_path = crate::platform::paths::tasks_file(tmp.path());
@@ -422,8 +677,8 @@ mod tests {
         assert_eq!(loaded.len(), 1);
     }
 
-    #[test]
-    fn add_task_unknown_repo_returns_err() {
+    #[tokio::test]
+    async fn add_task_unknown_repo_returns_err() {
         let tmp = tempdir().unwrap();
         let state = Arc::new(Mutex::new(AppState::default()));
         let result = add_task_inner(
@@ -431,9 +686,10 @@ mod tests {
             "X".into(),
             String::new(),
             None,
-            tmp.path().to_path_buf(),
+            make_provider(tmp.path()),
             state,
-        );
+        )
+        .await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -444,28 +700,31 @@ mod tests {
 
     // ── Task 6: list_tasks tests ─────────────────────────────────────
 
-    #[test]
-    fn list_tasks_filters_by_repo_id() {
+    #[tokio::test]
+    async fn list_tasks_filters_by_repo_id() {
         let tmp = tempdir().unwrap();
         let state = make_state_with_repo(tmp.path());
+        let provider = make_provider(tmp.path());
 
         add_task_inner(
             "repo_r1".into(),
             "Task A".into(),
             String::new(),
             None,
-            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
         add_task_inner(
             "repo_r1".into(),
             "Task B".into(),
             String::new(),
             None,
-            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
 
         // Insert a task for a different repo directly
@@ -561,19 +820,21 @@ mod tests {
 
     // ── Task 7: update_task tests ────────────────────────────────────
 
-    #[test]
-    fn update_task_title_and_description() {
+    #[tokio::test]
+    async fn update_task_title_and_description() {
         let tmp = tempdir().unwrap();
         let state = make_state_with_repo(tmp.path());
+        let provider = make_provider(tmp.path());
 
         let task = add_task_inner(
             "repo_r1".into(),
             "Original title".into(),
             "Original desc".into(),
             None,
-            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
 
         let patch = TaskPatch {
@@ -584,9 +845,10 @@ mod tests {
         let updated = update_task_inner(
             task.id.clone(),
             patch,
-            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
 
         assert_eq!(updated.title, "Updated title");
@@ -595,19 +857,21 @@ mod tests {
         assert_eq!(updated.id, task.id);
     }
 
-    #[test]
-    fn update_task_partial_patch_leaves_other_fields_unchanged() {
+    #[tokio::test]
+    async fn update_task_partial_patch_leaves_other_fields_unchanged() {
         let tmp = tempdir().unwrap();
         let state = make_state_with_repo(tmp.path());
+        let provider = make_provider(tmp.path());
 
         let task = add_task_inner(
             "repo_r1".into(),
             "Keep me".into(),
             "Keep desc".into(),
             None,
-            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
 
         let patch = TaskPatch {
@@ -618,28 +882,31 @@ mod tests {
         let updated = update_task_inner(
             task.id.clone(),
             patch,
-            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
 
         assert_eq!(updated.title, "New title only");
         assert_eq!(updated.description, "Keep desc"); // unchanged
     }
 
-    #[test]
-    fn update_task_order_change() {
+    #[tokio::test]
+    async fn update_task_order_change() {
         let tmp = tempdir().unwrap();
         let state = make_state_with_repo(tmp.path());
+        let provider = make_provider(tmp.path());
 
         let task = add_task_inner(
             "repo_r1".into(),
             "T".into(),
             String::new(),
             None,
-            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
         assert_eq!(task.order, 1024);
 
@@ -651,16 +918,17 @@ mod tests {
         let updated = update_task_inner(
             task.id.clone(),
             patch,
-            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
 
         assert_eq!(updated.order, 512);
     }
 
-    #[test]
-    fn update_task_not_found_returns_err() {
+    #[tokio::test]
+    async fn update_task_not_found_returns_err() {
         let tmp = tempdir().unwrap();
         let state = Arc::new(Mutex::new(AppState::default()));
         let patch = TaskPatch {
@@ -671,9 +939,10 @@ mod tests {
         let result = update_task_inner(
             "tk_nonexistent".into(),
             patch,
-            tmp.path().to_path_buf(),
+            make_provider(tmp.path()),
             state,
-        );
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -733,6 +1002,7 @@ mod tests {
         let (local, _) = init_repo_with_remote_for_move(&tmp);
         let data = tmp.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
+        let provider = make_provider(&data);
 
         let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
         let repo = crate::commands::repo::add_repo_inner(
@@ -748,9 +1018,10 @@ mod tests {
             "Auto WS task".into(),
             "Description".into(),
             None,
-            data.clone(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
         assert!(task.workspace_id.is_none());
 
@@ -759,6 +1030,7 @@ mod tests {
             KanbanColumn::InProgress,
             task.order,
             data.clone(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
         .await
@@ -785,6 +1057,7 @@ mod tests {
         let (local, _) = init_repo_with_remote_for_move(&tmp);
         let data = tmp.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
+        let provider = make_provider(&data);
 
         let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
         let repo = crate::commands::repo::add_repo_inner(
@@ -800,9 +1073,10 @@ mod tests {
             "Review task".into(),
             String::new(),
             None,
-            data.clone(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
 
         // Move to InProgress first (creates workspace)
@@ -811,6 +1085,7 @@ mod tests {
             KanbanColumn::InProgress,
             task.order,
             data.clone(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
         .await
@@ -823,6 +1098,7 @@ mod tests {
             KanbanColumn::Review,
             in_progress.order,
             data.clone(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
         .await
@@ -842,6 +1118,7 @@ mod tests {
         let (local, _) = init_repo_with_remote_for_move(&tmp);
         let data = tmp.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
+        let provider = make_provider(&data);
 
         let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
         let repo = crate::commands::repo::add_repo_inner(
@@ -857,9 +1134,10 @@ mod tests {
             "Done task".into(),
             String::new(),
             None,
-            data.clone(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
 
         let in_progress = move_task_inner(
@@ -867,6 +1145,7 @@ mod tests {
             KanbanColumn::InProgress,
             task.order,
             data.clone(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
         .await
@@ -878,6 +1157,7 @@ mod tests {
             KanbanColumn::Review,
             in_progress.order,
             data.clone(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
         .await
@@ -888,6 +1168,7 @@ mod tests {
             KanbanColumn::Done,
             review.order,
             data.clone(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
         .await
@@ -897,32 +1178,33 @@ mod tests {
         assert_eq!(done.workspace_id.as_deref(), Some(ws_id.as_str()));
     }
 
-    #[test]
-    fn move_task_todo_to_review_does_not_create_workspace() {
+    #[tokio::test]
+    async fn move_task_todo_to_review_does_not_create_workspace() {
         let tmp = tempdir().unwrap();
         let state = make_state_with_repo(tmp.path());
+        let provider = make_provider(tmp.path());
 
         let task = add_task_inner(
             "repo_r1".into(),
             "Skip InProgress".into(),
             String::new(),
             None,
-            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
 
-        // move_task_inner is async; use tokio::runtime for this sync-ish test
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let moved = rt
-            .block_on(move_task_inner(
-                task.id.clone(),
-                KanbanColumn::Review,
-                task.order,
-                tmp.path().to_path_buf(),
-                Arc::clone(&state),
-            ))
-            .unwrap();
+        let moved = move_task_inner(
+            task.id.clone(),
+            KanbanColumn::Review,
+            task.order,
+            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(moved.column, KanbanColumn::Review);
         assert!(
@@ -935,64 +1217,75 @@ mod tests {
 
     // ── Task 9: remove_task tests ────────────────────────────────────
 
-    #[test]
-    fn remove_task_without_workspace_succeeds() {
+    #[tokio::test]
+    async fn remove_task_without_workspace_succeeds() {
         let tmp = tempdir().unwrap();
         let state = make_state_with_repo(tmp.path());
+        let provider = make_provider(tmp.path());
 
         let task = add_task_inner(
             "repo_r1".into(),
             "To remove".into(),
             String::new(),
             None,
-            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
 
         remove_task_inner(
             task.id.clone(),
-            false,
-            tmp.path().to_path_buf(),
+            Some(false),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
 
         let st = state.lock().unwrap();
         assert!(!st.tasks.contains_key(&task.id));
     }
 
-    #[test]
-    fn remove_task_with_workspace_and_no_force_returns_err() {
+    #[tokio::test]
+    async fn remove_task_with_workspace_and_no_force_returns_err() {
         let tmp = tempdir().unwrap();
         let state = make_state_with_repo(tmp.path());
+        let provider = make_provider(tmp.path());
 
-        // Insert a task with workspace_id already set
+        // Insert a task with workspace_id already set. We seed both the
+        // in-memory mirror and the provider's tasks.json so the guard
+        // (which reads AppState) and the eventual provider.delete_task
+        // (which reads tasks.json) both see it.
         let task_id = "tk_linked".to_string();
+        let seeded_task = Task {
+            id: task_id.clone(),
+            repo_id: "repo_r1".into(),
+            workspace_id: Some("ws_exists".into()),
+            title: "Has workspace".into(),
+            description: String::new(),
+            column: KanbanColumn::InProgress,
+            order: 1024,
+            created_at: 0,
+            updated_at: 0,
+        };
         {
             let mut st = state.lock().unwrap();
-            st.tasks.insert(
-                task_id.clone(),
-                Task {
-                    id: task_id.clone(),
-                    repo_id: "repo_r1".into(),
-                    workspace_id: Some("ws_exists".into()),
-                    title: "Has workspace".into(),
-                    description: String::new(),
-                    column: KanbanColumn::InProgress,
-                    order: 1024,
-                    created_at: 0,
-                    updated_at: 0,
-                },
-            );
+            st.tasks.insert(task_id.clone(), seeded_task.clone());
+        }
+        {
+            let mut map = std::collections::HashMap::new();
+            map.insert(task_id.clone(), seeded_task);
+            crate::persistence::tasks::save_tasks(tmp.path(), &map).unwrap();
         }
 
         let result = remove_task_inner(
             task_id.clone(),
-            false,
-            tmp.path().to_path_buf(),
+            Some(false),
+            Arc::clone(&provider),
             Arc::clone(&state),
-        );
+        )
+        .await;
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -1005,47 +1298,113 @@ mod tests {
         assert!(st.tasks.contains_key(&task_id));
     }
 
-    #[test]
-    fn remove_task_with_workspace_and_force_true_succeeds() {
+    #[tokio::test]
+    async fn remove_task_with_workspace_and_force_true_succeeds() {
         let tmp = tempdir().unwrap();
         let state = make_state_with_repo(tmp.path());
+        let provider = make_provider(tmp.path());
 
         let task_id = "tk_forced".to_string();
+        let seeded_task = Task {
+            id: task_id.clone(),
+            repo_id: "repo_r1".into(),
+            workspace_id: Some("ws_exists".into()),
+            title: "Force remove".into(),
+            description: String::new(),
+            column: KanbanColumn::InProgress,
+            order: 1024,
+            created_at: 0,
+            updated_at: 0,
+        };
         {
             let mut st = state.lock().unwrap();
-            st.tasks.insert(
-                task_id.clone(),
-                Task {
-                    id: task_id.clone(),
-                    repo_id: "repo_r1".into(),
-                    workspace_id: Some("ws_exists".into()),
-                    title: "Force remove".into(),
-                    description: String::new(),
-                    column: KanbanColumn::InProgress,
-                    order: 1024,
-                    created_at: 0,
-                    updated_at: 0,
-                },
-            );
+            st.tasks.insert(task_id.clone(), seeded_task.clone());
+        }
+        {
+            let mut map = std::collections::HashMap::new();
+            map.insert(task_id.clone(), seeded_task);
+            crate::persistence::tasks::save_tasks(tmp.path(), &map).unwrap();
         }
 
         remove_task_inner(
             task_id.clone(),
-            true,
-            tmp.path().to_path_buf(),
+            Some(true),
+            Arc::clone(&provider),
             Arc::clone(&state),
         )
+        .await
         .unwrap();
 
         let st = state.lock().unwrap();
         assert!(!st.tasks.contains_key(&task_id));
     }
 
-    #[test]
-    fn remove_task_not_found_returns_err() {
+    #[tokio::test]
+    async fn remove_task_not_found_returns_err() {
         let tmp = tempdir().unwrap();
         let state = Arc::new(Mutex::new(AppState::default()));
-        let result = remove_task_inner("tk_ghost".into(), false, tmp.path().to_path_buf(), state);
+        let result = remove_task_inner(
+            "tk_ghost".into(),
+            Some(false),
+            make_provider(tmp.path()),
+            state,
+        )
+        .await;
         assert!(result.is_err());
+    }
+
+    fn make_state() -> Arc<Mutex<AppState>> {
+        Arc::new(Mutex::new(AppState::default()))
+    }
+
+    #[tokio::test]
+    async fn refresh_tasks_replaces_mirror_subset_for_repo() {
+        let tmp = tempdir().unwrap();
+        let provider = make_provider(tmp.path());
+        // Pre-populate via the provider directly.
+        for repo in ["repo_a", "repo_a", "repo_b"] {
+            provider
+                .create_task(crate::task_provider::CreateTaskArgs {
+                    repo_id: repo.into(),
+                    title: "t".into(),
+                    description: String::new(),
+                    column: None,
+                })
+                .await
+                .unwrap();
+        }
+        let state = make_state();
+        // Refresh only repo_a — pulls 2 tasks into mirror.
+        let tasks = refresh_tasks_inner(Some("repo_a".into()), state.clone(), provider.clone())
+            .await
+            .unwrap();
+        assert_eq!(tasks.len(), 2);
+        let st = state.lock().unwrap();
+        assert_eq!(
+            st.tasks.values().filter(|t| t.repo_id == "repo_a").count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn set_task_source_lark_rejects_when_credentials_missing() {
+        let tmp = tempdir().unwrap();
+        let state = make_state();
+        let provider_handle = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(
+            crate::task_provider::local::LocalProvider::new(tmp.path().to_path_buf()),
+        )
+            as std::sync::Arc<dyn crate::task_provider::TaskProvider>));
+        let err = set_task_source_inner(
+            crate::state::TaskSource::Lark,
+            tmp.path().to_path_buf(),
+            state,
+            provider_handle,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("Configure Lark credentials"),
+            "{err}"
+        );
     }
 }

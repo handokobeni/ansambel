@@ -244,6 +244,15 @@ export type FileWriteResponse = {
   size: number;
 };
 
+export type TaskSource = 'local' | 'lark';
+
+export type SchemaCheckResult = {
+  ok: boolean;
+  created: string[];
+  already_present: string[];
+  type_mismatches: string[];
+};
+
 // --- Lark types (Phase 3a) ---
 
 /** Configuration status returned by the backend. The actual app_secret

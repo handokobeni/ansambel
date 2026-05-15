@@ -291,6 +291,53 @@ describe('api.task', () => {
   });
 });
 
+describe('api.task new wrappers', () => {
+  it('refresh: invokes refresh_tasks with repoId', async () => {
+    vi.mocked(invoke).mockResolvedValue([]);
+    await api.task.refresh('repo_a');
+    expect(invoke).toHaveBeenCalledWith('refresh_tasks', { repoId: 'repo_a' });
+  });
+
+  it('refresh: invokes with undefined repoId when not provided', async () => {
+    vi.mocked(invoke).mockResolvedValue([]);
+    await api.task.refresh();
+    expect(invoke).toHaveBeenCalledWith('refresh_tasks', { repoId: undefined });
+  });
+
+  it('setSource: invokes set_task_source with source', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.task.setSource('lark');
+    expect(invoke).toHaveBeenCalledWith('set_task_source', { source: 'lark' });
+  });
+
+  it('getSource: invokes get_task_source and returns the source', async () => {
+    vi.mocked(invoke).mockResolvedValue('lark');
+    const s = await api.task.getSource();
+    expect(invoke).toHaveBeenCalledWith('get_task_source');
+    expect(s).toBe('lark');
+  });
+});
+
+describe('api.lark.verifySchema', () => {
+  it('invokes verify_lark_schema and returns SchemaCheckResult', async () => {
+    const result = {
+      ok: true,
+      created: ['title'],
+      already_present: ['repo_id'],
+      type_mismatches: [],
+    };
+    vi.mocked(invoke).mockResolvedValue(result);
+    const out = await api.lark.verifySchema();
+    expect(invoke).toHaveBeenCalledWith('verify_lark_schema');
+    expect(out).toEqual(result);
+  });
+
+  it('rejects with Lark API error', async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error('Lark API: app_secret missing'));
+    await expect(api.lark.verifySchema()).rejects.toThrow('app_secret');
+  });
+});
+
 describe('api.agent', () => {
   it('spawn passes workspaceId and channel to invoke', async () => {
     vi.mocked(invoke).mockResolvedValue(undefined);

@@ -46,6 +46,7 @@ name = "ansambel"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "directories",
  "dotenvy",
  "dunce",

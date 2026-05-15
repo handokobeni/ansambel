@@ -9,11 +9,17 @@ vi.mock('$lib/ipc', () => ({
       update: vi.fn(),
       move: vi.fn(),
       remove: vi.fn(),
+      refresh: vi.fn(),
     },
   },
 }));
 
+vi.mock('$lib/stores/toasts.svelte', () => ({
+  addToast: vi.fn(),
+}));
+
 import { api } from '$lib/ipc';
+import { addToast } from '$lib/stores/toasts.svelte';
 import { TasksStore } from './tasks.svelte';
 import type { Task } from '$lib/types';
 
@@ -199,5 +205,93 @@ describe('TasksStore', () => {
     const store = new TasksStore();
     const result = store.listForRepo('repo_unknown');
     expect(result).toEqual([]);
+  });
+
+  it('tasks_move_optimistic_updates_then_reconciles_with_backend_response', async () => {
+    const task = makeTask({ id: 'tk_1', repo_id: 'r', column: 'todo', order: 1024 });
+    vi.mocked(api.task.list).mockResolvedValue([task]);
+    vi.mocked(api.task.move).mockResolvedValue({
+      ...task,
+      column: 'done',
+      order: 2048,
+      updated_at: 1,
+    });
+    const store = new TasksStore();
+    await store.loadForRepo('r');
+
+    const promise = store.move('tk_1', 'done', 2048);
+    // Before awaiting, optimistic write should already be visible
+    expect(store.tasks.get('r')?.get('tk_1')?.column).toBe('done');
+
+    await promise;
+    // After resolution, reconcile with backend response
+    expect(store.tasks.get('r')?.get('tk_1')?.updated_at).toBe(1);
+  });
+
+  it('tasks_move_revert_on_error_restores_previous_state_and_toasts', async () => {
+    const task = makeTask({ id: 'tk_1', repo_id: 'r', column: 'todo', order: 1024 });
+    vi.mocked(api.task.list).mockResolvedValue([task]);
+    vi.mocked(api.task.move).mockRejectedValue(new Error('Lark API: 91403 Forbidden'));
+    const store = new TasksStore();
+    await store.loadForRepo('r');
+
+    await store.move('tk_1', 'done', 2048).catch(() => {});
+
+    // Should be reverted to original state
+    expect(store.tasks.get('r')?.get('tk_1')?.column).toBe('todo');
+    expect(store.tasks.get('r')?.get('tk_1')?.order).toBe(1024);
+    // Should have toasted with error
+    expect(addToast).toHaveBeenCalledWith(expect.stringContaining('Move failed'), 'error');
+  });
+
+  it('tasks_refresh_replaces_map_for_selected_repo', async () => {
+    const oldTask = makeTask({ id: 'tk_old', repo_id: 'r', column: 'todo', order: 0 });
+    vi.mocked(api.task.list).mockResolvedValue([oldTask]);
+    const store = new TasksStore();
+    await store.loadForRepo('r');
+
+    vi.mocked(api.task.refresh).mockResolvedValue([
+      makeTask({ id: 'tk_a', repo_id: 'r', column: 'todo', order: 0 }),
+    ]);
+
+    await store.refresh('r');
+
+    expect(api.task.refresh).toHaveBeenCalledWith('r');
+    expect(store.tasks.get('r')?.has('tk_old')).toBe(false);
+    expect(store.tasks.get('r')?.has('tk_a')).toBe(true);
+  });
+
+  it('move: stringifies non-Error rejections in the toast message', async () => {
+    const initial = makeTask({ id: 'tk_1', repo_id: 'r', column: 'todo', order: 1024 });
+    vi.mocked(api.task.list).mockResolvedValue([initial]);
+    const store = new TasksStore();
+    await store.loadForRepo('r');
+
+    vi.mocked(api.task.move).mockRejectedValueOnce('plain-string-error');
+    await store.move('tk_1', 'done', 2048).catch(() => {});
+
+    expect(store.tasks.get('r')?.get('tk_1')?.column).toBe('todo');
+    expect(addToast).toHaveBeenCalledWith(expect.stringContaining('plain-string-error'), 'error');
+  });
+
+  it('refresh without repoId clears all nested maps and re-populates by repo_id', async () => {
+    vi.mocked(api.task.list).mockResolvedValueOnce([makeTask({ id: 'tk_old_a', repo_id: 'r1' })]);
+    const store = new TasksStore();
+    await store.loadForRepo('r1');
+    vi.mocked(api.task.list).mockResolvedValueOnce([makeTask({ id: 'tk_old_b', repo_id: 'r2' })]);
+    await store.loadForRepo('r2');
+
+    vi.mocked(api.task.refresh).mockResolvedValue([
+      makeTask({ id: 'tk_new_a', repo_id: 'r1' }),
+      makeTask({ id: 'tk_new_b', repo_id: 'r2' }),
+    ]);
+
+    await store.refresh();
+
+    expect(api.task.refresh).toHaveBeenCalledWith(undefined);
+    expect(store.tasks.get('r1')?.has('tk_old_a')).toBe(false);
+    expect(store.tasks.get('r2')?.has('tk_old_b')).toBe(false);
+    expect(store.tasks.get('r1')?.has('tk_new_a')).toBe(true);
+    expect(store.tasks.get('r2')?.has('tk_new_b')).toBe(true);
   });
 });

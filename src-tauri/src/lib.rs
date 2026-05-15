@@ -8,6 +8,44 @@ pub mod panic;
 pub mod persistence;
 pub mod platform;
 pub mod state;
+pub mod task_provider;
+
+fn build_initial_provider(
+    settings: &crate::state::AppSettings,
+    data_dir: &std::path::Path,
+) -> std::sync::Arc<dyn crate::task_provider::TaskProvider> {
+    match settings.task_source {
+        crate::state::TaskSource::Local => std::sync::Arc::new(
+            crate::task_provider::local::LocalProvider::new(data_dir.to_path_buf()),
+        ),
+        crate::state::TaskSource::Lark => {
+            // Try to construct LarkProvider; fall back to LocalProvider
+            // if credentials are missing. The frontend banner will nudge
+            // the user to configure Lark.
+            let store = crate::commands::lark_auth::KeyringStore;
+            match crate::commands::lark_auth::load_lark_config_inner(data_dir, &store) {
+                Ok(cfg) => {
+                    let app_token = cfg.app_token.clone();
+                    let table_id = cfg.table_id.clone();
+                    let client =
+                        std::sync::Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
+                    std::sync::Arc::new(crate::task_provider::lark::LarkProvider::new(
+                        client, app_token, table_id,
+                    ))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "task_source=lark but credentials missing; falling back to LocalProvider"
+                    );
+                    std::sync::Arc::new(crate::task_provider::local::LocalProvider::new(
+                        data_dir.to_path_buf(),
+                    ))
+                }
+            }
+        }
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -28,6 +66,10 @@ pub fn run() {
             let tasks = crate::persistence::tasks::load_tasks(&data_dir)?;
             let settings = crate::persistence::settings::load_settings(&data_dir)?;
 
+            // Clone settings before it moves into AppState so we can pass it
+            // to build_initial_provider below.
+            let settings_for_provider = settings.clone();
+
             let state = crate::state::AppState {
                 repos,
                 workspaces,
@@ -38,6 +80,47 @@ pub fn run() {
             };
 
             app.manage(std::sync::Arc::new(std::sync::Mutex::new(state)));
+
+            // Phase 3a-2: pick the right provider based on task_source setting.
+            // provider_handle is separate from AppState so async trait calls
+            // don't hold the AppState lock.
+            let provider: std::sync::Arc<dyn crate::task_provider::TaskProvider> =
+                build_initial_provider(&settings_for_provider, &data_dir);
+            let provider_handle: crate::state::TaskProviderHandle =
+                std::sync::Arc::new(tokio::sync::RwLock::new(provider.clone()));
+            app.manage(provider_handle.clone());
+
+            // Initial hydrate: pull tasks from provider and populate AppState mirror.
+            // Done as a spawned async task so setup() doesn't block on the network
+            // when Lark is the source.
+            {
+                let state_arc = app
+                    .try_state::<std::sync::Arc<std::sync::Mutex<crate::state::AppState>>>()
+                    .expect("AppState managed")
+                    .inner()
+                    .clone();
+                tauri::async_runtime::spawn(async move {
+                    match provider.list_tasks(None).await {
+                        Ok(tasks) => {
+                            if let Ok(mut st) = state_arc.lock() {
+                                let default_repo = crate::commands::task::resolve_default_repo(&st);
+                                st.tasks.clear();
+                                for mut t in tasks {
+                                    if t.repo_id.is_empty() {
+                                        if let Some(ref r) = default_repo {
+                                            t.repo_id = r.clone();
+                                        }
+                                    }
+                                    st.tasks.insert(t.id.clone(), t);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "initial task hydrate failed");
+                        }
+                    }
+                });
+            }
 
             // Debounced message writer — collapses bursts of stream events
             // into a single disk write per workspace per ~500 ms window.
@@ -68,6 +151,9 @@ pub fn run() {
             crate::commands::task::update_task,
             crate::commands::task::move_task,
             crate::commands::task::remove_task,
+            crate::commands::task::refresh_tasks,
+            crate::commands::task::get_task_source,
+            crate::commands::task::set_task_source,
             crate::commands::agent::spawn_agent,
             crate::commands::agent::send_message,
             crate::commands::agent::stop_agent,
@@ -91,6 +177,7 @@ pub fn run() {
             crate::commands::lark_auth::get_lark_status,
             crate::commands::lark_auth::test_lark_connection,
             crate::commands::lark_auth::clear_lark_credentials,
+            crate::commands::lark_auth::verify_lark_schema,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
