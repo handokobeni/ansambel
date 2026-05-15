@@ -210,18 +210,29 @@ fn record_to_task(
         .unwrap_or("")
         .to_string();
 
-    let column_str = find_kanban_value(fields).ok_or_else(|| {
-        AppError::Lark(format!(
-            "record {} missing required field 'kanban_column' (also no status-like field found)",
-            rec.record_id
-        ))
-    })?;
-    let column = parse_kanban_column(column_str).ok_or_else(|| {
-        AppError::Lark(format!(
-            "record {} has unknown kanban_column '{column_str}'",
-            rec.record_id
-        ))
-    })?;
+    // kanban_column: prefer canonical field, then any status-like alias.
+    // Unknown values (or no status field at all) collapse to Todo so the
+    // task remains visible; a warn log carries the record id so the user
+    // can debug. This favours hydration completeness over strict schema
+    // enforcement — losing 1% of rows because of an unmappable status is
+    // worse than placing them in the backlog column for triage.
+    let column = match find_kanban_value(fields) {
+        Some(v) => parse_kanban_column(v).unwrap_or_else(|| {
+            tracing::warn!(
+                record_id = %rec.record_id,
+                value = %v,
+                "kanban_column value did not match any taxonomy; defaulting to Todo"
+            );
+            KanbanColumn::Todo
+        }),
+        None => {
+            tracing::warn!(
+                record_id = %rec.record_id,
+                "no kanban_column or status-like field set; defaulting to Todo"
+            );
+            KanbanColumn::Todo
+        }
+    };
 
     // repo_id: prefer explicit field, then caller's default, then fall
     // back to empty string. Hydrating with an empty repo_id keeps rows
@@ -486,6 +497,74 @@ mod tests {
         let tasks = provider.list_tasks(None).await.unwrap();
         assert_eq!(tasks[0].id, "rec_high");
         assert_eq!(tasks[1].id, "rec_low");
+    }
+
+    #[tokio::test]
+    async fn lark_provider_defaults_missing_kanban_column_to_todo() {
+        // Real-world: some rows in an existing Bitable have a Task Status
+        // field but its value is null for that record. Hydration should
+        // place the row in Todo (with a warn log) rather than fail.
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [{
+                        "record_id": "rec_no_status",
+                        "fields": {
+                            "title": "Untriaged task",
+                            "repo_id": "repo_x"
+                        }
+                    }],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+        let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].column, KanbanColumn::Todo);
+        assert_eq!(tasks[0].id, "rec_no_status");
+    }
+
+    #[tokio::test]
+    async fn lark_provider_defaults_unmappable_kanban_value_to_todo() {
+        // Status value that the fuzzy parser doesn't recognise (e.g.
+        // "Cancelled") should still hydrate, defaulting to Todo with a
+        // warn log so the user can debug.
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [{
+                        "record_id": "rec_unmappable",
+                        "fields": {
+                            "title": "Cancelled feature",
+                            "kanban_column": "Cancelled",
+                            "repo_id": "repo_x"
+                        }
+                    }],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+        let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].column, KanbanColumn::Todo);
     }
 
     #[tokio::test]
