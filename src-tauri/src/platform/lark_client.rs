@@ -390,11 +390,10 @@ struct BitableEmptyResponse {
     msg: String,
 }
 
-/// Field metadata as returned by Bitable. `field_type` is the numeric
-/// code Lark uses (1=Text, 2=Number, 3=SingleSelect, 5=DateTime,
-/// 7=Checkbox, 15=URL, 17=Attachment). Property is free-form JSON
-/// whose shape depends on the type.
 /// A Bitable field descriptor returned by the list-fields API.
+/// `field_type` is the numeric code Lark uses (1=Text, 2=Number,
+/// 3=SingleSelect, 5=DateTime, 7=Checkbox, 15=URL, 17=Attachment).
+/// `property` is free-form JSON whose shape depends on the type.
 /// Derives `Serialize` so it can be forwarded to the frontend via
 /// `ProposedMapping` without re-mapping.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

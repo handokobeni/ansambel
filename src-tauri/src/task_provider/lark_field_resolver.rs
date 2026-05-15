@@ -4,9 +4,10 @@
 //! independent of network access.
 
 use crate::error::{AppError, Result};
-use crate::platform::lark_client::BitableRecord;
-use crate::state::{FieldMapping, KanbanColumn, StatusValueMapping};
+use crate::platform::lark_client::{BitableField, BitableOption, BitableRecord, LarkClient};
+use crate::state::{FieldMapping, FieldRef, KanbanColumn, ProposedMapping, StatusValueMapping};
 use crate::task_provider::lark::parse_kanban_column;
+use std::sync::Arc;
 
 /// Reads a field's string value off a record by `field_id`. Bitable
 /// returns record fields keyed by name in the JSON payload, so we look
@@ -123,16 +124,14 @@ pub fn resolve_order(record: &BitableRecord, mapping: &FieldMapping) -> i32 {
     -clamped
 }
 
-use crate::platform::lark_client::{BitableField, BitableOption, LarkClient};
-use crate::state::{FieldRef, ProposedMapping};
-use std::sync::Arc;
-
-pub struct BitableSchemaDetector {
+#[allow(dead_code)]
+pub(crate) struct BitableSchemaDetector {
     client: Arc<LarkClient>,
 }
 
+#[allow(dead_code)]
 impl BitableSchemaDetector {
-    pub fn new(client: Arc<LarkClient>) -> Self {
+    pub(crate) fn new(client: Arc<LarkClient>) -> Self {
         Self { client }
     }
 
@@ -142,7 +141,7 @@ impl BitableSchemaDetector {
     ///   - status: first field whose normalised name contains
     ///     "status", "stage", "phase", or "kanban" (alphabetic order)
     ///   - description / order: left as None (user opts in)
-    pub async fn propose_mapping(
+    pub(crate) async fn propose_mapping(
         &self,
         app_token: &str,
         table_id: &str,
@@ -176,7 +175,7 @@ impl BitableSchemaDetector {
             })
             .collect();
         status_candidates.sort_by(|a, b| a.field_name.cmp(&b.field_name));
-        let status_field = status_candidates.first().cloned().cloned();
+        let status_field = status_candidates.into_iter().next().cloned();
 
         let (status_options, suggested_status_values) = if let Some(sf) = &status_field {
             let opts: Vec<BitableOption> = sf.options();
