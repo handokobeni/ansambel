@@ -402,6 +402,12 @@ pub struct BitableField {
     pub field_type: u32,
     #[serde(default)]
     pub property: Option<serde_json::Value>,
+    /// Marks the table's primary column (the locked first field every Bitable
+    /// has). Used as a read-only fallback source for `title` so existing
+    /// tables whose data lives in the primary column render in Ansambel even
+    /// before the user populates the wizard-created `title` field.
+    #[serde(default)]
+    pub is_primary: bool,
 }
 
 #[derive(Deserialize)]

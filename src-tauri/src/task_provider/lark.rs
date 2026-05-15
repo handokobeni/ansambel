@@ -11,12 +11,19 @@ use crate::platform::lark_client::{BitableRecord, LarkClient};
 use crate::state::{KanbanColumn, Task};
 use async_trait::async_trait;
 use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 #[derive(Debug)]
 pub struct LarkProvider {
     client: Arc<LarkClient>,
     app_token: String,
     table_id: String,
+    /// Lazy-loaded Bitable primary-column field name. Fetched once per
+    /// provider instance via `bitable_list_fields`; used as a read-only
+    /// fallback when the `title` field on a record is empty. Outer init
+    /// failures are swallowed (cached as `None`) so a transient schema
+    /// fetch error doesn't break task hydrate.
+    primary_field_name: OnceCell<Option<String>>,
 }
 
 impl LarkProvider {
@@ -25,24 +32,56 @@ impl LarkProvider {
             client,
             app_token,
             table_id,
+            primary_field_name: OnceCell::new(),
         }
+    }
+
+    /// Returns the Bitable primary column's field name, or `None` if the
+    /// schema fetch fails or no primary field is reported (rare).
+    async fn primary_field_name(&self) -> Option<String> {
+        self.primary_field_name
+            .get_or_init(|| async {
+                match self
+                    .client
+                    .bitable_list_fields(&self.app_token, &self.table_id)
+                    .await
+                {
+                    Ok(fields) => fields
+                        .into_iter()
+                        .find(|f| f.is_primary)
+                        .map(|f| f.field_name),
+                    Err(_) => None,
+                }
+            })
+            .await
+            .clone()
     }
 }
 
 /// Lark-API row → Task. Returns an error if a required field is
 /// missing/malformed; this surfaces "schema not initialized" cleanly.
-fn record_to_task(rec: &BitableRecord) -> Result<Task> {
+///
+/// `primary_field_name` is consulted as a fallback when the `title` field
+/// is missing or empty — that lets existing Bitables whose data lives in
+/// the locked primary column (e.g. "Task name") render without forcing
+/// the user to duplicate every row's title into the wizard-created field.
+fn record_to_task(rec: &BitableRecord, primary_field_name: Option<&str>) -> Result<Task> {
     let fields = rec.fields.as_object().ok_or_else(|| {
         AppError::Lark(format!("record {} fields is not an object", rec.record_id))
     })?;
 
-    let title = fields
-        .get("title")
-        .and_then(|v| v.as_str())
+    let title_from = |name: &str| {
+        fields
+            .get(name)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    };
+    let title = title_from("title")
+        .or_else(|| primary_field_name.and_then(title_from))
         .ok_or_else(|| {
             AppError::Lark(format!(
-                "record {} missing required field 'title'",
-                rec.record_id
+                "record {} missing required field 'title' (also empty in primary column {:?})",
+                rec.record_id, primary_field_name
             ))
         })?
         .to_string();
@@ -140,9 +179,10 @@ impl TaskProvider for LarkProvider {
             .client
             .bitable_list_records(&self.app_token, &self.table_id, filter.as_deref())
             .await?;
+        let primary = self.primary_field_name().await;
         let mut tasks: Vec<Task> = records
             .iter()
-            .map(record_to_task)
+            .map(|r| record_to_task(r, primary.as_deref()))
             .collect::<Result<Vec<_>>>()?;
         // Same ordering convention as LocalProvider: column ASC then order DESC.
         tasks.sort_by(
@@ -167,7 +207,8 @@ impl TaskProvider for LarkProvider {
             .client
             .bitable_create_record(&self.app_token, &self.table_id, fields)
             .await?;
-        record_to_task(&record)
+        let primary = self.primary_field_name().await;
+        record_to_task(&record, primary.as_deref())
     }
 
     async fn update_task(&self, id: &str, patch: TaskPatch) -> Result<Task> {
@@ -195,7 +236,8 @@ impl TaskProvider for LarkProvider {
             .client
             .bitable_get_record(&self.app_token, &self.table_id, id)
             .await?;
-        record_to_task(&rec)
+        let primary = self.primary_field_name().await;
+        record_to_task(&rec, primary.as_deref())
     }
 
     async fn move_task(&self, id: &str, column: KanbanColumn, order: i32) -> Result<Task> {
@@ -210,7 +252,8 @@ impl TaskProvider for LarkProvider {
             .client
             .bitable_get_record(&self.app_token, &self.table_id, id)
             .await?;
-        record_to_task(&rec)
+        let primary = self.primary_field_name().await;
+        record_to_task(&rec, primary.as_deref())
     }
 
     async fn delete_task(&self, id: &str) -> Result<()> {
@@ -546,5 +589,136 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("title"), "{msg}");
         assert!(msg.contains("rec_broken"), "{msg}");
+    }
+
+    /// When a record's `title` field is absent or empty, the provider should
+    /// fall back to the Bitable primary column (auto-detected via
+    /// `is_primary` on the field schema). This lets users point Ansambel at
+    /// existing Bitables whose data lives in the locked primary column
+    /// without rewriting every row.
+    async fn mount_fields_with_primary(server: &MockServer, primary_name: &str) {
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/fields",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "field_id": "fld_pri",
+                            "field_name": primary_name,
+                            "type": 1,
+                            "is_primary": true
+                        },
+                        {
+                            "field_id": "fld_title",
+                            "field_name": "title",
+                            "type": 1,
+                            "is_primary": false
+                        }
+                    ]
+                }
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn lark_provider_list_falls_back_to_primary_column_when_title_missing() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_fields_with_primary(&server, "Task name").await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [{
+                        "record_id": "rec_pgs",
+                        "fields": {
+                            "Task name": "Kelola: User bisa pencarian",
+                            "kanban_column": "todo",
+                            "repo_id": "repo_a",
+                            "order_within_column": 0
+                        }
+                    }],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+        let tasks = provider.list_tasks(Some("repo_a")).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Kelola: User bisa pencarian");
+        assert_eq!(tasks[0].id, "rec_pgs");
+    }
+
+    #[tokio::test]
+    async fn lark_provider_list_falls_back_to_primary_when_title_is_empty_string() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_fields_with_primary(&server, "Task name").await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [{
+                        "record_id": "rec_empty_title",
+                        "fields": {
+                            "title": "",
+                            "Task name": "Fallback Title",
+                            "kanban_column": "todo",
+                            "repo_id": "repo_a"
+                        }
+                    }],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+        let tasks = provider.list_tasks(Some("repo_a")).await.unwrap();
+        assert_eq!(tasks[0].title, "Fallback Title");
+    }
+
+    #[tokio::test]
+    async fn lark_provider_list_prefers_title_when_both_title_and_primary_present() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_fields_with_primary(&server, "Task name").await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [{
+                        "record_id": "rec_both",
+                        "fields": {
+                            "title": "Explicit Title",
+                            "Task name": "Primary Title",
+                            "kanban_column": "todo",
+                            "repo_id": "repo_a"
+                        }
+                    }],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+        let tasks = provider.list_tasks(Some("repo_a")).await.unwrap();
+        assert_eq!(tasks[0].title, "Explicit Title");
     }
 }
