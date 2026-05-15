@@ -58,6 +58,79 @@ impl LarkProvider {
     }
 }
 
+/// Maps a Bitable `kanban_column` value to our 4-column enum. The exact
+/// literals (`todo`, `in_progress`, `review`, `done`) win immediately; any
+/// other value runs through a normalize-then-prioritized-substring matcher
+/// so existing Bitables with richer status taxonomies (e.g. Jira-style
+/// "To Do / In Progress / Waiting Review / In Review / Waiting Fix /
+/// Waiting Deploy / Delivered") collapse into the right kanban column
+/// without forcing the user to remap option labels in Bitable.
+///
+/// Priority order matters when an input contains multiple keywords:
+///   Done > Review > InProgress > Todo
+/// chosen because a terminal state should always win, then handoff state,
+/// then active state, with todo as the catch-all backlog state. For
+/// example, "Review Done" → Done, "Waiting Review" → Review, "Waiting
+/// Fix" → InProgress.
+///
+/// Returns `None` for inputs that don't match any pattern; the caller
+/// surfaces the raw value in the error so the user can debug.
+pub(super) fn parse_kanban_column(value: &str) -> Option<KanbanColumn> {
+    match value {
+        "todo" => return Some(KanbanColumn::Todo),
+        "in_progress" => return Some(KanbanColumn::InProgress),
+        "review" => return Some(KanbanColumn::Review),
+        "done" => return Some(KanbanColumn::Done),
+        _ => {}
+    }
+
+    let normalized: String = value
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    const DONE_PATTERNS: &[&str] = &[
+        "done", "deliver", "deploy", "released", "release", "shipped", "ship", "merged",
+        "complete", "closed", "resolved", "finished",
+    ];
+    if DONE_PATTERNS.iter().any(|p| normalized.contains(p)) {
+        return Some(KanbanColumn::Done);
+    }
+
+    const REVIEW_PATTERNS: &[&str] = &["review", "qa", "verify", "verification", "testing"];
+    if REVIEW_PATTERNS.iter().any(|p| normalized.contains(p)) {
+        return Some(KanbanColumn::Review);
+    }
+
+    const IN_PROGRESS_PATTERNS: &[&str] = &[
+        "inprogress",
+        "progress",
+        "doing",
+        "wip",
+        "fix",
+        "fixing",
+        "working",
+        "active",
+        "started",
+    ];
+    if IN_PROGRESS_PATTERNS.iter().any(|p| normalized.contains(p)) {
+        return Some(KanbanColumn::InProgress);
+    }
+
+    const TODO_PATTERNS: &[&str] = &[
+        "todo", "backlog", "pending", "new", "open", "ready", "draft", "triage", "icebox",
+    ];
+    if TODO_PATTERNS.iter().any(|p| normalized.contains(p)) {
+        return Some(KanbanColumn::Todo);
+    }
+
+    None
+}
+
 /// Lark-API row → Task. Returns an error if a required field is
 /// missing/malformed; this surfaces "schema not initialized" cleanly.
 ///
@@ -101,18 +174,12 @@ fn record_to_task(rec: &BitableRecord, primary_field_name: Option<&str>) -> Resu
                 rec.record_id
             ))
         })?;
-    let column = match column_str {
-        "todo" => KanbanColumn::Todo,
-        "in_progress" => KanbanColumn::InProgress,
-        "review" => KanbanColumn::Review,
-        "done" => KanbanColumn::Done,
-        other => {
-            return Err(AppError::Lark(format!(
-                "record {} has unknown kanban_column '{other}'",
-                rec.record_id
-            )))
-        }
-    };
+    let column = parse_kanban_column(column_str).ok_or_else(|| {
+        AppError::Lark(format!(
+            "record {} has unknown kanban_column '{column_str}'",
+            rec.record_id
+        ))
+    })?;
 
     let repo_id = fields
         .get("repo_id")
@@ -688,6 +755,165 @@ mod tests {
         let provider = make_provider(&server.uri());
         let tasks = provider.list_tasks(Some("repo_a")).await.unwrap();
         assert_eq!(tasks[0].title, "Fallback Title");
+    }
+
+    // --- Fuzzy kanban_column parser ------------------------------------
+
+    #[test]
+    fn parse_kanban_column_exact_literals() {
+        assert_eq!(parse_kanban_column("todo"), Some(KanbanColumn::Todo));
+        assert_eq!(
+            parse_kanban_column("in_progress"),
+            Some(KanbanColumn::InProgress)
+        );
+        assert_eq!(parse_kanban_column("review"), Some(KanbanColumn::Review));
+        assert_eq!(parse_kanban_column("done"), Some(KanbanColumn::Done));
+    }
+
+    #[test]
+    fn parse_kanban_column_jira_style_taxonomy() {
+        // Covers the user's real Bitable Task Status taxonomy.
+        assert_eq!(parse_kanban_column("To Do"), Some(KanbanColumn::Todo));
+        assert_eq!(
+            parse_kanban_column("In Progress"),
+            Some(KanbanColumn::InProgress)
+        );
+        assert_eq!(
+            parse_kanban_column("Waiting Review"),
+            Some(KanbanColumn::Review)
+        );
+        assert_eq!(parse_kanban_column("In Review"), Some(KanbanColumn::Review));
+        assert_eq!(
+            parse_kanban_column("Waiting Fix"),
+            Some(KanbanColumn::InProgress)
+        );
+        assert_eq!(
+            parse_kanban_column("Waiting Deploy"),
+            Some(KanbanColumn::Done)
+        );
+        assert_eq!(parse_kanban_column("Delivered"), Some(KanbanColumn::Done));
+    }
+
+    #[test]
+    fn parse_kanban_column_done_wins_over_other_keywords() {
+        // Terminal state should win when multiple keywords present.
+        assert_eq!(parse_kanban_column("Review Done"), Some(KanbanColumn::Done));
+        assert_eq!(
+            parse_kanban_column("Backlog Done"),
+            Some(KanbanColumn::Done)
+        );
+        assert_eq!(parse_kanban_column("Fix Done"), Some(KanbanColumn::Done));
+    }
+
+    #[test]
+    fn parse_kanban_column_review_wins_over_progress_and_todo() {
+        // Handoff state should win over active and backlog.
+        assert_eq!(
+            parse_kanban_column("Review In Progress"),
+            Some(KanbanColumn::Review)
+        );
+        assert_eq!(
+            parse_kanban_column("Backlog Review"),
+            Some(KanbanColumn::Review)
+        );
+    }
+
+    #[test]
+    fn parse_kanban_column_progress_wins_over_todo() {
+        assert_eq!(
+            parse_kanban_column("Backlog Doing"),
+            Some(KanbanColumn::InProgress)
+        );
+    }
+
+    #[test]
+    fn parse_kanban_column_case_and_separator_insensitive() {
+        assert_eq!(parse_kanban_column("TO-DO"), Some(KanbanColumn::Todo));
+        assert_eq!(parse_kanban_column("to_do"), Some(KanbanColumn::Todo));
+        assert_eq!(
+            parse_kanban_column("IN-PROGRESS"),
+            Some(KanbanColumn::InProgress)
+        );
+        assert_eq!(
+            parse_kanban_column("  In Progress  "),
+            Some(KanbanColumn::InProgress)
+        );
+    }
+
+    #[test]
+    fn parse_kanban_column_unknown_returns_none() {
+        assert_eq!(parse_kanban_column(""), None);
+        assert_eq!(parse_kanban_column("   "), None);
+        assert_eq!(parse_kanban_column("xyz"), None);
+        assert_eq!(parse_kanban_column("foo bar baz"), None);
+    }
+
+    #[test]
+    fn parse_kanban_column_additional_taxonomies() {
+        // Linear-style
+        assert_eq!(parse_kanban_column("Backlog"), Some(KanbanColumn::Todo));
+        assert_eq!(parse_kanban_column("Cancelled"), None);
+        // Asana-style
+        assert_eq!(parse_kanban_column("Doing"), Some(KanbanColumn::InProgress));
+        assert_eq!(parse_kanban_column("Completed"), Some(KanbanColumn::Done));
+        // GitHub-style
+        assert_eq!(parse_kanban_column("Closed"), Some(KanbanColumn::Done));
+        assert_eq!(parse_kanban_column("Open"), Some(KanbanColumn::Todo));
+        // QA-style
+        assert_eq!(parse_kanban_column("QA"), Some(KanbanColumn::Review));
+        assert_eq!(parse_kanban_column("Testing"), Some(KanbanColumn::Review));
+        // Generic
+        assert_eq!(parse_kanban_column("WIP"), Some(KanbanColumn::InProgress));
+        assert_eq!(parse_kanban_column("Shipped"), Some(KanbanColumn::Done));
+        assert_eq!(parse_kanban_column("Released"), Some(KanbanColumn::Done));
+    }
+
+    #[tokio::test]
+    async fn lark_provider_hydrates_jira_taxonomy_end_to_end() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_fields_with_primary(&server, "Task name").await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "record_id": "rec_a",
+                            "fields": {
+                                "Task name": "Build login",
+                                "kanban_column": "Waiting Review",
+                                "repo_id": "repo_x",
+                                "order_within_column": 100
+                            }
+                        },
+                        {
+                            "record_id": "rec_b",
+                            "fields": {
+                                "Task name": "Ship release",
+                                "kanban_column": "Delivered",
+                                "repo_id": "repo_x",
+                                "order_within_column": 200
+                            }
+                        }
+                    ],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+        let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
+        assert_eq!(tasks.len(), 2);
+        // Sort order: column ASC then order DESC; Review (2) comes before Done (3).
+        assert_eq!(tasks[0].title, "Build login");
+        assert_eq!(tasks[0].column, KanbanColumn::Review);
+        assert_eq!(tasks[1].title, "Ship release");
+        assert_eq!(tasks[1].column, KanbanColumn::Done);
     }
 
     #[tokio::test]
