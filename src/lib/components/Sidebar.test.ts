@@ -3,6 +3,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import Sidebar from './Sidebar.svelte';
 
+vi.mock('$lib/ipc', () => ({
+  api: {
+    lark: {
+      listRepoBindings: vi.fn().mockResolvedValue({}),
+      setRepoBinding: vi.fn(),
+      deleteRepoBinding: vi.fn(),
+      detectSchema: vi.fn(),
+    },
+  },
+}));
+
 vi.mock('$lib/stores/repos.svelte', () => ({
   repos: {
     selectedRepoId: 'repo_abc123' as string | null,
@@ -63,6 +74,7 @@ vi.mock('$lib/stores/workspaces.svelte', () => {
 import { workspaces } from '$lib/stores/workspaces.svelte';
 import { repos } from '$lib/stores/repos.svelte';
 import { getToasts, removeToast } from '$lib/stores/toasts.svelte';
+import { larkBindings } from '$lib/stores/lark-bindings.svelte';
 
 const defaultRepo = {
   id: 'repo_abc123',
@@ -643,5 +655,20 @@ describe('Sidebar resize', () => {
     const aside = container.querySelector<HTMLElement>('[data-sidebar]')!;
     // Default = 280 per the component constants.
     expect(aside.style.width).toBe('280px');
+  });
+});
+
+describe('Sidebar repo context menu', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    larkBindings.bindings.clear();
+  });
+
+  it('right-click on repo row opens RepoSettingsDialog', async () => {
+    render(Sidebar);
+    const repoRow = screen.getByTestId('repo-row-repo_abc123');
+    await fireEvent.contextMenu(repoRow);
+    // The dialog shows the "binding-empty" state (no binding configured)
+    expect(screen.getByTestId('binding-empty')).toBeInTheDocument();
   });
 });
