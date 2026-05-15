@@ -58,6 +58,42 @@ impl LarkProvider {
     }
 }
 
+/// Locates the kanban-status value on a record. The canonical
+/// `kanban_column` field wins when present; otherwise we scan record
+/// fields for one whose name suggests a status taxonomy (case-insensitive
+/// substring of "status", "stage", "phase", or "kanban"). This lets us
+/// hydrate existing Bitables that name their status column "Task Status",
+/// "Workflow Status", "Stage", etc. without forcing a rename.
+pub(super) fn find_kanban_value(
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Option<&str> {
+    let value_of = |key: &str| {
+        fields
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+    };
+    if let Some(v) = value_of("kanban_column") {
+        return Some(v);
+    }
+    for (name, raw) in fields {
+        let normalized: String = name
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect();
+        let looks_like_status = ["status", "stage", "phase", "kanban"]
+            .iter()
+            .any(|kw| normalized.contains(kw));
+        if looks_like_status {
+            if let Some(s) = raw.as_str().filter(|s| !s.is_empty()) {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
 /// Maps a Bitable `kanban_column` value to our 4-column enum. The exact
 /// literals (`todo`, `in_progress`, `review`, `done`) win immediately; any
 /// other value runs through a normalize-then-prioritized-substring matcher
@@ -138,7 +174,16 @@ pub(super) fn parse_kanban_column(value: &str) -> Option<KanbanColumn> {
 /// is missing or empty — that lets existing Bitables whose data lives in
 /// the locked primary column (e.g. "Task name") render without forcing
 /// the user to duplicate every row's title into the wizard-created field.
-fn record_to_task(rec: &BitableRecord, primary_field_name: Option<&str>) -> Result<Task> {
+///
+/// `default_repo_id` is used when the record's `repo_id` field is missing
+/// or empty — typically passed as the current repo filter so existing
+/// Bitables without a per-row repo concept still hydrate into Ansambel's
+/// active repo.
+fn record_to_task(
+    rec: &BitableRecord,
+    primary_field_name: Option<&str>,
+    default_repo_id: Option<&str>,
+) -> Result<Task> {
     let fields = rec.fields.as_object().ok_or_else(|| {
         AppError::Lark(format!("record {} fields is not an object", rec.record_id))
     })?;
@@ -165,15 +210,12 @@ fn record_to_task(rec: &BitableRecord, primary_field_name: Option<&str>) -> Resu
         .unwrap_or("")
         .to_string();
 
-    let column_str = fields
-        .get("kanban_column")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            AppError::Lark(format!(
-                "record {} missing required field 'kanban_column'",
-                rec.record_id
-            ))
-        })?;
+    let column_str = find_kanban_value(fields).ok_or_else(|| {
+        AppError::Lark(format!(
+            "record {} missing required field 'kanban_column' (also no status-like field found)",
+            rec.record_id
+        ))
+    })?;
     let column = parse_kanban_column(column_str).ok_or_else(|| {
         AppError::Lark(format!(
             "record {} has unknown kanban_column '{column_str}'",
@@ -184,9 +226,11 @@ fn record_to_task(rec: &BitableRecord, primary_field_name: Option<&str>) -> Resu
     let repo_id = fields
         .get("repo_id")
         .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or(default_repo_id)
         .ok_or_else(|| {
             AppError::Lark(format!(
-                "record {} missing required field 'repo_id'",
+                "record {} missing required field 'repo_id' (no default repo provided)",
                 rec.record_id
             ))
         })?
@@ -241,16 +285,21 @@ fn column_to_str(c: KanbanColumn) -> &'static str {
 #[async_trait]
 impl TaskProvider for LarkProvider {
     async fn list_tasks(&self, repo_filter: Option<&str>) -> Result<Vec<Task>> {
-        let filter = repo_filter.map(|r| format!("CurrentValue.[repo_id]=\"{r}\""));
+        // Fetch all records and filter client-side so rows with missing
+        // repo_id can fall back to the caller's filter value. The Lark-side
+        // filter expression would silently drop those rows.
         let records = self
             .client
-            .bitable_list_records(&self.app_token, &self.table_id, filter.as_deref())
+            .bitable_list_records(&self.app_token, &self.table_id, None)
             .await?;
         let primary = self.primary_field_name().await;
         let mut tasks: Vec<Task> = records
             .iter()
-            .map(|r| record_to_task(r, primary.as_deref()))
+            .map(|r| record_to_task(r, primary.as_deref(), repo_filter))
             .collect::<Result<Vec<_>>>()?;
+        if let Some(filter) = repo_filter {
+            tasks.retain(|t| t.repo_id == filter);
+        }
         // Same ordering convention as LocalProvider: column ASC then order DESC.
         tasks.sort_by(
             |a, b| match column_rank(&a.column).cmp(&column_rank(&b.column)) {
@@ -275,7 +324,9 @@ impl TaskProvider for LarkProvider {
             .bitable_create_record(&self.app_token, &self.table_id, fields)
             .await?;
         let primary = self.primary_field_name().await;
-        record_to_task(&record, primary.as_deref())
+        // On create we know the canonical repo_id because we just wrote it;
+        // pass it as default to cover the rare case where Bitable strips it.
+        record_to_task(&record, primary.as_deref(), Some(args.repo_id.as_str()))
     }
 
     async fn update_task(&self, id: &str, patch: TaskPatch) -> Result<Task> {
@@ -304,7 +355,7 @@ impl TaskProvider for LarkProvider {
             .bitable_get_record(&self.app_token, &self.table_id, id)
             .await?;
         let primary = self.primary_field_name().await;
-        record_to_task(&rec, primary.as_deref())
+        record_to_task(&rec, primary.as_deref(), None)
     }
 
     async fn move_task(&self, id: &str, column: KanbanColumn, order: i32) -> Result<Task> {
@@ -320,7 +371,7 @@ impl TaskProvider for LarkProvider {
             .bitable_get_record(&self.app_token, &self.table_id, id)
             .await?;
         let primary = self.primary_field_name().await;
-        record_to_task(&rec, primary.as_deref())
+        record_to_task(&rec, primary.as_deref(), None)
     }
 
     async fn delete_task(&self, id: &str) -> Result<()> {
@@ -334,7 +385,7 @@ impl TaskProvider for LarkProvider {
 mod tests {
     use super::*;
     use crate::platform::lark_client::{LarkClient, LarkConfig};
-    use wiremock::matchers::{body_json, method, path, query_param};
+    use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_config(base: &str) -> LarkConfig {
@@ -439,23 +490,203 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lark_provider_list_passes_repo_filter_via_lark_filter_expr() {
+    async fn lark_provider_list_filters_repo_client_side() {
+        // Lark-side filter dropped (so rows with missing repo_id can fall
+        // back to the caller's filter). Verify the client-side retain keeps
+        // only matching repo_id rows.
         let server = MockServer::start().await;
         mount_token(&server).await;
         Mock::given(method("GET"))
             .and(path(
                 "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
             ))
-            .and(query_param("filter", "CurrentValue.[repo_id]=\"repo_xyz\""))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "code": 0,
-                "data": {"items": [], "has_more": false, "page_token": ""}
+                "data": {
+                    "items": [
+                        {
+                            "record_id": "rec_match",
+                            "fields": {"title": "Match", "kanban_column": "todo", "repo_id": "repo_xyz"}
+                        },
+                        {
+                            "record_id": "rec_other",
+                            "fields": {"title": "Other", "kanban_column": "todo", "repo_id": "repo_other"}
+                        }
+                    ],
+                    "has_more": false,
+                    "page_token": ""
+                }
             })))
             .mount(&server)
             .await;
         let provider = make_provider(&server.uri());
         let tasks = provider.list_tasks(Some("repo_xyz")).await.unwrap();
-        assert!(tasks.is_empty());
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "rec_match");
+    }
+
+    #[tokio::test]
+    async fn lark_provider_list_defaults_repo_id_from_filter_when_missing() {
+        // The user's real scenario: existing Bitable has no repo_id column.
+        // Rows without repo_id should be treated as belonging to the
+        // currently selected repo (the filter value).
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "record_id": "rec_a",
+                            "fields": {"title": "A", "kanban_column": "todo"}
+                        }
+                    ],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+        let tasks = provider.list_tasks(Some("repo_current")).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].repo_id, "repo_current");
+    }
+
+    #[tokio::test]
+    async fn lark_provider_list_finds_status_via_alternative_field_names() {
+        // The user's Bitable has the data in a field called "Task Status".
+        // We should auto-detect status-like fields by name.
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_fields_with_primary(&server, "Task name").await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "record_id": "rec_task_status",
+                            "fields": {
+                                "Task name": "Built feature",
+                                "Task Status": "Waiting Review"
+                            }
+                        },
+                        {
+                            "record_id": "rec_workflow_status",
+                            "fields": {
+                                "Task name": "Released feature",
+                                "Workflow Status": "Delivered"
+                            }
+                        },
+                        {
+                            "record_id": "rec_stage",
+                            "fields": {
+                                "Task name": "Stage feature",
+                                "Stage": "In Progress"
+                            }
+                        }
+                    ],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+        let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
+        assert_eq!(tasks.len(), 3);
+        let by_id: std::collections::HashMap<_, _> =
+            tasks.iter().map(|t| (t.id.as_str(), t)).collect();
+        assert_eq!(by_id["rec_task_status"].column, KanbanColumn::Review);
+        assert_eq!(by_id["rec_workflow_status"].column, KanbanColumn::Done);
+        assert_eq!(by_id["rec_stage"].column, KanbanColumn::InProgress);
+    }
+
+    #[tokio::test]
+    async fn lark_provider_list_prefers_kanban_column_over_status_aliases() {
+        // When both `kanban_column` and `Task Status` exist, the explicit
+        // canonical field wins (user override).
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_fields_with_primary(&server, "Task name").await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [{
+                        "record_id": "rec_both",
+                        "fields": {
+                            "Task name": "Both",
+                            "kanban_column": "done",
+                            "Task Status": "To Do"
+                        }
+                    }],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+        let provider = make_provider(&server.uri());
+        let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
+        assert_eq!(tasks[0].column, KanbanColumn::Done);
+    }
+
+    #[test]
+    fn find_kanban_value_canonical_field_wins() {
+        let fields: serde_json::Map<String, serde_json::Value> = serde_json::from_value(
+            serde_json::json!({"kanban_column": "todo", "Status": "Delivered"}),
+        )
+        .unwrap();
+        assert_eq!(find_kanban_value(&fields), Some("todo"));
+    }
+
+    #[test]
+    fn find_kanban_value_falls_back_to_task_status() {
+        let fields: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({"Task Status": "In Progress"})).unwrap();
+        assert_eq!(find_kanban_value(&fields), Some("In Progress"));
+    }
+
+    #[test]
+    fn find_kanban_value_falls_back_to_workflow_status() {
+        let fields: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({"Workflow Status": "Done"})).unwrap();
+        assert_eq!(find_kanban_value(&fields), Some("Done"));
+    }
+
+    #[test]
+    fn find_kanban_value_falls_back_to_stage() {
+        let fields: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({"Stage": "Review"})).unwrap();
+        assert_eq!(find_kanban_value(&fields), Some("Review"));
+    }
+
+    #[test]
+    fn find_kanban_value_returns_none_when_no_match() {
+        let fields: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({"Priority": "High", "Owner": "alice"}))
+                .unwrap();
+        assert_eq!(find_kanban_value(&fields), None);
+    }
+
+    #[test]
+    fn find_kanban_value_ignores_empty_string_values() {
+        let fields: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_value(serde_json::json!({"kanban_column": "", "Task Status": "Done"}))
+                .unwrap();
+        assert_eq!(find_kanban_value(&fields), Some("Done"));
     }
 
     #[tokio::test]
