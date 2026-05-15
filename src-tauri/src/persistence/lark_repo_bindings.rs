@@ -1,6 +1,3 @@
-// Phase-3a-3: command layer (Task 8) not yet written; items used once wired up.
-#![allow(dead_code)]
-
 use crate::error::Result;
 use crate::persistence::atomic::write_atomic;
 use crate::platform::paths::lark_repo_bindings_file;

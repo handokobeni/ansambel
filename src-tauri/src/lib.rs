@@ -136,6 +136,11 @@ pub fn run() {
             crate::commands::lark_auth::test_lark_connection,
             crate::commands::lark_auth::clear_lark_credentials,
             crate::commands::lark_auth::verify_lark_schema,
+            crate::commands::lark_repo_binding::get_lark_repo_binding,
+            crate::commands::lark_repo_binding::set_lark_repo_binding,
+            crate::commands::lark_repo_binding::delete_lark_repo_binding,
+            crate::commands::lark_repo_binding::list_lark_repo_bindings,
+            crate::commands::lark_repo_binding::detect_lark_schema,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

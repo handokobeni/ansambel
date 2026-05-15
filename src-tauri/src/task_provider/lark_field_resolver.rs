@@ -124,12 +124,10 @@ pub fn resolve_order(record: &BitableRecord, mapping: &FieldMapping) -> i32 {
     -clamped
 }
 
-#[allow(dead_code)]
 pub(crate) struct BitableSchemaDetector {
     client: Arc<LarkClient>,
 }
 
-#[allow(dead_code)]
 impl BitableSchemaDetector {
     pub(crate) fn new(client: Arc<LarkClient>) -> Self {
         Self { client }
