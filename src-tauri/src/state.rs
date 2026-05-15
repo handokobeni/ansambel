@@ -12,7 +12,7 @@ pub enum WorkspaceStatus {
     Error,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum KanbanColumn {
     #[default]
@@ -20,6 +20,66 @@ pub enum KanbanColumn {
     InProgress,
     Review,
     Done,
+}
+
+/// A reference to a Bitable field. `field_id` is the stable lookup key
+/// (survives renames). `field_name` is cached for UI display; refreshed
+/// lazily whenever we re-fetch the Bitable schema.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct FieldRef {
+    pub field_id: String,
+    pub field_name: String,
+}
+
+/// Field mapping for one Bitable. Only `title` is required; everything
+/// else has a runtime fallback so a partially-populated mapping still
+/// produces usable tasks.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct FieldMapping {
+    pub title: FieldRef,
+    #[serde(default)]
+    pub description: Option<FieldRef>,
+    #[serde(default)]
+    pub status: Option<FieldRef>,
+    #[serde(default)]
+    pub order: Option<FieldRef>,
+}
+
+/// Maps Bitable status field values to kanban columns. Keys are
+/// `option_id` for single-select fields or lowercased text values for
+/// Text fields. `default_column` covers values not in `entries`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StatusValueMapping {
+    #[serde(default)]
+    pub entries: std::collections::HashMap<String, KanbanColumn>,
+    #[serde(default = "default_kanban_column")]
+    pub default_column: KanbanColumn,
+}
+
+fn default_kanban_column() -> KanbanColumn {
+    KanbanColumn::Todo
+}
+
+impl Default for StatusValueMapping {
+    fn default() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            default_column: KanbanColumn::Todo,
+        }
+    }
+}
+
+/// One repo's binding to a Bitable: which table, plus how to map its
+/// fields and status options to Ansambel's task model.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BitableBinding {
+    pub app_token: String,
+    pub table_id: String,
+    pub field_mapping: FieldMapping,
+    #[serde(default)]
+    pub status_value_mapping: StatusValueMapping,
+    pub created_at: u64,
+    pub updated_at: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1013,5 +1073,39 @@ mod tests {
         });
         let s: AppSettings = serde_json::from_value(legacy).unwrap();
         assert_eq!(s.task_source, TaskSource::Local);
+    }
+
+    #[test]
+    fn binding_serde_round_trip_preserves_fields() {
+        let b = BitableBinding {
+            app_token: "bascntest".into(),
+            table_id: "tbltest".into(),
+            field_mapping: FieldMapping {
+                title: FieldRef {
+                    field_id: "fld_pri".into(),
+                    field_name: "Task name".into(),
+                },
+                description: None,
+                status: Some(FieldRef {
+                    field_id: "fld_status".into(),
+                    field_name: "Task Status".into(),
+                }),
+                order: None,
+            },
+            status_value_mapping: StatusValueMapping {
+                entries: {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("opt_a".into(), KanbanColumn::Todo);
+                    m.insert("opt_b".into(), KanbanColumn::Done);
+                    m
+                },
+                default_column: KanbanColumn::Todo,
+            },
+            created_at: 1747200000,
+            updated_at: 1747200000,
+        };
+        let json = serde_json::to_string(&b).unwrap();
+        let parsed: BitableBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, b);
     }
 }
