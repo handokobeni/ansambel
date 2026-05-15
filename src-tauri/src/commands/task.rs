@@ -446,12 +446,32 @@ pub(crate) async fn set_task_source_inner(
         let mut st = state
             .lock()
             .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        let default_repo = resolve_default_repo(&st);
         st.tasks.clear();
-        for t in tasks {
+        for mut t in tasks {
+            if t.repo_id.is_empty() {
+                if let Some(ref r) = default_repo {
+                    t.repo_id = r.clone();
+                }
+            }
             st.tasks.insert(t.id.clone(), t);
         }
     }
     Ok(())
+}
+
+/// Picks a fallback `repo_id` to assign to tasks hydrated from a provider
+/// that returned rows with no `repo_id` set. Preference order: the user's
+/// currently selected repo, then the first repo registered in AppState.
+/// Returns `None` only when Ansambel has no repos at all — in that case
+/// the task stays with an empty `repo_id` and is unreachable until the
+/// user adds a repo.
+pub(crate) fn resolve_default_repo(state: &AppState) -> Option<String> {
+    state
+        .settings
+        .selected_repo_id
+        .clone()
+        .or_else(|| state.repos.keys().next().cloned())
 }
 
 #[cfg(test)]
@@ -461,6 +481,65 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+
+    #[test]
+    fn resolve_default_repo_prefers_selected_repo_id() {
+        let mut state = AppState::default();
+        state.repos.insert(
+            "repo_first".into(),
+            RepoInfo {
+                id: "repo_first".into(),
+                name: "first".into(),
+                path: PathBuf::from("/tmp/first"),
+                gh_profile: None,
+                default_branch: "main".into(),
+                created_at: 0,
+                updated_at: 0,
+                scripts: Vec::new(),
+            },
+        );
+        state.repos.insert(
+            "repo_selected".into(),
+            RepoInfo {
+                id: "repo_selected".into(),
+                name: "selected".into(),
+                path: PathBuf::from("/tmp/sel"),
+                gh_profile: None,
+                default_branch: "main".into(),
+                created_at: 0,
+                updated_at: 0,
+                scripts: Vec::new(),
+            },
+        );
+        state.settings.selected_repo_id = Some("repo_selected".into());
+        assert_eq!(resolve_default_repo(&state), Some("repo_selected".into()));
+    }
+
+    #[test]
+    fn resolve_default_repo_falls_back_to_first_repo_when_no_selection() {
+        let mut state = AppState::default();
+        state.repos.insert(
+            "repo_only".into(),
+            RepoInfo {
+                id: "repo_only".into(),
+                name: "only".into(),
+                path: PathBuf::from("/tmp/only"),
+                gh_profile: None,
+                default_branch: "main".into(),
+                created_at: 0,
+                updated_at: 0,
+                scripts: Vec::new(),
+            },
+        );
+        state.settings.selected_repo_id = None;
+        assert_eq!(resolve_default_repo(&state), Some("repo_only".into()));
+    }
+
+    #[test]
+    fn resolve_default_repo_returns_none_when_no_repos() {
+        let state = AppState::default();
+        assert_eq!(resolve_default_repo(&state), None);
+    }
 
     fn make_state_with_repo(data_dir: &std::path::Path) -> Arc<Mutex<AppState>> {
         let _ = data_dir; // used by caller for data_dir path

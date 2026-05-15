@@ -223,17 +223,16 @@ fn record_to_task(
         ))
     })?;
 
+    // repo_id: prefer explicit field, then caller's default, then fall
+    // back to empty string. Hydrating with an empty repo_id keeps rows
+    // visible in the AppState mirror; caller (e.g. set_task_source) can
+    // post-process to assign a sensible default before rendering.
     let repo_id = fields
         .get("repo_id")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .or(default_repo_id)
-        .ok_or_else(|| {
-            AppError::Lark(format!(
-                "record {} missing required field 'repo_id' (no default repo provided)",
-                rec.record_id
-            ))
-        })?
+        .unwrap_or("")
         .to_string();
 
     let order = fields

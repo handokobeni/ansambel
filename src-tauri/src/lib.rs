@@ -103,8 +103,14 @@ pub fn run() {
                     match provider.list_tasks(None).await {
                         Ok(tasks) => {
                             if let Ok(mut st) = state_arc.lock() {
+                                let default_repo = crate::commands::task::resolve_default_repo(&st);
                                 st.tasks.clear();
-                                for t in tasks {
+                                for mut t in tasks {
+                                    if t.repo_id.is_empty() {
+                                        if let Some(ref r) = default_repo {
+                                            t.repo_id = r.clone();
+                                        }
+                                    }
                                     st.tasks.insert(t.id.clone(), t);
                                 }
                             }
