@@ -1886,8 +1886,8 @@ Delete the entire `verify_lark_schema` function + its `_inner` from
 
 - [ ] **Step 3: Update `load_lark_config_inner` to keep working**
 
-`load_lark_config_inner` returns a `LarkConfig` (used by lark_client). It still
-needs `app_token` and `table_id` _for the client init_. Change its signature:
+`load_lark_config_inner` returns a `LarkConfig` (used by lark*client). It still
+needs `app_token` and `table_id` \_for the client init*. Change its signature:
 
 ```rust
 pub fn load_lark_config_inner(
