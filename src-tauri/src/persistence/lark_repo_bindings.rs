@@ -1,3 +1,6 @@
+// Phase-3a-3: command layer (Task 8) not yet written; items used once wired up.
+#![allow(dead_code)]
+
 use crate::error::Result;
 use crate::persistence::atomic::write_atomic;
 use crate::platform::paths::lark_repo_bindings_file;
@@ -9,12 +12,16 @@ use std::path::Path;
 /// On-disk shape of `lark_repo_bindings.json`. Wraps the bindings map
 /// in a versioned envelope so future schema changes can be detected
 /// without breaking old installs.
+
+// Note: callers do load → modify → save without inter-process locking.
+// Ansambel is a single-process Tauri app and command dispatch is serialised
+// by the AppState Mutex, so this is safe within the current architecture.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct BindingsFile {
+pub(crate) struct BindingsFile {
     #[serde(default = "default_schema_version")]
-    pub schema_version: u32,
+    pub(crate) schema_version: u32,
     #[serde(default)]
-    pub bindings: HashMap<String, BitableBinding>,
+    pub(crate) bindings: HashMap<String, BitableBinding>,
 }
 
 fn default_schema_version() -> u32 {
@@ -24,39 +31,33 @@ fn default_schema_version() -> u32 {
 impl Default for BindingsFile {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: default_schema_version(),
             bindings: HashMap::new(),
         }
     }
 }
 
-pub fn load_bindings(data_dir: &Path) -> Result<BindingsFile> {
-    let path = lark_repo_bindings_file(data_dir);
-    if !path.exists() {
-        return Ok(BindingsFile::default());
-    }
-    let bytes = std::fs::read(&path)?;
-    let parsed: BindingsFile = serde_json::from_slice(&bytes)?;
-    Ok(parsed)
+pub(crate) fn load_bindings(data_dir: &Path) -> Result<BindingsFile> {
+    crate::persistence::atomic::load_or_default(&lark_repo_bindings_file(data_dir))
 }
 
-pub fn save_bindings(data_dir: &Path, file: &BindingsFile) -> Result<()> {
+pub(crate) fn save_bindings(data_dir: &Path, file: &BindingsFile) -> Result<()> {
     let path = lark_repo_bindings_file(data_dir);
     write_atomic(&path, file)
 }
 
-pub fn get_binding(data_dir: &Path, repo_id: &str) -> Result<Option<BitableBinding>> {
+pub(crate) fn get_binding(data_dir: &Path, repo_id: &str) -> Result<Option<BitableBinding>> {
     let file = load_bindings(data_dir)?;
     Ok(file.bindings.get(repo_id).cloned())
 }
 
-pub fn set_binding(data_dir: &Path, repo_id: &str, binding: BitableBinding) -> Result<()> {
+pub(crate) fn set_binding(data_dir: &Path, repo_id: &str, binding: BitableBinding) -> Result<()> {
     let mut file = load_bindings(data_dir)?;
     file.bindings.insert(repo_id.to_string(), binding);
     save_bindings(data_dir, &file)
 }
 
-pub fn delete_binding(data_dir: &Path, repo_id: &str) -> Result<bool> {
+pub(crate) fn delete_binding(data_dir: &Path, repo_id: &str) -> Result<bool> {
     let mut file = load_bindings(data_dir)?;
     let removed = file.bindings.remove(repo_id).is_some();
     if removed {
@@ -104,7 +105,11 @@ mod tests {
         set_binding(tmp.path(), "repo_x", make_binding()).unwrap();
         let f = load_bindings(tmp.path()).unwrap();
         assert_eq!(f.bindings.len(), 1);
-        assert_eq!(f.bindings.get("repo_x").unwrap().app_token, "bascntest");
+        let b = f.bindings.get("repo_x").unwrap();
+        assert_eq!(b.app_token, "bascntest");
+        assert_eq!(b.table_id, "tbltest");
+        assert_eq!(b.field_mapping.title.field_id, "fld_pri");
+        assert_eq!(b.created_at, 1747200000);
     }
 
     #[test]
@@ -134,5 +139,16 @@ mod tests {
         set_binding(tmp.path(), "repo_x", b2).unwrap();
         let f = load_bindings(tmp.path()).unwrap();
         assert_eq!(f.bindings.get("repo_x").unwrap().app_token, "v2");
+    }
+
+    #[test]
+    fn schema_version_serialized_in_file() {
+        let tmp = tempdir().unwrap();
+        set_binding(tmp.path(), "repo_x", make_binding()).unwrap();
+        let path = lark_repo_bindings_file(tmp.path());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["schema_version"], 1);
+        assert!(value["bindings"].is_object());
     }
 }
