@@ -21,8 +21,8 @@ import type {
   FileWriteResponse,
   LarkStatus,
   SetLarkCredentialsArgs,
-  TaskSource,
-  SchemaCheckResult,
+  BitableBinding,
+  ProposedMapping,
 } from './types';
 
 export type ListMessagesOpts = {
@@ -100,14 +100,6 @@ export const api = {
      *  mirror, then return them. Used by the manual Refresh button
      *  and the window-focus listener. */
     refresh: (repoId?: string): Promise<Task[]> => invoke('refresh_tasks', { repoId }),
-
-    /** Persist the chosen task source and rehydrate the kanban from
-     *  the new provider. Backend emits `tasks-rehydrated` after
-     *  success so frontend stores can re-load. */
-    setSource: (source: TaskSource): Promise<void> => invoke('set_task_source', { source }),
-
-    /** Read the currently-active task source from settings. */
-    getSource: (): Promise<TaskSource> => invoke('get_task_source'),
   },
 
   agent: {
@@ -196,16 +188,14 @@ export const api = {
   // ── Phase 3a: Lark Open Platform credentials ─────────────────────
 
   lark: {
-    /** Persist the four required fields. `appSecret` lands in the OS
-     *  keyring; the other three (plus `baseUrl`) go into
+    /** Persist the app credentials. `appSecret` lands in the OS
+     *  keyring; the other fields (plus `baseUrl`) go into
      *  `lark_settings.json`. Returns the post-write status so the UI can
      *  re-render without a follow-up `getStatus()`. */
     setCredentials: (args: SetLarkCredentialsArgs): Promise<LarkStatus> =>
       invoke('set_lark_credentials', {
         appId: args.appId,
         appSecret: args.appSecret,
-        appToken: args.appToken,
-        tableId: args.tableId,
         baseUrl: args.baseUrl ?? null,
       }),
 
@@ -214,40 +204,36 @@ export const api = {
      *  crosses IPC — only `has_secret: bool`. */
     getStatus: (): Promise<LarkStatus> => invoke('get_lark_status'),
 
-    /** Round-trip the credentials by issuing one tenant_access_token
-     *  request. Resolves on success, rejects with the Lark API error
-     *  on failure. Never logs the resulting token.
-     *
-     *  When `override` is provided with all four required fields, the
-     *  backend tests those values directly — letting the user verify
-     *  form input BEFORE Save commits to keyring/disk. Pass `undefined`
-     *  to test the currently-stored credentials. */
-    testConnection: (override?: SetLarkCredentialsArgs): Promise<void> =>
-      invoke(
-        'test_lark_connection',
-        override
-          ? {
-              appId: override.appId,
-              appSecret: override.appSecret,
-              appToken: override.appToken,
-              tableId: override.tableId,
-              baseUrl: override.baseUrl ?? null,
-            }
-          : {
-              appId: null,
-              appSecret: null,
-              appToken: null,
-              tableId: null,
-              baseUrl: null,
-            }
-      ),
+    /** Round-trip the credentials by testing a connection to a specific
+     *  Bitable table. Resolves on success, rejects with the Lark API
+     *  error on failure. Never logs the resulting token. */
+    testConnection: (appToken: string, tableId: string): Promise<void> =>
+      invoke('test_lark_connection', { appToken, tableId }),
 
     /** Wipe both the keyring entry and the on-disk settings. Idempotent. */
     clear: (): Promise<void> => invoke('clear_lark_credentials'),
 
-    /** Diff the configured Bitable table against the required fields
-     *  for Phase 3a-2; create missing ones. Idempotent. */
-    verifySchema: (): Promise<SchemaCheckResult> => invoke('verify_lark_schema'),
+    // ── Phase 3a-3: per-repo Bitable bindings ────────────────────────
+
+    /** Retrieve the Bitable binding for a specific repo, or null if none. */
+    getRepoBinding: (repoId: string): Promise<BitableBinding | null> =>
+      invoke('get_lark_repo_binding', { repoId }),
+
+    /** Persist a Bitable binding for a repo. */
+    setRepoBinding: (repoId: string, binding: BitableBinding): Promise<void> =>
+      invoke('set_lark_repo_binding', { repoId, binding }),
+
+    /** Remove the Bitable binding for a repo. Idempotent. */
+    deleteRepoBinding: (repoId: string): Promise<void> =>
+      invoke('delete_lark_repo_binding', { repoId }),
+
+    /** Return all repo bindings as a map of repoId → BitableBinding. */
+    listRepoBindings: (): Promise<Record<string, BitableBinding>> =>
+      invoke('list_lark_repo_bindings'),
+
+    /** Inspect a Bitable table and propose a FieldMapping + StatusValueMapping. */
+    detectSchema: (appToken: string, tableId: string): Promise<ProposedMapping> =>
+      invoke('detect_lark_schema', { appToken, tableId }),
   },
 
   script: {

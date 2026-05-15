@@ -244,15 +244,6 @@ export type FileWriteResponse = {
   size: number;
 };
 
-export type TaskSource = 'local' | 'lark';
-
-export type SchemaCheckResult = {
-  ok: boolean;
-  created: string[];
-  already_present: string[];
-  type_mismatches: string[];
-};
-
 // --- Lark types (Phase 3a) ---
 
 /** Configuration status returned by the backend. The actual app_secret
@@ -261,8 +252,6 @@ export type SchemaCheckResult = {
 export type LarkStatus = {
   configured: boolean;
   app_id: string | null;
-  app_token: string | null;
-  table_id: string | null;
   base_url: string;
   has_secret: boolean;
 };
@@ -270,9 +259,52 @@ export type LarkStatus = {
 export type SetLarkCredentialsArgs = {
   appId: string;
   appSecret: string;
-  appToken: string;
-  tableId: string;
   baseUrl?: string;
+};
+
+export type FieldRef = {
+  field_id: string;
+  field_name: string;
+};
+
+export type FieldMapping = {
+  title: FieldRef;
+  description: FieldRef | null;
+  status: FieldRef | null;
+  order: FieldRef | null;
+};
+
+export type KanbanColumnLiteral = 'todo' | 'in_progress' | 'review' | 'done';
+
+export type StatusValueMapping = {
+  entries: Record<string, KanbanColumnLiteral>;
+  default_column: KanbanColumnLiteral;
+};
+
+export type BitableBinding = {
+  app_token: string;
+  table_id: string;
+  field_mapping: FieldMapping;
+  status_value_mapping: StatusValueMapping;
+  created_at: number;
+  updated_at: number;
+};
+
+export type BitableField = {
+  field_id: string;
+  field_name: string;
+  type: number;
+  property?: { options?: { id: string; name: string }[] } | null;
+  is_primary: boolean;
+};
+
+export type BitableOption = { id: string; name: string };
+
+export type ProposedMapping = {
+  fields: BitableField[];
+  suggested: FieldMapping;
+  status_options: BitableOption[] | null;
+  suggested_status_values: StatusValueMapping;
 };
 
 export type TurnState = {
