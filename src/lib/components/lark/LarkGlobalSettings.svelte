@@ -1,21 +1,22 @@
-<!-- src/lib/components/lark/LarkSettings.svelte -->
+<!-- src/lib/components/lark/LarkGlobalSettings.svelte -->
 <!--
-  Lark Open Platform credential form.
+  Lark Open Platform global credential form.
 
-  Owns the 4-field form (app_id / app_secret / app_token / table_id +
-  optional base_url) plus three actions: Save, Test connection, Clear.
+  Owns the 3-field form (app_id / app_secret / base_url) plus two
+  actions: Save and Clear. Per-repo Bitable bindings (app_token,
+  table_id, field mapping) live in RepoSettingsDialog / LarkBindingWizard.
 
   Security notes:
     * `appSecret` is bound to a password-typed input and never echoed
-      back from the backend. We pre-fill the other three from the
-      current status; the secret field stays blank, and saving an empty
+      back from the backend. We pre-fill `appId` from the current
+      status; the secret field stays blank, and saving an empty
       string is rejected by the backend.
     * Errors surface in the in-component banner — no console.log calls.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from '$lib/ipc';
-  import type { LarkStatus, SchemaCheckResult } from '$lib/types';
+  import type { LarkStatus } from '$lib/types';
 
   type Banner =
     | { kind: 'idle' }
@@ -25,40 +26,14 @@
 
   let loading = $state(true);
   let saving = $state(false);
-  let testing = $state(false);
   let status = $state<LarkStatus | null>(null);
   let banner = $state<Banner>({ kind: 'idle' });
 
   let appId = $state('');
   let appSecret = $state('');
-  let appToken = $state('');
-  let tableId = $state('');
   let baseUrl = $state('');
 
-  const canSave = $derived(
-    !saving &&
-      appId.trim().length > 0 &&
-      appSecret.trim().length > 0 &&
-      appToken.trim().length > 0 &&
-      tableId.trim().length > 0
-  );
-
-  // Enabled when the user has typed a full credential set (validate
-  // BEFORE Save) OR when credentials are already stored (validate the
-  // saved set without re-typing the secret).
-  const canTestUnsaved = $derived(
-    appId.trim().length > 0 &&
-      appSecret.trim().length > 0 &&
-      appToken.trim().length > 0 &&
-      tableId.trim().length > 0
-  );
-  const canTest = $derived(!testing && (canTestUnsaved || status?.configured === true));
-
-  let schemaResult = $state<SchemaCheckResult | null>(null);
-  let verifying = $state(false);
-  let schemaError = $state<string | null>(null);
-
-  const canVerifySchema = $derived(!verifying && status?.configured === true);
+  const canSave = $derived(!saving && appId.trim().length > 0 && appSecret.trim().length > 0);
 
   onMount(async () => {
     await loadStatus();
@@ -79,8 +54,6 @@
   function applyStatus(next: LarkStatus) {
     status = next;
     appId = next.app_id ?? '';
-    appToken = next.app_token ?? '';
-    tableId = next.table_id ?? '';
     // Default to the canonical international URL when unset so the
     // input never shows an empty placeholder; the backend treats blank
     // as "use default" anyway.
@@ -99,8 +72,6 @@
       const next = await api.lark.setCredentials({
         appId: appId.trim(),
         appSecret: appSecret.trim(),
-        appToken: appToken.trim(),
-        tableId: tableId.trim(),
         baseUrl: baseUrl.trim() ? baseUrl.trim() : undefined,
       });
       applyStatus(next);
@@ -109,33 +80,6 @@
       banner = { kind: 'error', message: `Save failed: ${describe(e)}` };
     } finally {
       saving = false;
-    }
-  }
-
-  async function handleTest() {
-    if (!canTest) return;
-    testing = true;
-    banner = { kind: 'info', message: 'Testing connection...' };
-    try {
-      // Prefer form values when the user has typed a complete set —
-      // lets them validate BEFORE Save. When the secret is blank
-      // (saved-config re-open) we fall through to undefined so the
-      // backend uses stored credentials.
-      const override = canTestUnsaved
-        ? {
-            appId: appId.trim(),
-            appSecret: appSecret.trim(),
-            appToken: appToken.trim(),
-            tableId: tableId.trim(),
-            baseUrl: baseUrl.trim() ? baseUrl.trim() : undefined,
-          }
-        : undefined;
-      await api.lark.testConnection(override);
-      banner = { kind: 'success', message: 'Connection OK.' };
-    } catch (e) {
-      banner = { kind: 'error', message: `Connection failed: ${describe(e)}` };
-    } finally {
-      testing = false;
     }
   }
 
@@ -150,20 +94,6 @@
       banner = { kind: 'error', message: `Clear failed: ${describe(e)}` };
     } finally {
       saving = false;
-    }
-  }
-
-  async function handleVerifySchema() {
-    if (!canVerifySchema) return;
-    verifying = true;
-    schemaError = null;
-    try {
-      schemaResult = await api.lark.verifySchema();
-    } catch (e) {
-      schemaError = describe(e);
-      schemaResult = null;
-    } finally {
-      verifying = false;
     }
   }
 
@@ -247,42 +177,6 @@
       <div class="flex flex-col gap-1">
         <label
           class="text-[11px] uppercase tracking-wider text-[var(--text-muted)]"
-          for="lark-app-token"
-        >
-          App token (Bitable)
-        </label>
-        <input
-          id="lark-app-token"
-          type="text"
-          autocomplete="off"
-          spellcheck="false"
-          bind:value={appToken}
-          placeholder="bascnxxxxxxxxxxxxxx"
-          class="px-2 py-1.5 text-xs rounded bg-[var(--bg-base)] border border-[var(--border-light)] text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
-        />
-      </div>
-
-      <div class="flex flex-col gap-1">
-        <label
-          class="text-[11px] uppercase tracking-wider text-[var(--text-muted)]"
-          for="lark-table-id"
-        >
-          Table ID
-        </label>
-        <input
-          id="lark-table-id"
-          type="text"
-          autocomplete="off"
-          spellcheck="false"
-          bind:value={tableId}
-          placeholder="tblxxxxxxxxxxxxxx"
-          class="px-2 py-1.5 text-xs rounded bg-[var(--bg-base)] border border-[var(--border-light)] text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)]"
-        />
-      </div>
-
-      <div class="flex flex-col gap-1">
-        <label
-          class="text-[11px] uppercase tracking-wider text-[var(--text-muted)]"
           for="lark-base-url"
         >
           Base URL
@@ -329,15 +223,6 @@
           Clear
         </button>
         <button
-          type="button"
-          class="px-3 py-1.5 text-xs font-semibold rounded bg-[var(--bg-hover)] text-[var(--text-dim)] hover:text-[var(--text-primary)] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-          onclick={handleTest}
-          disabled={!canTest}
-          data-testid="lark-test"
-        >
-          {testing ? 'Testing...' : 'Test connection'}
-        </button>
-        <button
           type="submit"
           class="px-3 py-1.5 text-xs font-semibold rounded bg-[var(--accent)] text-[var(--bg-base)] hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
           disabled={!canSave}
@@ -347,56 +232,5 @@
         </button>
       </div>
     </form>
-
-    <section
-      class="flex flex-col gap-2 px-4 py-3 border-t border-[var(--border-light)]"
-      aria-labelledby="lark-schema-title"
-      data-testid="lark-schema-section"
-    >
-      <h3 id="lark-schema-title" class="text-sm font-semibold">Bitable schema</h3>
-      <p class="text-[11px] text-[var(--text-muted)]">
-        5 fields required for kanban sync. Verify creates any missing ones.
-      </p>
-
-      <button
-        type="button"
-        class="self-start px-3 py-1.5 text-xs font-semibold rounded bg-[var(--bg-hover)] text-[var(--text-dim)] hover:text-[var(--text-primary)] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-        onclick={handleVerifySchema}
-        disabled={!canVerifySchema}
-        data-testid="lark-verify-schema"
-      >
-        {verifying ? 'Verifying...' : 'Verify / Initialize schema'}
-      </button>
-
-      {#if schemaError}
-        <div
-          role="status"
-          class="text-[11px] px-2 py-1.5 rounded border border-red-500 text-red-400"
-          data-testid="lark-schema-error"
-        >
-          {schemaError}
-        </div>
-      {/if}
-
-      {#if schemaResult}
-        <div class="text-[11px] flex flex-col gap-1" data-testid="lark-schema-result">
-          {#if schemaResult.created.length > 0}
-            <div class="text-[var(--accent)]">
-              + Created: {schemaResult.created.join(', ')}
-            </div>
-          {/if}
-          {#if schemaResult.already_present.length > 0}
-            <div class="text-[var(--text-muted)]">
-              ✓ Already present: {schemaResult.already_present.join(', ')}
-            </div>
-          {/if}
-          {#if schemaResult.type_mismatches.length > 0}
-            <div class="text-red-400">
-              ✗ Type mismatch (fix in Bitable UI): {schemaResult.type_mismatches.join(', ')}
-            </div>
-          {/if}
-        </div>
-      {/if}
-    </section>
   {/if}
 </section>

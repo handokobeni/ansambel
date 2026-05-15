@@ -12,7 +12,7 @@
   re-runs `onMount` and refreshes status from the backend.
 -->
 <script lang="ts">
-  import LarkSettings from './lark/LarkSettings.svelte';
+  import LarkSettings from './lark/LarkGlobalSettings.svelte';
   import { api } from '$lib/ipc';
   import { addToast } from '$lib/stores/toasts.svelte';
   import type { TaskSource } from '$lib/types';
