@@ -3,6 +3,22 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import App from './App.svelte';
 
+// Mock @tauri-apps/api/event so listen() calls in onMount don't fail without
+// a real Tauri runtime.
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn().mockResolvedValue(() => {}),
+}));
+
+// Mock lark-bindings store so larkBindings.load() resolves without IPC.
+vi.mock('$lib/stores/lark-bindings.svelte', () => ({
+  larkBindings: {
+    load: vi.fn().mockResolvedValue(undefined),
+    has: vi.fn().mockReturnValue(false),
+    get: vi.fn().mockReturnValue(undefined),
+    bindings: new Map(),
+  },
+}));
+
 // Mock @tauri-apps/api/core so WorkspaceView (rendered in work mode) does not
 // break tests that run without a real Tauri runtime.
 vi.mock('@tauri-apps/api/core', () => {
