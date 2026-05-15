@@ -420,7 +420,11 @@ pub(crate) async fn set_task_source_inner(
             let table_id = cfg.table_id.clone();
             let client = Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
             Arc::new(crate::task_provider::lark::LarkProvider::new(
-                client, app_token, table_id,
+                client,
+                app_token,
+                table_id,
+                crate::state::FieldMapping::default(),
+                crate::state::StatusValueMapping::default(),
             ))
         }
     };

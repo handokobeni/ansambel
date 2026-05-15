@@ -30,7 +30,11 @@ fn build_initial_provider(
                     let client =
                         std::sync::Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
                     std::sync::Arc::new(crate::task_provider::lark::LarkProvider::new(
-                        client, app_token, table_id,
+                        client,
+                        app_token,
+                        table_id,
+                        crate::state::FieldMapping::default(),
+                        crate::state::StatusValueMapping::default(),
                     ))
                 }
                 Err(e) => {
