@@ -13,6 +13,7 @@ use crate::state::{KanbanColumn, Task};
 use async_trait::async_trait;
 
 pub mod lark;
+pub mod lark_field_resolver;
 pub mod local;
 pub mod schema;
 
