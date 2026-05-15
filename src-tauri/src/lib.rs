@@ -1,4 +1,4 @@
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 pub mod commands;
 pub mod error;
@@ -9,6 +9,68 @@ pub mod persistence;
 pub mod platform;
 pub mod state;
 pub mod task_provider;
+
+/// Auto-migrate the user's Phase 3a-2 global Lark config to a per-repo
+/// binding on first launch after upgrade. Idempotent; no-op when:
+///   - bindings file already exists with at least one entry, OR
+///   - old `lark_settings.json` has no `app_token`/`table_id`, OR
+///   - no repo is selected.
+fn maybe_migrate_to_per_repo_binding(
+    data_dir: &std::path::Path,
+    settings: &crate::state::AppSettings,
+) -> Option<(String, crate::state::BitableBinding)> {
+    let bindings = crate::persistence::lark_repo_bindings::load_bindings(data_dir).ok()?;
+    if !bindings.bindings.is_empty() {
+        return None;
+    }
+    let selected_repo = settings.selected_repo_id.clone()?;
+    let legacy_path = data_dir.join("lark_settings.json");
+    let bytes = std::fs::read(&legacy_path).ok()?;
+    let legacy: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let app_token = legacy
+        .get("app_token")
+        .and_then(|v| v.as_str())?
+        .to_string();
+    let table_id = legacy.get("table_id").and_then(|v| v.as_str())?.to_string();
+    if app_token.is_empty() || table_id.is_empty() {
+        return None;
+    }
+    let binding = crate::state::BitableBinding {
+        app_token,
+        table_id,
+        field_mapping: crate::state::FieldMapping {
+            title: crate::state::FieldRef {
+                field_id: "PENDING_RESOLVE".into(),
+                field_name: "title".into(),
+            },
+            description: None,
+            status: None,
+            order: None,
+        },
+        status_value_mapping: crate::state::StatusValueMapping::default(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        updated_at: 0,
+    };
+    let _ = crate::persistence::lark_repo_bindings::set_binding(
+        data_dir,
+        &selected_repo,
+        binding.clone(),
+    );
+    let _ = std::fs::write(
+        legacy_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "app_id": legacy.get("app_id").and_then(|v| v.as_str()).unwrap_or(""),
+            "base_url": legacy.get("base_url").and_then(|v| v.as_str()).unwrap_or(
+                crate::platform::lark_client::DEFAULT_BASE_URL
+            ),
+        }))
+        .unwrap_or_default(),
+    );
+    Some((selected_repo, binding))
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -29,6 +91,11 @@ pub fn run() {
             let tasks = crate::persistence::tasks::load_tasks(&data_dir)?;
             let settings = crate::persistence::settings::load_settings(&data_dir)?;
 
+            // Phase 3a-3 migration: convert global Lark config (3a-2 shape) into
+            // per-repo binding for the currently selected repo. Must run before
+            // `settings` is moved into AppState.
+            let migrated = maybe_migrate_to_per_repo_binding(&data_dir, &settings);
+
             let state = crate::state::AppState {
                 repos,
                 workspaces,
@@ -47,6 +114,52 @@ pub fn run() {
             let provider_handle: crate::state::TaskProviderHandle =
                 std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
             app.manage(provider_handle.clone());
+
+            // Build providers for every repo that has a binding.
+            let bindings = crate::persistence::lark_repo_bindings::load_bindings(&data_dir)
+                .unwrap_or_default();
+            {
+                let handle = provider_handle.clone();
+                let data_dir_clone = data_dir.clone();
+                tauri::async_runtime::spawn(async move {
+                    for (repo_id, binding) in bindings.bindings.iter() {
+                        let store = crate::commands::lark_auth::KeyringStore;
+                        let cfg_res = crate::commands::lark_auth::load_lark_config_inner(
+                            &data_dir_clone,
+                            &store,
+                        );
+                        let Ok(mut cfg) = cfg_res else {
+                            tracing::warn!(
+                                repo_id = %repo_id,
+                                "skipping Lark provider init: global creds missing"
+                            );
+                            continue;
+                        };
+                        cfg.app_token = binding.app_token.clone();
+                        cfg.table_id = binding.table_id.clone();
+                        let client =
+                            std::sync::Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
+                        let provider: std::sync::Arc<dyn crate::task_provider::TaskProvider> =
+                            std::sync::Arc::new(
+                                crate::task_provider::lark::LarkProvider::from_binding(
+                                    client,
+                                    binding.clone(),
+                                ),
+                            );
+                        handle.write().await.insert(repo_id.clone(), provider);
+                    }
+                });
+            }
+
+            if let Some((repo_id, _)) = migrated {
+                tracing::info!(
+                    repo_id = %repo_id,
+                    "Phase 3a-3 auto-migration: created binding from old lark_settings.json"
+                );
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.emit("lark-migrated", repo_id);
+                }
+            }
 
             // Initial hydrate: pull tasks from LocalProvider and populate
             // AppState mirror. Spawned so setup() returns immediately.
@@ -288,5 +401,80 @@ mod tests {
         };
         assert!(state.agents.is_empty());
         assert!(state.terminals.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    fn make_existing_binding() -> crate::state::BitableBinding {
+        crate::state::BitableBinding {
+            app_token: "x".into(),
+            table_id: "y".into(),
+            field_mapping: crate::state::FieldMapping {
+                title: crate::state::FieldRef {
+                    field_id: "fld_t".into(),
+                    field_name: "title".into(),
+                },
+                description: None,
+                status: None,
+                order: None,
+            },
+            status_value_mapping: crate::state::StatusValueMapping::default(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn migration_no_op_when_bindings_already_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut bindings = crate::persistence::lark_repo_bindings::BindingsFile::default();
+        bindings
+            .bindings
+            .insert("repo_x".into(), make_existing_binding());
+        crate::persistence::lark_repo_bindings::save_bindings(tmp.path(), &bindings).unwrap();
+        let settings = crate::state::AppSettings::default();
+        assert!(maybe_migrate_to_per_repo_binding(tmp.path(), &settings).is_none());
+    }
+
+    #[test]
+    fn migration_no_op_when_no_selected_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("lark_settings.json"),
+            r#"{"app_id":"x","app_token":"t","table_id":"i"}"#,
+        )
+        .unwrap();
+        let settings = crate::state::AppSettings::default();
+        assert!(maybe_migrate_to_per_repo_binding(tmp.path(), &settings).is_none());
+    }
+
+    #[test]
+    fn migration_creates_binding_for_selected_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("lark_settings.json"),
+            r#"{"app_id":"cli_x","app_token":"bascn","table_id":"tbl","base_url":"https://open.larksuite.com"}"#,
+        )
+        .unwrap();
+        let settings = crate::state::AppSettings {
+            selected_repo_id: Some("repo_x".into()),
+            ..Default::default()
+        };
+        let result = maybe_migrate_to_per_repo_binding(tmp.path(), &settings);
+        assert!(result.is_some());
+        let (repo_id, _) = result.unwrap();
+        assert_eq!(repo_id, "repo_x");
+        let stored = crate::persistence::lark_repo_bindings::get_binding(tmp.path(), "repo_x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.app_token, "bascn");
+        assert_eq!(stored.table_id, "tbl");
+        let new: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.path().join("lark_settings.json")).unwrap())
+                .unwrap();
+        assert!(new.get("app_token").is_none());
     }
 }
