@@ -4,6 +4,25 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
 
+// ── Per-repo provider lookup ─────────────────────────────────────────
+
+/// Return the provider registered for `repo_id`, or fall back to a
+/// fresh LocalProvider rooted at `data_dir` when the map has no entry.
+/// The read guard is dropped before returning so callers can immediately
+/// call async methods on the returned provider without holding the lock.
+async fn provider_for_repo(
+    handle: &crate::state::TaskProviderHandle,
+    data_dir: &std::path::Path,
+    repo_id: &str,
+) -> Arc<dyn crate::task_provider::TaskProvider> {
+    let guard = handle.read().await;
+    if let Some(p) = guard.get(repo_id) {
+        return p.clone();
+    }
+    drop(guard);
+    crate::state::make_default_local_provider(data_dir)
+}
+
 // ── Structs ──────────────────────────────────────────────────────────
 
 #[derive(serde::Deserialize, Debug)]
@@ -25,8 +44,8 @@ pub async fn add_task(
     state: State<'_, Arc<Mutex<AppState>>>,
     provider_handle: State<'_, crate::state::TaskProviderHandle>,
 ) -> std::result::Result<Task, String> {
-    let _ = app; // data_dir no longer needed — provider owns persistence
-    let provider = provider_handle.read().await.clone();
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let provider = provider_for_repo(provider_handle.inner(), &data_dir, &repo_id).await;
     add_task_inner(
         repo_id,
         title,
@@ -58,8 +77,18 @@ pub async fn update_task(
     state: State<'_, Arc<Mutex<AppState>>>,
     provider_handle: State<'_, crate::state::TaskProviderHandle>,
 ) -> std::result::Result<Task, String> {
-    let _ = app; // data_dir no longer needed — provider owns persistence
-    let provider = provider_handle.read().await.clone();
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    // Resolve repo_id from the in-memory mirror so we can pick the right provider.
+    let repo_id = {
+        let st = state
+            .lock()
+            .map_err(|e| format!("AppState lock poisoned: {e}"))?;
+        st.tasks
+            .get(&task_id)
+            .map(|t| t.repo_id.clone())
+            .unwrap_or_default()
+    };
+    let provider = provider_for_repo(provider_handle.inner(), &data_dir, &repo_id).await;
     update_task_inner(task_id, patch, provider, state.inner().clone())
         .await
         .map_err(|e| {
@@ -82,7 +111,17 @@ pub async fn move_task(
     // persistence path (worktree dir + workspaces.json). The task
     // mutation itself goes through the provider.
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let provider = provider_handle.read().await.clone();
+    // Resolve repo_id from the in-memory mirror so we can pick the right provider.
+    let repo_id = {
+        let st = state
+            .lock()
+            .map_err(|e| format!("AppState lock poisoned: {e}"))?;
+        st.tasks
+            .get(&task_id)
+            .map(|t| t.repo_id.clone())
+            .unwrap_or_default()
+    };
+    let provider = provider_for_repo(provider_handle.inner(), &data_dir, &repo_id).await;
     move_task_inner(
         task_id,
         column,
@@ -106,8 +145,18 @@ pub async fn remove_task(
     state: State<'_, Arc<Mutex<AppState>>>,
     provider_handle: State<'_, crate::state::TaskProviderHandle>,
 ) -> std::result::Result<(), String> {
-    let _ = app; // data_dir no longer needed — provider owns persistence
-    let provider = provider_handle.read().await.clone();
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    // Resolve repo_id from the in-memory mirror so we can pick the right provider.
+    let repo_id = {
+        let st = state
+            .lock()
+            .map_err(|e| format!("AppState lock poisoned: {e}"))?;
+        st.tasks
+            .get(&task_id)
+            .map(|t| t.repo_id.clone())
+            .unwrap_or_default()
+    };
+    let provider = provider_for_repo(provider_handle.inner(), &data_dir, &repo_id).await;
     remove_task_inner(task_id, Some(force), provider, state.inner().clone())
         .await
         .map_err(|e| {
@@ -184,19 +233,29 @@ pub(crate) fn list_tasks_inner(repo_id: String, state: Arc<Mutex<AppState>>) -> 
 #[tauri::command]
 pub async fn refresh_tasks(
     repo_id: Option<String>,
+    app: tauri::AppHandle,
     state: State<'_, Arc<Mutex<AppState>>>,
     provider_handle: State<'_, crate::state::TaskProviderHandle>,
 ) -> std::result::Result<Vec<Task>, String> {
-    refresh_tasks_inner(
-        repo_id,
-        state.inner().clone(),
-        provider_handle.read().await.clone(),
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "refresh_tasks failed");
-        e.to_string()
-    })
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    // Resolve which repo to look up: use the provided repo_id, or fall
+    // back to the selected/first repo from AppState when None.
+    let lookup_repo_id: String = match &repo_id {
+        Some(r) => r.clone(),
+        None => {
+            let st = state
+                .lock()
+                .map_err(|e| format!("AppState lock poisoned: {e}"))?;
+            resolve_default_repo(&st).unwrap_or_default()
+        }
+    };
+    let provider = provider_for_repo(provider_handle.inner(), &data_dir, &lookup_repo_id).await;
+    refresh_tasks_inner(repo_id, state.inner().clone(), provider)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "refresh_tasks failed");
+            e.to_string()
+        })
 }
 
 pub(crate) async fn refresh_tasks_inner(
@@ -401,6 +460,14 @@ pub(crate) async fn set_task_source_inner(
     state: Arc<Mutex<AppState>>,
     provider_handle: crate::state::TaskProviderHandle,
 ) -> Result<()> {
+    // Resolve the default repo_id so we know which map entry to update.
+    let repo_id = {
+        let st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        resolve_default_repo(&st).unwrap_or_default()
+    };
+
     // Build the new provider before we acquire the write lock, so a
     // failure (e.g. missing Lark credentials) doesn't leave us
     // partially swapped.
@@ -439,13 +506,15 @@ pub(crate) async fn set_task_source_inner(
         crate::persistence::settings::save_settings(&data_dir, &st.settings)?;
     }
 
-    // Swap provider.
-    {
+    // Insert provider for this repo into the per-repo map.
+    // For Local source with no repo yet (empty repo_id), skip the insert
+    // so provider_for_repo's fallback path handles it instead.
+    if !repo_id.is_empty() {
         let mut guard = provider_handle.write().await;
-        *guard = new_provider.clone();
+        guard.insert(repo_id.clone(), new_provider.clone());
     }
 
-    // Re-hydrate AppState.tasks.
+    // Re-hydrate AppState.tasks from the new provider.
     let tasks = new_provider.list_tasks(None).await?;
     {
         let mut st = state
@@ -1395,10 +1464,8 @@ mod tests {
     async fn set_task_source_lark_rejects_when_credentials_missing() {
         let tmp = tempdir().unwrap();
         let state = make_state();
-        let provider_handle = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(
-            crate::task_provider::local::LocalProvider::new(tmp.path().to_path_buf()),
-        )
-            as std::sync::Arc<dyn crate::task_provider::TaskProvider>));
+        let provider_handle: crate::state::TaskProviderHandle =
+            std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         let err = set_task_source_inner(
             crate::state::TaskSource::Lark,
             tmp.path().to_path_buf(),

@@ -212,12 +212,28 @@ pub struct AgentHandle {
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Tauri-managed handle to the active task provider. Lives separately
+/// Tauri-managed handle to the per-repo task providers. Lives separately
 /// from AppState so async provider calls don't hold the AppState lock.
-/// Inner Arc is swap-able via write lock when the user changes the
-/// task source in Settings.
-pub type TaskProviderHandle =
-    std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<dyn crate::task_provider::TaskProvider>>>;
+/// Keyed by repo_id; entries are inserted when a binding is activated
+/// (Task 10). Repos without an entry fall back to LocalProvider at
+/// call sites via `provider_for_repo`.
+pub type RepoId = String;
+
+pub type TaskProviderHandle = std::sync::Arc<
+    tokio::sync::RwLock<
+        std::collections::HashMap<RepoId, std::sync::Arc<dyn crate::task_provider::TaskProvider>>,
+    >,
+>;
+
+/// Build a LocalProvider for `data_dir`. Used as the fallback when a
+/// repo has no explicit entry in `TaskProviderHandle`.
+pub fn make_default_local_provider(
+    data_dir: &std::path::Path,
+) -> std::sync::Arc<dyn crate::task_provider::TaskProvider> {
+    std::sync::Arc::new(crate::task_provider::local::LocalProvider::new(
+        data_dir.to_path_buf(),
+    ))
+}
 
 #[derive(Default, Debug)]
 pub struct AppState {

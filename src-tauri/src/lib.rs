@@ -10,48 +10,6 @@ pub mod platform;
 pub mod state;
 pub mod task_provider;
 
-fn build_initial_provider(
-    settings: &crate::state::AppSettings,
-    data_dir: &std::path::Path,
-) -> std::sync::Arc<dyn crate::task_provider::TaskProvider> {
-    match settings.task_source {
-        crate::state::TaskSource::Local => std::sync::Arc::new(
-            crate::task_provider::local::LocalProvider::new(data_dir.to_path_buf()),
-        ),
-        crate::state::TaskSource::Lark => {
-            // Try to construct LarkProvider; fall back to LocalProvider
-            // if credentials are missing. The frontend banner will nudge
-            // the user to configure Lark.
-            let store = crate::commands::lark_auth::KeyringStore;
-            match crate::commands::lark_auth::load_lark_config_inner(data_dir, &store) {
-                Ok(cfg) => {
-                    let app_token = cfg.app_token.clone();
-                    let table_id = cfg.table_id.clone();
-                    let client =
-                        std::sync::Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
-                    // FIXME(phase-3a-3 task-10): replace placeholder mappings with per-repo binding lookup.
-                    std::sync::Arc::new(crate::task_provider::lark::LarkProvider::new(
-                        client,
-                        app_token,
-                        table_id,
-                        crate::state::FieldMapping::default(),
-                        crate::state::StatusValueMapping::default(),
-                    ))
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "task_source=lark but credentials missing; falling back to LocalProvider"
-                    );
-                    std::sync::Arc::new(crate::task_provider::local::LocalProvider::new(
-                        data_dir.to_path_buf(),
-                    ))
-                }
-            }
-        }
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -71,10 +29,6 @@ pub fn run() {
             let tasks = crate::persistence::tasks::load_tasks(&data_dir)?;
             let settings = crate::persistence::settings::load_settings(&data_dir)?;
 
-            // Clone settings before it moves into AppState so we can pass it
-            // to build_initial_provider below.
-            let settings_for_provider = settings.clone();
-
             let state = crate::state::AppState {
                 repos,
                 workspaces,
@@ -86,25 +40,26 @@ pub fn run() {
 
             app.manage(std::sync::Arc::new(std::sync::Mutex::new(state)));
 
-            // Phase 3a-2: pick the right provider based on task_source setting.
-            // provider_handle is separate from AppState so async trait calls
-            // don't hold the AppState lock.
-            let provider: std::sync::Arc<dyn crate::task_provider::TaskProvider> =
-                build_initial_provider(&settings_for_provider, &data_dir);
+            // Phase 3a-3 Task 6: TaskProviderHandle is now a per-repo HashMap.
+            // Task 10 will populate it from persisted bindings; start empty.
+            // provider_for_repo() falls back to LocalProvider for repos with
+            // no entry, so existing local-only workflows continue to work.
             let provider_handle: crate::state::TaskProviderHandle =
-                std::sync::Arc::new(tokio::sync::RwLock::new(provider.clone()));
+                std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
             app.manage(provider_handle.clone());
 
-            // Initial hydrate: pull tasks from provider and populate AppState mirror.
-            // Done as a spawned async task so setup() doesn't block on the network
-            // when Lark is the source.
+            // Initial hydrate: pull tasks from LocalProvider and populate
+            // AppState mirror. Spawned so setup() returns immediately.
+            // Task 10 will replace this with binding-aware hydration.
             {
                 let state_arc = app
                     .try_state::<std::sync::Arc<std::sync::Mutex<crate::state::AppState>>>()
                     .expect("AppState managed")
                     .inner()
                     .clone();
+                let data_dir_clone = data_dir.clone();
                 tauri::async_runtime::spawn(async move {
+                    let provider = crate::state::make_default_local_provider(&data_dir_clone);
                     match provider.list_tasks(None).await {
                         Ok(tasks) => {
                             if let Ok(mut st) = state_arc.lock() {
