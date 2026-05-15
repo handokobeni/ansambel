@@ -59,9 +59,11 @@ pub fn resolve_description(record: &BitableRecord, mapping: &FieldMapping) -> St
 /// Resolves the kanban column for a record using the mapped status
 /// field + value mapping. Layered fallback:
 ///   1. If status field unmapped → `default_column`
-///   2. If status value present and in `entries` → that column
-///   3. If value not in entries → try fuzzy parser
-///   4. If fuzzy returns None → `default_column`
+///   2. Single-select object `{id, text}`: look up `id` in `entries`;
+///      if absent, run `text` through the fuzzy parser
+///   3. Plain text value: look up lowercased text in `entries`; if
+///      absent, run raw text through the fuzzy parser
+///   4. Any fuzzy miss → `default_column`
 pub fn resolve_status(
     record: &BitableRecord,
     mapping: &FieldMapping,
@@ -114,8 +116,11 @@ pub fn resolve_order(record: &BitableRecord, mapping: &FieldMapping) -> i32 {
             return n as i32;
         }
     }
-    let created = record.extra_i64("created_time").unwrap_or(0);
-    -(created / 1000) as i32
+    let created_secs = record.extra_i64("created_time").unwrap_or(0) / 1000;
+    // Saturate to i32 range. Post-2038 timestamps would overflow; we'd rather
+    // collapse to a constant than wrap and produce nonsense sort order.
+    let clamped = created_secs.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    -clamped
 }
 
 #[cfg(test)]
@@ -188,7 +193,7 @@ mod tests {
         assert_eq!(resolve_description(&r, &m), "hello");
     }
 
-    fn status_mapping(_values: StatusValueMapping) -> FieldMapping {
+    fn status_mapping() -> FieldMapping {
         FieldMapping {
             title: FieldRef {
                 field_id: "fld_t".into(),
@@ -225,7 +230,7 @@ mod tests {
             entries,
             default_column: KanbanColumn::Todo,
         };
-        let m = status_mapping(v.clone());
+        let m = status_mapping();
         assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::Done);
     }
 
@@ -233,7 +238,7 @@ mod tests {
     fn resolve_status_falls_back_to_fuzzy_for_text_value() {
         let r = rec("r1", serde_json::json!({"Task Status": "In Progress"}));
         let v = StatusValueMapping::default();
-        let m = status_mapping(v.clone());
+        let m = status_mapping();
         assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::InProgress);
     }
 
@@ -244,8 +249,24 @@ mod tests {
             default_column: KanbanColumn::Review,
             ..Default::default()
         };
-        let m = status_mapping(v.clone());
+        let m = status_mapping();
         assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::Review);
+    }
+
+    #[test]
+    fn resolve_status_falls_through_to_fuzzy_when_option_id_not_in_entries() {
+        let r = rec(
+            "r1",
+            serde_json::json!({"Task Status": {"id": "opt_unknown", "text": "Done"}}),
+        );
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("opt_other".into(), KanbanColumn::Todo);
+        let v = StatusValueMapping {
+            entries,
+            default_column: KanbanColumn::Todo,
+        };
+        let m = status_mapping();
+        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::Done);
     }
 
     #[test]
@@ -255,7 +276,7 @@ mod tests {
             default_column: KanbanColumn::InProgress,
             ..Default::default()
         };
-        let m = status_mapping(v.clone());
+        let m = status_mapping();
         assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::InProgress);
     }
 
@@ -280,5 +301,12 @@ mod tests {
         .unwrap();
         let m = title_mapping("title");
         assert_eq!(resolve_order(&r, &m), -1700000000);
+    }
+
+    #[test]
+    fn resolve_order_returns_zero_when_no_mapping_and_no_created_time() {
+        let r = rec("r1", serde_json::json!({"title": "x"}));
+        let m = title_mapping("title");
+        assert_eq!(resolve_order(&r, &m), 0);
     }
 }

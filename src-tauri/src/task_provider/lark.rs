@@ -111,7 +111,7 @@ pub(super) fn find_kanban_value(
 ///
 /// Returns `None` for inputs that don't match any pattern; the caller
 /// surfaces the raw value in the error so the user can debug.
-pub fn parse_kanban_column(value: &str) -> Option<KanbanColumn> {
+pub(crate) fn parse_kanban_column(value: &str) -> Option<KanbanColumn> {
     match value {
         "todo" => return Some(KanbanColumn::Todo),
         "in_progress" => return Some(KanbanColumn::InProgress),
