@@ -212,6 +212,21 @@ describe('TurnStatusBar', () => {
     expect(container.querySelector('[data-testid="turn-status-bar"]')).toBeNull();
   });
 
+  it('re-arms the interval when workspaceId changes (covers line 27 re-arm branch)', async () => {
+    vi.setSystemTime(new Date('2026-04-30T12:00:00Z').getTime());
+    messages.apply({ type: 'status', status: 'running' }, 'ws_switch1');
+    messages.apply({ type: 'status', status: 'running' }, 'ws_switch2');
+    const { rerender, container } = render(TurnStatusBar, {
+      props: { workspaceId: 'ws_switch1' },
+    });
+    // interval is now set up for ws_switch1
+    // Rerender with a different workspaceId — triggers $effect re-run, which
+    // hits the `if (intervalId !== undefined) clearInterval(intervalId)` branch
+    await rerender({ workspaceId: 'ws_switch2' });
+    // Component still alive, new workspace's turn shown
+    expect(container.querySelector('[data-testid="turn-status-bar"]')).toBeTruthy();
+  });
+
   it('rotates the verb every 5 seconds', async () => {
     vi.setSystemTime(new Date('2026-04-30T12:00:00Z').getTime());
     messages.apply({ type: 'status', status: 'running' }, 'ws_verb');

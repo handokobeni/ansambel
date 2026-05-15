@@ -671,4 +671,14 @@ describe('Sidebar repo context menu', () => {
     // The dialog shows the "binding-empty" state (no binding configured)
     expect(screen.getByTestId('binding-empty')).toBeInTheDocument();
   });
+
+  it('closing RepoSettingsDialog via close button hides it', async () => {
+    render(Sidebar);
+    const repoRow = screen.getByTestId('repo-row-repo_abc123');
+    await fireEvent.contextMenu(repoRow);
+    expect(screen.getByTestId('binding-empty')).toBeInTheDocument();
+    // Close the dialog via the X button — calls closeRepoSettings
+    await fireEvent.click(screen.getByTestId('repo-settings-close'));
+    expect(screen.queryByTestId('binding-empty')).toBeNull();
+  });
 });

@@ -199,4 +199,49 @@ describe('LarkGlobalSettings', () => {
     await flush();
     expect(screen.getByTestId('lark-banner').textContent).toContain('Failed to load status');
   });
+
+  it('Save error with a string-type rejection shows the string in banner', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_lark_status') return Promise.resolve(statusUnconfigured);
+      if (cmd === 'set_lark_credentials') return Promise.reject('plain string error');
+      return Promise.resolve(undefined);
+    });
+    render(LarkGlobalSettings);
+    await flush();
+    await fireEvent.input(screen.getByLabelText(/app id/i), { target: { value: 'cli_x' } });
+    await fireEvent.input(screen.getByLabelText(/app secret/i), { target: { value: 'shh' } });
+    await fireEvent.click(screen.getByTestId('lark-save'));
+    await flush();
+    expect(screen.getByTestId('lark-banner').textContent).toContain('plain string error');
+  });
+
+  it('Load error with circular-reference non-stringifiable rejection falls back to "unknown error"', async () => {
+    // Create a circular reference that JSON.stringify cannot serialize
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_lark_status') return Promise.reject(circular);
+      return Promise.resolve(undefined);
+    });
+    render(LarkGlobalSettings);
+    await flush();
+    // The describe() function's JSON.stringify catch path fires → 'unknown error'
+    // The banner will contain "Failed to load status: unknown error"
+    expect(screen.getByTestId('lark-banner').textContent).toContain('Failed to load status');
+    expect(screen.getByTestId('lark-banner').textContent).toContain('unknown error');
+  });
+
+  it('form submit while canSave is false (guard branch) is a no-op', async () => {
+    mockGetStatus(statusUnconfigured);
+    const { container } = render(LarkGlobalSettings);
+    await flush();
+    // canSave is false — fields are empty. Directly submit the form to hit the !canSave guard.
+    const form = container.querySelector('form');
+    if (form) {
+      await fireEvent.submit(form);
+    }
+    await flush();
+    // No set_lark_credentials invoked
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith('set_lark_credentials', expect.anything());
+  });
 });

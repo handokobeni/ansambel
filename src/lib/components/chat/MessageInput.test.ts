@@ -265,6 +265,22 @@ describe('MessageInput', () => {
       expect(chips).toHaveLength(2);
     });
 
+    it('basename with no directory slash returns path as-is (covers i<0 branch)', async () => {
+      // A bare filename with no '/' or '\\' means basename() returns it unchanged.
+      // 'png' (just the extension) is recognized as image/png and gets a chip.
+      vi.mocked(open).mockResolvedValue('png');
+      const onSend = vi.fn();
+      const { getByTestId } = render(MessageInput, { props: { onSend } });
+      await fireEvent.click(getByTestId('attach-button'));
+      const chip = await waitFor(() => {
+        const c = getByTestId('attachment-chip');
+        if (!c) throw new Error('chip not yet rendered');
+        return c;
+      });
+      // filename = basename('png') = 'png' (no slash → returns as-is)
+      expect(chip.textContent).toContain('png');
+    });
+
     it('chip falls back to sourcePath when filename is null', async () => {
       // The dialog plugin returns the picker path, but our own attachment
       // builder only sets filename when basename() succeeds. Cover the

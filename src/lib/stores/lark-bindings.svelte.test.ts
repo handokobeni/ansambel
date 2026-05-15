@@ -84,4 +84,31 @@ describe('LarkBindingsStore', () => {
     expect(s.has('repo_x')).toBe(true);
     expect(addToast).toHaveBeenCalled();
   });
+
+  it('setBinding reverts to previous binding (not just deletes) when set fails with existing binding', async () => {
+    vi.mocked(api.lark.setRepoBinding).mockRejectedValueOnce(new Error('IPC fail'));
+    const s = new LarkBindingsStore();
+    const original = makeBinding({ app_token: 'original_token' });
+    const updated = makeBinding({ app_token: 'new_token' });
+    s.bindings.set('repo_x', original);
+    await s.setBinding('repo_x', updated).catch(() => {});
+    // Should have reverted to original, not deleted
+    expect(s.has('repo_x')).toBe(true);
+    expect(s.get('repo_x')?.app_token).toBe('original_token');
+  });
+
+  it('deleteBinding toast uses String(err) when error is not an Error instance', async () => {
+    vi.mocked(api.lark.deleteRepoBinding).mockRejectedValueOnce('string error value');
+    const s = new LarkBindingsStore();
+    s.bindings.set('repo_x', makeBinding());
+    await s.deleteBinding('repo_x').catch(() => {});
+    expect(addToast).toHaveBeenCalledWith(expect.stringContaining('string error value'), 'error');
+  });
+
+  it('setBinding toast uses String(err) when error is not an Error instance', async () => {
+    vi.mocked(api.lark.setRepoBinding).mockRejectedValueOnce('plain string fail');
+    const s = new LarkBindingsStore();
+    await s.setBinding('repo_x', makeBinding()).catch(() => {});
+    expect(addToast).toHaveBeenCalledWith(expect.stringContaining('plain string fail'), 'error');
+  });
 });

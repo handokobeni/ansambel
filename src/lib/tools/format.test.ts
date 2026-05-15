@@ -163,4 +163,17 @@ describe('formatToolUse', () => {
     expect(out.label).toBe('TodoWrite');
     expect(out.detail).toBeUndefined();
   });
+
+  it('formats Read with a bare filename (no directory slash) — covers basename i<0 branch', () => {
+    // When file_path has no '/', basename returns the path as-is
+    const out = formatToolUse(tu('Read', { file_path: 'myfile.ts' }));
+    expect(out.detail).toBe('myfile.ts');
+  });
+
+  it('formats Read with non-object input returns label only — covers str/num non-object guards', () => {
+    // When input is not an object, str() and num() return undefined
+    const out = formatToolUse(tu('Read', 'not an object'));
+    expect(out.label).toBe('Read');
+    expect(out.detail).toBeUndefined();
+  });
 });
