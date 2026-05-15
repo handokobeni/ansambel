@@ -412,7 +412,7 @@ pub struct BitableField {
 
 /// One option of a Bitable single-select field. Lives inside
 /// `BitableField.property.options`.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BitableOption {
     pub id: String,
     pub name: String,

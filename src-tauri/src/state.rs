@@ -52,12 +52,8 @@ pub struct FieldMapping {
 pub struct StatusValueMapping {
     #[serde(default)]
     pub entries: std::collections::HashMap<String, KanbanColumn>,
-    #[serde(default = "default_kanban_column")]
+    #[serde(default)]
     pub default_column: KanbanColumn,
-}
-
-fn default_kanban_column() -> KanbanColumn {
-    KanbanColumn::Todo
 }
 
 impl Default for StatusValueMapping {
