@@ -78,6 +78,20 @@ pub struct BitableBinding {
     pub updated_at: u64,
 }
 
+/// What `BitableSchemaDetector::propose_mapping` returns to the wizard.
+/// Carries the raw field list (for dropdown population), an auto-detected
+/// initial guess at the mapping, and (when status is single-select) the
+/// option list with a fuzzy-parsed initial value mapping.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ProposedMapping {
+    pub fields: Vec<crate::platform::lark_client::BitableField>,
+    pub suggested: FieldMapping,
+    #[serde(default)]
+    pub status_options: Option<Vec<crate::platform::lark_client::BitableOption>>,
+    #[serde(default)]
+    pub suggested_status_values: StatusValueMapping,
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskSource {

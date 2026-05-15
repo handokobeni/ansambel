@@ -123,6 +123,98 @@ pub fn resolve_order(record: &BitableRecord, mapping: &FieldMapping) -> i32 {
     -clamped
 }
 
+use crate::platform::lark_client::{BitableField, BitableOption, LarkClient};
+use crate::state::{FieldRef, ProposedMapping};
+use std::sync::Arc;
+
+pub struct BitableSchemaDetector {
+    client: Arc<LarkClient>,
+}
+
+impl BitableSchemaDetector {
+    pub fn new(client: Arc<LarkClient>) -> Self {
+        Self { client }
+    }
+
+    /// Fetches Bitable fields and proposes a mapping using deterministic
+    /// auto-detection rules:
+    ///   - title: the `is_primary: true` field
+    ///   - status: first field whose normalised name contains
+    ///     "status", "stage", "phase", or "kanban" (alphabetic order)
+    ///   - description / order: left as None (user opts in)
+    pub async fn propose_mapping(
+        &self,
+        app_token: &str,
+        table_id: &str,
+    ) -> crate::error::Result<ProposedMapping> {
+        let fields = self.client.bitable_list_fields(app_token, table_id).await?;
+        let primary = fields
+            .iter()
+            .find(|f| f.is_primary)
+            .ok_or_else(|| {
+                crate::error::AppError::Lark(format!(
+                    "Bitable {app_token}/{table_id} has no primary field"
+                ))
+            })?
+            .clone();
+        let suggested_title = FieldRef {
+            field_id: primary.field_id.clone(),
+            field_name: primary.field_name.clone(),
+        };
+        let mut status_candidates: Vec<&BitableField> = fields
+            .iter()
+            .filter(|f| {
+                let normalised: String = f
+                    .field_name
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .flat_map(char::to_lowercase)
+                    .collect();
+                ["status", "stage", "phase", "kanban"]
+                    .iter()
+                    .any(|kw| normalised.contains(kw))
+            })
+            .collect();
+        status_candidates.sort_by(|a, b| a.field_name.cmp(&b.field_name));
+        let status_field = status_candidates.first().cloned().cloned();
+
+        let (status_options, suggested_status_values) = if let Some(sf) = &status_field {
+            let opts: Vec<BitableOption> = sf.options();
+            let mut entries = std::collections::HashMap::new();
+            for opt in &opts {
+                if let Some(col) = crate::task_provider::lark::parse_kanban_column(&opt.name) {
+                    entries.insert(opt.id.clone(), col);
+                }
+            }
+            (
+                Some(opts),
+                crate::state::StatusValueMapping {
+                    entries,
+                    default_column: KanbanColumn::Todo,
+                },
+            )
+        } else {
+            (None, crate::state::StatusValueMapping::default())
+        };
+
+        let suggested = FieldMapping {
+            title: suggested_title,
+            description: None,
+            status: status_field.map(|f| FieldRef {
+                field_id: f.field_id.clone(),
+                field_name: f.field_name.clone(),
+            }),
+            order: None,
+        };
+        Ok(ProposedMapping {
+            fields,
+            suggested,
+            status_options,
+            suggested_status_values,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,5 +400,158 @@ mod tests {
         let r = rec("r1", serde_json::json!({"title": "x"}));
         let m = title_mapping("title");
         assert_eq!(resolve_order(&r, &m), 0);
+    }
+
+    // ── BitableSchemaDetector tests ──────────────────────────────────────────
+
+    use crate::platform::lark_client::LarkConfig;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn mount_token(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "tenant_access_token": "t_xyz",
+                "expire": 7200
+            })))
+            .mount(server)
+            .await;
+    }
+
+    fn detector(uri: &str) -> BitableSchemaDetector {
+        BitableSchemaDetector::new(Arc::new(LarkClient::new(LarkConfig {
+            app_id: "cli_t".into(),
+            app_secret: "s".into(),
+            app_token: "bascntest".into(),
+            table_id: "tbltest".into(),
+            base_url: uri.into(),
+        })))
+    }
+
+    async fn mount_fields(server: &MockServer, fields: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/fields",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "items": fields }
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn propose_picks_primary_as_title() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_fields(
+            &server,
+            serde_json::json!([
+                {"field_id": "fld_pri", "field_name": "Task name", "type": 1, "is_primary": true},
+                {"field_id": "fld_other", "field_name": "Notes", "type": 1, "is_primary": false}
+            ]),
+        )
+        .await;
+        let p = detector(&server.uri())
+            .propose_mapping("bascntest", "tbltest")
+            .await
+            .unwrap();
+        assert_eq!(p.suggested.title.field_id, "fld_pri");
+        assert_eq!(p.suggested.title.field_name, "Task name");
+    }
+
+    #[tokio::test]
+    async fn propose_detects_status_field_by_name_keyword() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_fields(
+            &server,
+            serde_json::json!([
+                {"field_id": "fld_pri", "field_name": "Task name", "type": 1, "is_primary": true},
+                {"field_id": "fld_s", "field_name": "Task Status", "type": 3, "is_primary": false,
+                 "property": {"options": [
+                     {"id": "opt_a", "name": "To Do"},
+                     {"id": "opt_b", "name": "Done"}
+                 ]}}
+            ]),
+        )
+        .await;
+        let p = detector(&server.uri())
+            .propose_mapping("bascntest", "tbltest")
+            .await
+            .unwrap();
+        let status = p.suggested.status.expect("status should be detected");
+        assert_eq!(status.field_id, "fld_s");
+        let opts = p.status_options.unwrap();
+        assert_eq!(opts.len(), 2);
+        assert_eq!(
+            p.suggested_status_values.entries.get("opt_a"),
+            Some(&KanbanColumn::Todo)
+        );
+        assert_eq!(
+            p.suggested_status_values.entries.get("opt_b"),
+            Some(&KanbanColumn::Done)
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_returns_none_status_when_no_match() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_fields(
+            &server,
+            serde_json::json!([
+                {"field_id": "fld_pri", "field_name": "Task name", "type": 1, "is_primary": true},
+                {"field_id": "fld_n", "field_name": "Notes", "type": 1, "is_primary": false}
+            ]),
+        )
+        .await;
+        let p = detector(&server.uri())
+            .propose_mapping("bascntest", "tbltest")
+            .await
+            .unwrap();
+        assert!(p.suggested.status.is_none());
+        assert!(p.status_options.is_none());
+    }
+
+    #[tokio::test]
+    async fn propose_picks_alphabetically_first_when_multiple_status_fields() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_fields(
+            &server,
+            serde_json::json!([
+                {"field_id": "fld_pri", "field_name": "Task name", "type": 1, "is_primary": true},
+                {"field_id": "fld_sprint", "field_name": "Sprint Stage", "type": 3, "is_primary": false},
+                {"field_id": "fld_status", "field_name": "Task Status", "type": 3, "is_primary": false}
+            ]),
+        )
+        .await;
+        let p = detector(&server.uri())
+            .propose_mapping("bascntest", "tbltest")
+            .await
+            .unwrap();
+        assert_eq!(p.suggested.status.unwrap().field_id, "fld_sprint");
+    }
+
+    #[tokio::test]
+    async fn propose_errors_when_no_primary() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_fields(
+            &server,
+            serde_json::json!([
+                {"field_id": "fld_x", "field_name": "Notes", "type": 1, "is_primary": false}
+            ]),
+        )
+        .await;
+        let err = detector(&server.uri())
+            .propose_mapping("bascntest", "tbltest")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no primary field"));
     }
 }
