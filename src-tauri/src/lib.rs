@@ -112,8 +112,6 @@ pub fn run() {
             crate::commands::task::move_task,
             crate::commands::task::remove_task,
             crate::commands::task::refresh_tasks,
-            crate::commands::task::get_task_source,
-            crate::commands::task::set_task_source,
             crate::commands::agent::spawn_agent,
             crate::commands::agent::send_message,
             crate::commands::agent::stop_agent,
