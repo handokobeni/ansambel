@@ -6,7 +6,6 @@
   import { addToast } from '$lib/stores/toasts.svelte';
   import { tooltip } from '$lib/actions';
   import ResizeHandle from './ResizeHandle.svelte';
-  import RepoSettingsDialog from '$lib/components/repo/RepoSettingsDialog.svelte';
   import type { KanbanColumn, Workspace, WorkspaceStatus } from '$lib/types';
 
   const selectedRepo = $derived(repos.getSelected());
@@ -17,17 +16,6 @@
   let formDescription = $state('');
   let formBranch = $state('');
   let formSubmitting = $state(false);
-
-  let settingsRepoId = $state<string | null>(null);
-  let settingsRepoName = $state<string>('');
-
-  function openRepoSettings(repoId: string, repoName: string) {
-    settingsRepoId = repoId;
-    settingsRepoName = repoName;
-  }
-  function closeRepoSettings() {
-    settingsRepoId = null;
-  }
 
   // ── Width / resize ─────────────────────────────────────────────────
   const SIDEBAR_MIN = 180;
@@ -165,17 +153,7 @@
     data-sidebar
     data-sidebar-width={width}
   >
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="flex items-center justify-between px-3 py-2 border-b border-[var(--border)]"
-      data-testid={selectedRepo ? `repo-row-${selectedRepo.id}` : undefined}
-      oncontextmenu={selectedRepo
-        ? (e) => {
-            e.preventDefault();
-            openRepoSettings(selectedRepo.id, selectedRepo.name);
-          }
-        : undefined}
-    >
+    <div class="flex items-center justify-between px-3 py-2 border-b border-[var(--border)]">
       <span class="text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">
         Workspaces
       </span>
@@ -326,12 +304,3 @@
   </aside>
   <ResizeHandle direction="horizontal" onResize={handleResize} onResizeEnd={handleResizeEnd} />
 </div>
-
-{#if settingsRepoId}
-  <RepoSettingsDialog
-    repoId={settingsRepoId}
-    repoName={settingsRepoName}
-    open={true}
-    onClose={closeRepoSettings}
-  />
-{/if}

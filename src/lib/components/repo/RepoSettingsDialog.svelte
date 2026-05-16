@@ -62,7 +62,7 @@
       role="dialog"
       aria-modal="true"
       tabindex="-1"
-      class="w-[560px] max-w-[90vw] bg-[var(--bg-card)] border border-[var(--border-light)] rounded-md"
+      class="w-[560px] max-w-[90vw] rounded-lg bg-[var(--bg-card)] border border-[var(--border-light)] shadow-2xl text-[var(--text-primary)]"
       onclick={(e) => e.stopPropagation()}
     >
       <header

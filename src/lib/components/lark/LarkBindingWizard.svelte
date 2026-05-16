@@ -23,8 +23,13 @@
   } = $props();
 
   type Step = 1 | 2 | 3;
+  // Parent re-mounts wizard when `existing` changes (via {#if editingBinding}),
+  // so capturing the initial value is intentional here.
+  // svelte-ignore state_referenced_locally
   let step = $state<Step>(existing ? 2 : 1);
+  // svelte-ignore state_referenced_locally
   let appToken = $state(existing?.app_token ?? '');
+  // svelte-ignore state_referenced_locally
   let tableId = $state(existing?.table_id ?? '');
   let detecting = $state(false);
   let detectError = $state<string | null>(null);
@@ -111,18 +116,29 @@
       saving = false;
     }
   }
+
+  // Native <select> on Linux WebKit ignores bg/color rules without
+  // appearance:none. The arrow disappears with appearance:none too, so we
+  // paint a chevron via background-image and pad the right side.
+  const fieldClass =
+    'px-2 py-1.5 text-xs rounded bg-[var(--bg-base)] border border-[var(--border-light)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] disabled:opacity-50';
+  const selectClass =
+    fieldClass +
+    " appearance-none cursor-pointer pr-7 bg-no-repeat bg-[position:right_8px_center] bg-[length:10px_10px] bg-[image:url('data:image/svg+xml;utf8,<svg%20xmlns=%22http://www.w3.org/2000/svg%22%20viewBox=%220%200%2024%2024%22%20fill=%22none%22%20stroke=%22%23a3a3a3%22%20stroke-width=%222%22%20stroke-linecap=%22round%22%20stroke-linejoin=%22round%22><polyline%20points=%226%209%2012%2015%2018%209%22/></svg>')]";
 </script>
 
 <div class="lark-binding-wizard flex flex-col gap-3 p-3" data-testid="lark-binding-wizard">
   {#if step === 1}
     <section class="flex flex-col gap-3" data-testid="wizard-step-1">
-      <h3 class="text-xs font-semibold">Connect to Lark Bitable (1 of 3)</h3>
+      <h3 class="text-xs font-semibold text-[var(--text-primary)]">
+        Connect to Lark Bitable (1 of 3)
+      </h3>
       <label class="flex flex-col gap-1 text-[11px]">
         App Token
         <input
           type="text"
           bind:value={appToken}
-          class="px-2 py-1.5 text-xs rounded bg-[var(--bg-base)] border border-[var(--border-light)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] disabled:opacity-50"
+          class={fieldClass}
           data-testid="wizard-app-token"
           disabled={detecting}
         />
@@ -132,7 +148,7 @@
         <input
           type="text"
           bind:value={tableId}
-          class="px-2 py-1.5 text-xs rounded bg-[var(--bg-base)] border border-[var(--border-light)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] disabled:opacity-50"
+          class={fieldClass}
           data-testid="wizard-table-id"
           disabled={detecting}
         />
@@ -169,14 +185,10 @@
     </section>
   {:else if step === 2}
     <section class="flex flex-col gap-3" data-testid="wizard-step-2">
-      <h3 class="text-xs font-semibold">Map your fields (2 of 3)</h3>
+      <h3 class="text-xs font-semibold text-[var(--text-primary)]">Map your fields (2 of 3)</h3>
       <label class="flex flex-col gap-1 text-[11px]">
         Title* required
-        <select
-          bind:value={titleFieldId}
-          class="px-2 py-1.5 text-xs rounded bg-[var(--bg-base)] border border-[var(--border-light)] text-[var(--text-primary)] focus:outline-none"
-          data-testid="wizard-title-field"
-        >
+        <select bind:value={titleFieldId} class={selectClass} data-testid="wizard-title-field">
           {#each proposal?.fields ?? [] as f (f.field_id)}
             <option value={f.field_id}>{f.field_name}</option>
           {/each}
@@ -184,11 +196,7 @@
       </label>
       <label class="flex flex-col gap-1 text-[11px]">
         Description
-        <select
-          bind:value={descFieldId}
-          class="px-2 py-1.5 text-xs rounded bg-[var(--bg-base)] border border-[var(--border-light)] text-[var(--text-primary)] focus:outline-none"
-          data-testid="wizard-desc-field"
-        >
+        <select bind:value={descFieldId} class={selectClass} data-testid="wizard-desc-field">
           <option value="">(none)</option>
           {#each proposal?.fields ?? [] as f (f.field_id)}
             <option value={f.field_id}>{f.field_name}</option>
@@ -197,11 +205,7 @@
       </label>
       <label class="flex flex-col gap-1 text-[11px]">
         Status
-        <select
-          bind:value={statusFieldId}
-          class="px-2 py-1.5 text-xs rounded bg-[var(--bg-base)] border border-[var(--border-light)] text-[var(--text-primary)] focus:outline-none"
-          data-testid="wizard-status-field"
-        >
+        <select bind:value={statusFieldId} class={selectClass} data-testid="wizard-status-field">
           <option value="">(none — default Todo)</option>
           {#each proposal?.fields ?? [] as f (f.field_id)}
             <option value={f.field_id}>{f.field_name}</option>
@@ -210,11 +214,7 @@
       </label>
       <label class="flex flex-col gap-1 text-[11px]">
         Order
-        <select
-          bind:value={orderFieldId}
-          class="px-2 py-1.5 text-xs rounded bg-[var(--bg-base)] border border-[var(--border-light)] text-[var(--text-primary)] focus:outline-none"
-          data-testid="wizard-order-field"
-        >
+        <select bind:value={orderFieldId} class={selectClass} data-testid="wizard-order-field">
           <option value="">(none — sort by created time)</option>
           {#each proposal?.fields ?? [] as f (f.field_id)}
             <option value={f.field_id}>{f.field_name}</option>
@@ -240,13 +240,13 @@
     </section>
   {:else}
     <section class="flex flex-col gap-3" data-testid="wizard-step-3">
-      <h3 class="text-xs font-semibold">Map status options (3 of 3)</h3>
+      <h3 class="text-xs font-semibold text-[var(--text-primary)]">Map status options (3 of 3)</h3>
       {#each statusField?.property?.options ?? [] as opt (opt.id)}
         <label class="flex flex-col gap-1 text-[11px]">
           "{opt.name}"
           <select
             bind:value={valueMap[opt.id]}
-            class="px-2 py-1.5 text-xs rounded bg-[var(--bg-base)] border border-[var(--border-light)] text-[var(--text-primary)] focus:outline-none"
+            class={selectClass}
             data-testid={`wizard-option-${opt.id}`}
           >
             <option value="todo">Todo</option>
@@ -258,11 +258,7 @@
       {/each}
       <label class="flex flex-col gap-1 text-[11px]">
         Default for unmapped values
-        <select
-          bind:value={defaultColumn}
-          class="px-2 py-1.5 text-xs rounded bg-[var(--bg-base)] border border-[var(--border-light)] text-[var(--text-primary)] focus:outline-none"
-          data-testid="wizard-default-column"
-        >
+        <select bind:value={defaultColumn} class={selectClass} data-testid="wizard-default-column">
           <option value="todo">Todo</option>
           <option value="in_progress">In Progress</option>
           <option value="review">Review</option>
