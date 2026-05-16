@@ -477,4 +477,288 @@ mod migration_tests {
                 .unwrap();
         assert!(new.get("app_token").is_none());
     }
+
+    // Helper: write a legacy lark_settings.json with the Phase 3a-2 shape.
+    fn write_legacy_settings(dir: &std::path::Path, body: &str) {
+        std::fs::write(dir.join("lark_settings.json"), body).unwrap();
+    }
+
+    fn legacy_settings_default() -> &'static str {
+        r#"{"app_id":"cli_x","app_token":"bascn_xyz","table_id":"tbl_xyz","base_url":"https://open.larksuite.com"}"#
+    }
+
+    fn settings_with_repo(repo_id: &str) -> crate::state::AppSettings {
+        crate::state::AppSettings {
+            selected_repo_id: Some(repo_id.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn migration_stamps_placeholder_field_id_and_initial_timestamps() {
+        // The migrated binding must carry a `PENDING_RESOLVE` placeholder so
+        // the wizard can detect it on first open and prompt the user to
+        // re-detect against the real Bitable schema. `updated_at == 0` is
+        // the "needs refresh" sentinel, `created_at > 0` proves it was
+        // stamped at migration time.
+        let tmp = tempfile::tempdir().unwrap();
+        write_legacy_settings(tmp.path(), legacy_settings_default());
+        let settings = settings_with_repo("repo_x");
+
+        let (_, binding) = maybe_migrate_to_per_repo_binding(tmp.path(), &settings).unwrap();
+
+        assert_eq!(binding.field_mapping.title.field_id, "PENDING_RESOLVE");
+        assert_eq!(binding.field_mapping.title.field_name, "title");
+        assert!(binding.field_mapping.description.is_none());
+        assert!(binding.field_mapping.status.is_none());
+        assert!(binding.field_mapping.order.is_none());
+        assert_eq!(
+            binding.status_value_mapping,
+            crate::state::StatusValueMapping::default()
+        );
+        assert!(binding.created_at > 0, "created_at should be stamped");
+        assert_eq!(
+            binding.updated_at, 0,
+            "updated_at sentinel marks 'needs wizard refresh'"
+        );
+    }
+
+    #[test]
+    fn migration_rewrites_legacy_file_to_minimal_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_legacy_settings(tmp.path(), legacy_settings_default());
+        let settings = settings_with_repo("repo_x");
+
+        maybe_migrate_to_per_repo_binding(tmp.path(), &settings).unwrap();
+
+        let rewritten: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(tmp.path().join("lark_settings.json")).unwrap())
+                .unwrap();
+        // The rewritten file must keep only app_id + base_url. The
+        // binding-scoped fields move into lark_repo_bindings.json.
+        assert_eq!(
+            rewritten.get("app_id").and_then(|v| v.as_str()),
+            Some("cli_x")
+        );
+        assert_eq!(
+            rewritten.get("base_url").and_then(|v| v.as_str()),
+            Some("https://open.larksuite.com")
+        );
+        assert!(rewritten.get("app_token").is_none());
+        assert!(rewritten.get("table_id").is_none());
+    }
+
+    #[test]
+    fn migration_no_op_when_legacy_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let settings = settings_with_repo("repo_x");
+        assert!(maybe_migrate_to_per_repo_binding(tmp.path(), &settings).is_none());
+        // No legacy file → no binding file should be created.
+        assert!(!tmp.path().join("lark_repo_bindings.json").exists());
+    }
+
+    #[test]
+    fn migration_no_op_when_app_token_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_legacy_settings(
+            tmp.path(),
+            r#"{"app_id":"cli_x","app_token":"","table_id":"tbl","base_url":"https://x"}"#,
+        );
+        let settings = settings_with_repo("repo_x");
+        assert!(maybe_migrate_to_per_repo_binding(tmp.path(), &settings).is_none());
+        // Legacy file should remain untouched so the user can either
+        // populate app_token or migrate manually.
+        let raw = std::fs::read_to_string(tmp.path().join("lark_settings.json")).unwrap();
+        assert!(raw.contains("\"app_token\""));
+    }
+
+    #[test]
+    fn migration_no_op_when_table_id_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_legacy_settings(
+            tmp.path(),
+            r#"{"app_id":"cli_x","app_token":"bascn","base_url":"https://x"}"#,
+        );
+        let settings = settings_with_repo("repo_x");
+        assert!(maybe_migrate_to_per_repo_binding(tmp.path(), &settings).is_none());
+    }
+
+    #[test]
+    fn migration_idempotent_after_first_run() {
+        // After migration runs once, re-running on the same data dir must
+        // be a no-op (the bindings map is now non-empty, which is the
+        // guard's first check). This protects against accidental double
+        // migration overwriting the user's wizard-refined binding.
+        let tmp = tempfile::tempdir().unwrap();
+        write_legacy_settings(tmp.path(), legacy_settings_default());
+        let settings = settings_with_repo("repo_x");
+
+        let first = maybe_migrate_to_per_repo_binding(tmp.path(), &settings);
+        assert!(first.is_some());
+        let first_binding = first.unwrap().1;
+
+        // Simulate user refining the binding via the wizard.
+        let mut refined = first_binding.clone();
+        refined.field_mapping.title.field_id = "fld_real_pri".into();
+        refined.field_mapping.title.field_name = "Task name".into();
+        refined.updated_at = 1747200000;
+        crate::persistence::lark_repo_bindings::set_binding(tmp.path(), "repo_x", refined.clone())
+            .unwrap();
+
+        // Second migration call should NOT touch the refined binding.
+        let second = maybe_migrate_to_per_repo_binding(tmp.path(), &settings);
+        assert!(second.is_none());
+        let still_there = crate::persistence::lark_repo_bindings::get_binding(tmp.path(), "repo_x")
+            .unwrap()
+            .unwrap();
+        assert_eq!(still_there.field_mapping.title.field_id, "fld_real_pri");
+        assert_eq!(still_there.updated_at, 1747200000);
+    }
+
+    // ── Integration: migrated binding flows through LarkProvider end-to-end ──
+
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn mount_token(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "tenant_access_token": "t_xyz",
+                "expire": 7200
+            })))
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_records(server: &MockServer, items: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascn_xyz/tables/tbl_xyz/records",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "items": items, "has_more": false, "page_token": "" }
+            })))
+            .mount(server)
+            .await;
+    }
+
+    async fn mount_fields(server: &MockServer, fields: serde_json::Value) {
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascn_xyz/tables/tbl_xyz/fields",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "items": fields }
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn migrated_binding_hydrates_records_via_lark_provider() {
+        // End-to-end proof: migrate legacy → build LarkProvider from the
+        // migrated binding → list_tasks returns hydrated records. The
+        // placeholder field_id "PENDING_RESOLVE" is OK because the
+        // resolver looks up by field_name ("title"), not field_id.
+        let tmp = tempfile::tempdir().unwrap();
+        write_legacy_settings(tmp.path(), legacy_settings_default());
+        let settings = settings_with_repo("repo_x");
+
+        let (_, binding) = maybe_migrate_to_per_repo_binding(tmp.path(), &settings).unwrap();
+
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        mount_records(
+            &server,
+            serde_json::json!([
+                {
+                    "record_id": "rec_a",
+                    "fields": {"title": "First task"},
+                    "created_time": 1700000000000_i64,
+                    "last_modified_time": 1700000000000_i64
+                },
+                {
+                    "record_id": "rec_b",
+                    "fields": {"title": "Second task"},
+                    "created_time": 1700000001000_i64,
+                    "last_modified_time": 1700000001000_i64
+                }
+            ]),
+        )
+        .await;
+        // primary_field_name is fetched lazily; mount empty so resolver
+        // exercises the field_name path (not the primary fallback).
+        mount_fields(&server, serde_json::json!([])).await;
+
+        let client = std::sync::Arc::new(crate::platform::lark_client::LarkClient::new(
+            crate::platform::lark_client::LarkConfig {
+                app_id: "cli_x".into(),
+                app_secret: "secret".into(),
+                app_token: binding.app_token.clone(),
+                table_id: binding.table_id.clone(),
+                base_url: server.uri(),
+            },
+        ));
+        let provider = crate::task_provider::lark::LarkProvider::from_binding(client, binding);
+
+        use crate::task_provider::TaskProvider;
+        let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(tasks[0].title, "First task");
+        assert_eq!(tasks[0].repo_id, "repo_x");
+        assert_eq!(tasks[1].title, "Second task");
+    }
+
+    #[tokio::test]
+    async fn migrated_binding_falls_back_to_primary_field_when_title_absent() {
+        // If the user's Bitable doesn't have a "title" field, the resolver
+        // falls back to the primary field. This proves the layered
+        // fallback survives the placeholder mapping.
+        let tmp = tempfile::tempdir().unwrap();
+        write_legacy_settings(tmp.path(), legacy_settings_default());
+        let settings = settings_with_repo("repo_x");
+
+        let (_, binding) = maybe_migrate_to_per_repo_binding(tmp.path(), &settings).unwrap();
+
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        // Record has "Task name" (the primary), no "title" field.
+        mount_records(
+            &server,
+            serde_json::json!([{
+                "record_id": "rec_a",
+                "fields": {"Task name": "Primary-fallback task"},
+                "created_time": 1700000000000_i64,
+                "last_modified_time": 1700000000000_i64
+            }]),
+        )
+        .await;
+        mount_fields(
+            &server,
+            serde_json::json!([
+                {"field_id": "fld_pri", "field_name": "Task name", "type": 1, "is_primary": true}
+            ]),
+        )
+        .await;
+
+        let client = std::sync::Arc::new(crate::platform::lark_client::LarkClient::new(
+            crate::platform::lark_client::LarkConfig {
+                app_id: "cli_x".into(),
+                app_secret: "secret".into(),
+                app_token: binding.app_token.clone(),
+                table_id: binding.table_id.clone(),
+                base_url: server.uri(),
+            },
+        ));
+        let provider = crate::task_provider::lark::LarkProvider::from_binding(client, binding);
+
+        use crate::task_provider::TaskProvider;
+        let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Primary-fallback task");
+    }
 }

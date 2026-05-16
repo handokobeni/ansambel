@@ -22,6 +22,89 @@ fn read_string_by_name<'a>(record: &'a BitableRecord, field_name: &str) -> Optio
         .filter(|s| !s.is_empty())
 }
 
+/// Reads a field as plain text, tolerating the several shapes Lark
+/// Bitable returns:
+///   - Text field (`type` 1): plain JSON string → returned as-is.
+///   - Rich-text / long-text: array of segments
+///     `[{"type":"text","text":"..."}, {"type":"url","text":"...","link":"..."}, ...]`.
+///     We concatenate each segment's `text` (link / mention / formula
+///     segments all carry a human-readable `text` key). Note: links
+///     surface as the link's `text` only — the URL is dropped, which is
+///     intentional for system-prompt context.
+///   - Lookup-field arrays: `["AC1 text", "AC2 text"]` (linked field is
+///     plain text) or `[[{...segments}], [{...segments}]]` (linked field
+///     is rich-text). Each item becomes one entry; entries joined with
+///     blank lines so multi-row aggregations like "AC items linked to
+///     this task" render as a readable list in Claude's system prompt.
+///   - Single-select read shape `{"id": "...", "text": "..."}`: extracts
+///     `text`. Lets users map a single-select as description if they
+///     repurpose one for free-form notes.
+///   - Object with `markdown_text` or `value`: extracts that key.
+///     Catches a few non-standard shapes seen in the wild.
+///
+/// Whitespace-trimmed; empty result → None.
+fn read_field_as_text(record: &BitableRecord, field_name: &str) -> Option<String> {
+    let value = record.fields.as_object()?.get(field_name)?;
+    let text = match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(arr) => array_to_text(arr),
+        serde_json::Value::Object(o) => object_to_text(o).unwrap_or_default(),
+        _ => return None,
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Renders an array value to text. Two array shapes are distinguished by
+/// the items' structure:
+///   - All items are segment objects (each has `type` + `text`): this is
+///     a single rich-text field broken into typed runs. Concat all
+///     segments' `text` with no separator — they're one prose.
+///   - Otherwise: treat each item as one independent entry (Lookup-field
+///     pulling N rows from a linked table). Render each item to text and
+///     join with blank lines.
+fn array_to_text(arr: &[serde_json::Value]) -> String {
+    let all_segments = !arr.is_empty()
+        && arr.iter().all(|v| {
+            v.as_object()
+                .map(|o| o.contains_key("type") && o.contains_key("text"))
+                .unwrap_or(false)
+        });
+    if all_segments {
+        return arr
+            .iter()
+            .filter_map(|seg| seg.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("");
+    }
+    arr.iter()
+        .filter_map(item_to_text)
+        .filter(|s| !s.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn item_to_text(item: &serde_json::Value) -> Option<String> {
+    match item {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(inner) => Some(array_to_text(inner)),
+        serde_json::Value::Object(o) => object_to_text(o),
+        _ => None,
+    }
+}
+
+fn object_to_text(o: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    o.get("text")
+        .or_else(|| o.get("markdown_text"))
+        .or_else(|| o.get("value"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
 /// Resolves the title for a record. Tries the mapped `title` field
 /// first; falls back to `primary_field_name` if both are non-empty.
 /// Returns an error message if neither has a value.
@@ -48,12 +131,13 @@ pub fn resolve_title(
 
 /// Resolves the description for a record. Returns empty string when
 /// the mapping has no description field set or the value is missing.
+/// Uses `read_field_as_text` so users can map rich-text fields (e.g.
+/// "Acceptance Criteria") without the value silently coming back blank.
 pub fn resolve_description(record: &BitableRecord, mapping: &FieldMapping) -> String {
     mapping
         .description
         .as_ref()
-        .and_then(|f| read_string_by_name(record, &f.field_name))
-        .map(|s| s.to_string())
+        .and_then(|f| read_field_as_text(record, &f.field_name))
         .unwrap_or_default()
 }
 
@@ -280,6 +364,157 @@ mod tests {
             field_name: "desc".into(),
         });
         assert_eq!(resolve_description(&r, &m), "hello");
+    }
+
+    fn ac_mapping() -> FieldMapping {
+        let mut m = title_mapping("title");
+        m.description = Some(FieldRef {
+            field_id: "fld_ac".into(),
+            field_name: "Acceptance Criteria".into(),
+        });
+        m
+    }
+
+    #[test]
+    fn resolve_description_concatenates_rich_text_segments() {
+        // Real-world Bitable rich-text shape: array of text/url/mention
+        // segments. We concat each segment's `text` so the agent's system
+        // prompt receives readable prose, not JSON.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Acceptance Criteria": [
+                    {"type": "text", "text": "Given user logs in, "},
+                    {"type": "url", "text": "see spec", "link": "https://example.com"},
+                    {"type": "text", "text": " then session is bound to device."}
+                ]
+            }),
+        );
+        assert_eq!(
+            resolve_description(&r, &ac_mapping()),
+            "Given user logs in, see spec then session is bound to device."
+        );
+    }
+
+    #[test]
+    fn resolve_description_reads_single_select_text() {
+        // Single-select fields read as `{id, text}`. Repurposing one as a
+        // tiny "category" description is rare but possible; we surface
+        // the visible text instead of returning blank.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Acceptance Criteria": {"id": "opt_x", "text": "Must pass QA"}
+            }),
+        );
+        assert_eq!(resolve_description(&r, &ac_mapping()), "Must pass QA");
+    }
+
+    #[test]
+    fn resolve_description_reads_markdown_text_object() {
+        // Some Lark API surfaces wrap rich-text in `{markdown_text: "..."}`.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Acceptance Criteria": {"markdown_text": "- Login\n- Logout"}
+            }),
+        );
+        assert_eq!(resolve_description(&r, &ac_mapping()), "- Login\n- Logout");
+    }
+
+    #[test]
+    fn resolve_description_trims_whitespace() {
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Acceptance Criteria": "  \n\n  Trim me  \n\n  "
+            }),
+        );
+        assert_eq!(resolve_description(&r, &ac_mapping()), "Trim me");
+    }
+
+    #[test]
+    fn resolve_description_returns_empty_for_whitespace_only_rich_text() {
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Acceptance Criteria": [
+                    {"type": "text", "text": "   "},
+                    {"type": "text", "text": "\n\n"}
+                ]
+            }),
+        );
+        assert_eq!(resolve_description(&r, &ac_mapping()), "");
+    }
+
+    #[test]
+    fn resolve_description_joins_lookup_array_of_plain_strings() {
+        // Lookup field pulling a plain-text linked field returns a flat
+        // array of strings (one per linked record). Each item is one AC
+        // entry; we separate with blank lines so Claude reads them as a
+        // list rather than one wall of text.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Acceptance Criteria": [
+                    "User Superadmin login hingga 3 sesi berbeda",
+                    "User Employee login pada 1 sesi aktif",
+                    "User Superadmin mencapai batas maksimal sesi ke-4"
+                ]
+            }),
+        );
+        let result = resolve_description(&r, &ac_mapping());
+        assert!(result.contains("Superadmin login hingga 3 sesi"));
+        assert!(result.contains("Employee login pada 1 sesi"));
+        assert!(result.contains("mencapai batas maksimal sesi ke-4"));
+        // Entries separated by blank line for readability.
+        assert!(result.contains("\n\n"));
+    }
+
+    #[test]
+    fn resolve_description_joins_lookup_array_of_rich_text() {
+        // Lookup pulling a rich-text linked field returns an array of
+        // arrays (one segment-array per linked record).
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Acceptance Criteria": [
+                    [{"type": "text", "text": "Given pengguna superadmin, "},
+                     {"type": "text", "text": "session ke-4 ditolak."}],
+                    [{"type": "text", "text": "Given employee, "},
+                     {"type": "text", "text": "session ke-2 ditolak."}]
+                ]
+            }),
+        );
+        let result = resolve_description(&r, &ac_mapping());
+        assert!(result.contains("Given pengguna superadmin, session ke-4 ditolak."));
+        assert!(result.contains("Given employee, session ke-2 ditolak."));
+        assert!(result.contains("\n\n"));
+    }
+
+    #[test]
+    fn resolve_description_skips_empty_entries_in_lookup_array() {
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Acceptance Criteria": ["First AC", "", "   ", "Second AC"]
+            }),
+        );
+        let result = resolve_description(&r, &ac_mapping());
+        assert_eq!(result, "First AC\n\nSecond AC");
+    }
+
+    #[test]
+    fn resolve_description_returns_empty_for_unsupported_value_types() {
+        // Boolean / number / null values don't make sense as descriptions
+        // and we don't want to leak `"true"` or `"42"` into Claude's
+        // context. Fall through to empty.
+        let r = rec("r1", serde_json::json!({"Acceptance Criteria": 42}));
+        assert_eq!(resolve_description(&r, &ac_mapping()), "");
+        let r2 = rec("r1", serde_json::json!({"Acceptance Criteria": true}));
+        assert_eq!(resolve_description(&r2, &ac_mapping()), "");
+        let r3 = rec("r1", serde_json::json!({"Acceptance Criteria": null}));
+        assert_eq!(resolve_description(&r3, &ac_mapping()), "");
     }
 
     fn status_mapping() -> FieldMapping {
