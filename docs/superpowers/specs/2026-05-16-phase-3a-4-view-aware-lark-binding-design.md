@@ -231,15 +231,16 @@ Same pattern as Phase 3a-3's field_mapping migration:
 // On load: a binding JSON without a `view_id` key deserializes as None via
 // #[serde(default)] on Option<String>. No file rewrite required.
 
-// state.rs — schema_version bumped from 2 → 3
-// migrate_lark_repo_bindings_v2_to_v3 is a no-op semantically (no field
-// values change) but stamps the version + updated_at so future migrations
-// have a clear baseline.
+// schema_version bumped from 1 → 2 in lark_repo_bindings.rs's default_schema_version().
+// migrate_lark_repo_bindings_v1_to_v2 is a no-op semantically (no field
+// values change) but stamps the version so future migrations have a clear
+// baseline. Triggered on first load that finds schema_version=1.
 ```
 
 Existing bindings continue with `view_id = None` — zero user-visible change
-until the user reconfigures. No banner shown for v2→v3 migration (unlike 3a-3's
-v1→v2 which migrated semantic content).
+until the user reconfigures. No banner shown for v1→v2 migration (unlike the
+3a-3 legacy-file migration which created a new binding from
+`lark_settings.json`).
 
 ## Error handling
 
@@ -276,9 +277,9 @@ v1→v2 which migrated semantic content).
 - `persistence/lark_repo_bindings.rs`:
   - `legacy_binding_without_view_id_loads_as_none`
   - `binding_with_view_id_some_serializes_correctly`
-- `state.rs`:
-  - `migrate_v2_to_v3_preserves_existing_bindings_with_no_view_id`
-  - `migrate_v2_to_v3_is_idempotent`
+- `persistence/lark_repo_bindings.rs` (additional):
+  - `migrate_v1_to_v2_preserves_existing_bindings_with_no_view_id`
+  - `migrate_v1_to_v2_is_idempotent`
 
 ### Integration tests (wiremock)
 
@@ -324,7 +325,7 @@ without a linked issue.
 | View-deletion handling           | Auto-fallback to all records + banner              | Workspaces keep working; user gets clear signal + reconfigure path                                 |
 | Write-side scope                 | No gating — writes always go to the table          | Mirrors Lark's own behavior; client-side filter eval is fragile and high-effort for limited value  |
 | View list freshness              | Fetched live each wizard open                      | Matches 3a-3's field-list pattern; views change rarely but staleness is the worst kind of bug here |
-| Migration strategy               | No-op v2→v3 schema bump, `#[serde(default)]` field | Mechanically safe; legacy bindings work identically until reconfigured                             |
+| Migration strategy               | No-op v1→v2 schema bump, `#[serde(default)]` field | Mechanically safe; legacy bindings work identically until reconfigured                             |
 | Filter mechanism                 | Lark's native `view_id` query param                | Server-side; reuses user's existing Lark filter UI; zero parallel filter logic                     |
 | Frontend signal for missing view | Tauri event + Svelte store                         | Decouples banner from list call; multiple components can react if needed                           |
 
