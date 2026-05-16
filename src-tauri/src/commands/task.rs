@@ -285,12 +285,29 @@ pub(crate) async fn update_task_inner(
     provider: Arc<dyn crate::task_provider::TaskProvider>,
     state: Arc<Mutex<AppState>>,
 ) -> Result<Task> {
+    // Snapshot local-only fields before provider call. See `move_task_inner`
+    // for the rationale — LarkProvider can't know repo_id/workspace_id so
+    // it returns them blank; we stamp them back to keep the mirror entry
+    // intact across mutations.
+    let (existing_repo_id, existing_workspace_id) = {
+        let st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        let task = st
+            .tasks
+            .get(&task_id)
+            .ok_or_else(|| AppError::NotFound(format!("task '{}' not found", task_id)))?;
+        (task.repo_id.clone(), task.workspace_id.clone())
+    };
+
     let provider_patch = crate::task_provider::TaskPatch {
         title: patch.title,
         description: patch.description,
         order: patch.order,
     };
-    let updated = provider.update_task(&task_id, provider_patch).await?;
+    let mut updated = provider.update_task(&task_id, provider_patch).await?;
+    updated.repo_id = existing_repo_id;
+    updated.workspace_id = existing_workspace_id;
     {
         let mut st = state
             .lock()
@@ -314,7 +331,7 @@ pub(crate) async fn move_task_inner(
     // still lives in the command layer because it crosses subsystems
     // (workspace creation + task mutation) — providers only own task
     // persistence.
-    let (repo_id, task_title, task_desc, needs_workspace) = {
+    let (repo_id, existing_workspace_id, task_title, task_desc, needs_workspace) = {
         let st = state
             .lock()
             .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
@@ -325,6 +342,7 @@ pub(crate) async fn move_task_inner(
         let needs = column == KanbanColumn::InProgress && task.workspace_id.is_none();
         (
             task.repo_id.clone(),
+            task.workspace_id.clone(),
             task.title.clone(),
             task.description.clone(),
             needs,
@@ -335,7 +353,7 @@ pub(crate) async fn move_task_inner(
     // Auto-create workspace if moving into InProgress with no linked workspace.
     let maybe_ws_id: Option<String> = if needs_workspace {
         let ws = crate::commands::workspace::create_workspace_inner(
-            repo_id,
+            repo_id.clone(),
             task_title,
             task_desc,
             None, // auto-branch
@@ -352,6 +370,14 @@ pub(crate) async fn move_task_inner(
     // Route the column/order update through the provider so persistence
     // is owned by it (tasks.json for LocalProvider, Bitable for Lark).
     let mut updated = provider.move_task(&task_id, column, order).await?;
+
+    // Preserve local-only fields. LarkProvider can't know repo_id (not
+    // stored on Bitable rows) or workspace_id (local-only concept) — it
+    // returns them as "" / None. Stamping them from the mirror prevents
+    // the mirror entry from regressing to repo_id="" / workspace_id=None
+    // on subsequent operations (e.g., re-moving the same card).
+    updated.repo_id = repo_id.clone();
+    updated.workspace_id = existing_workspace_id.clone();
 
     // If we auto-created a workspace, stamp the workspace_id onto the
     // task. The TaskProvider trait doesn't model workspace_id (it's a
@@ -1372,5 +1398,184 @@ mod tests {
         let p = provider_for_repo(&handle, tmp.path(), "repo_x").await;
         // Same Arc — Arc::ptr_eq verifies it's the original instance, not a fresh fallback.
         assert!(Arc::ptr_eq(&p, &local));
+    }
+
+    // ── Regression: LarkProvider-shaped responses must not regress mirror ──
+
+    /// Mock provider that simulates LarkProvider's behavior of returning
+    /// Task with `repo_id = ""` and `workspace_id = None` because Lark
+    /// can't know those local-only fields. Used to verify the command
+    /// layer stamps them back from the mirror.
+    #[derive(Debug)]
+    struct BlankRepoIdProvider;
+
+    #[async_trait::async_trait]
+    impl crate::task_provider::TaskProvider for BlankRepoIdProvider {
+        async fn list_tasks(
+            &self,
+            _: Option<&str>,
+        ) -> crate::error::Result<Vec<crate::state::Task>> {
+            Ok(Vec::new())
+        }
+        async fn create_task(
+            &self,
+            args: crate::task_provider::CreateTaskArgs,
+        ) -> crate::error::Result<crate::state::Task> {
+            Ok(crate::state::Task {
+                id: "rec_x".into(),
+                repo_id: String::new(), // ← Lark-style blank
+                workspace_id: None,
+                title: args.title,
+                description: args.description,
+                column: args.column.unwrap_or_default(),
+                order: 0,
+                created_at: 0,
+                updated_at: 0,
+            })
+        }
+        async fn update_task(
+            &self,
+            id: &str,
+            _patch: crate::task_provider::TaskPatch,
+        ) -> crate::error::Result<crate::state::Task> {
+            Ok(crate::state::Task {
+                id: id.into(),
+                repo_id: String::new(),
+                workspace_id: None,
+                title: "t".into(),
+                description: String::new(),
+                column: KanbanColumn::Todo,
+                order: 0,
+                created_at: 0,
+                updated_at: 0,
+            })
+        }
+        async fn move_task(
+            &self,
+            id: &str,
+            column: KanbanColumn,
+            order: i32,
+        ) -> crate::error::Result<crate::state::Task> {
+            Ok(crate::state::Task {
+                id: id.into(),
+                repo_id: String::new(), // ← Lark-style blank
+                workspace_id: None,     // ← Lark-style blank
+                title: "t".into(),
+                description: String::new(),
+                column,
+                order,
+                created_at: 0,
+                updated_at: 0,
+            })
+        }
+        async fn delete_task(&self, _id: &str) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Regression: moving a task whose backing provider blanks
+    /// repo_id/workspace_id (e.g., LarkProvider) must NOT cause the
+    /// mirror entry to regress. Without the fix, the second move on the
+    /// same card finds `repo_id = ""` in the mirror and fails with
+    /// `Not found: repo ''`.
+    #[tokio::test]
+    async fn move_task_preserves_repo_id_across_repeated_moves() {
+        let tmp = tempdir().unwrap();
+        let state = make_state_with_repo(tmp.path());
+        // Seed mirror with a task that has both repo_id + workspace_id.
+        {
+            let mut st = state.lock().unwrap();
+            st.tasks.insert(
+                "tk_a".into(),
+                crate::state::Task {
+                    id: "tk_a".into(),
+                    repo_id: "repo_r1".into(),
+                    workspace_id: Some("ws_existing".into()),
+                    title: "Card A".into(),
+                    description: String::new(),
+                    column: KanbanColumn::InProgress,
+                    order: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                },
+            );
+        }
+        let provider: Arc<dyn crate::task_provider::TaskProvider> = Arc::new(BlankRepoIdProvider);
+
+        // First move: In Progress → Todo
+        let after1 = move_task_inner(
+            "tk_a".into(),
+            KanbanColumn::Todo,
+            0,
+            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        assert_eq!(after1.repo_id, "repo_r1", "repo_id preserved after move #1");
+        assert_eq!(
+            after1.workspace_id.as_deref(),
+            Some("ws_existing"),
+            "workspace_id preserved after move #1"
+        );
+
+        // Second move: Todo → In Progress. The mirror must still carry
+        // repo_id = "repo_r1" — otherwise this call fails with
+        // `Not found: repo ''` (the bug we're regressing against).
+        let after2 = move_task_inner(
+            "tk_a".into(),
+            KanbanColumn::InProgress,
+            0,
+            tmp.path().to_path_buf(),
+            Arc::clone(&provider),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        assert_eq!(after2.repo_id, "repo_r1", "repo_id survives repeated moves");
+        assert_eq!(
+            after2.workspace_id.as_deref(),
+            Some("ws_existing"),
+            "workspace_id survives repeated moves"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_task_preserves_repo_id_and_workspace_id() {
+        let tmp = tempdir().unwrap();
+        let state = make_state_with_repo(tmp.path());
+        {
+            let mut st = state.lock().unwrap();
+            st.tasks.insert(
+                "tk_a".into(),
+                crate::state::Task {
+                    id: "tk_a".into(),
+                    repo_id: "repo_r1".into(),
+                    workspace_id: Some("ws_existing".into()),
+                    title: "Card A".into(),
+                    description: String::new(),
+                    column: KanbanColumn::Todo,
+                    order: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                },
+            );
+        }
+        let provider: Arc<dyn crate::task_provider::TaskProvider> = Arc::new(BlankRepoIdProvider);
+        let updated = update_task_inner(
+            "tk_a".into(),
+            TaskPatch {
+                title: Some("New title".into()),
+                description: None,
+                order: None,
+            },
+            Arc::clone(&provider),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.repo_id, "repo_r1");
+        assert_eq!(updated.workspace_id.as_deref(), Some("ws_existing"));
     }
 }

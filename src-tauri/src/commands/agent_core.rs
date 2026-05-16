@@ -41,13 +41,10 @@ pub fn spawn_agent_inner(
     workspace_id: &str,
     claude_path: Option<PathBuf>,
 ) -> AppResult<AgentProcess> {
-    let (worktree_dir, repo_id) = {
+    let (worktree_dir, repo_id, ws_title, ws_description) = {
         let s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
-        let ws = s
-            .workspaces
-            .get(workspace_id)
-            .ok_or_else(|| AppError::NotFound(format!("workspace {workspace_id} not found")))?;
-        (ws.worktree_dir.clone(), ws.repo_id.clone())
+        resolve_workspace_context(&s, workspace_id)
+            .ok_or_else(|| AppError::NotFound(format!("workspace {workspace_id} not found")))?
     }; // lock dropped here
 
     {
@@ -87,7 +84,12 @@ pub fn spawn_agent_inner(
     ]);
     cmd.current_dir(&worktree_dir);
 
-    let prefix = build_system_prompt_prefix(data_dir, &repo_id);
+    let prefix = build_system_prompt_prefix_with_task(
+        data_dir,
+        &repo_id,
+        Some(&ws_title),
+        Some(&ws_description),
+    );
     if !prefix.is_empty() {
         cmd.args(["--append-system-prompt", &prefix]);
     }
@@ -191,8 +193,82 @@ pub fn stderr_line_to_event(line: &str) -> AgentEvent {
     }
 }
 
+/// Resolves the spawn context for a workspace: worktree path, repo id,
+/// and the most up-to-date title + description Claude should see.
+///
+/// Prefers live values from the linked task in the mirror over the
+/// workspace's snapshotted fields. Workspace fields are captured at
+/// creation time (auto-create via card-move stamps task title/desc into
+/// the workspace) and don't refresh when:
+///   - the user re-maps the Lark binding (e.g. Description → Acceptance
+///     Criteria) after the workspace was created;
+///   - the user edits the record in Bitable (Ansambel refreshes the task
+///     mirror on window focus, but doesn't touch workspaces.json).
+///
+/// Pulling from the task mirror at spawn time means the next agent run
+/// picks up the latest context with zero workspace recreation needed.
+///
+/// Returns `None` if the workspace id isn't in state. For local-only
+/// tasks (no linked task in the mirror) falls back to workspace fields.
+fn resolve_workspace_context(
+    state: &AppState,
+    workspace_id: &str,
+) -> Option<(PathBuf, String, String, String)> {
+    let ws = state.workspaces.get(workspace_id)?;
+    let linked_task = state.tasks.values().find(|t| {
+        t.workspace_id
+            .as_deref()
+            .map(|w| w == workspace_id)
+            .unwrap_or(false)
+    });
+    let live_title = linked_task
+        .map(|t| t.title.clone())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| ws.title.clone());
+    let live_description = linked_task
+        .map(|t| t.description.clone())
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| ws.description.clone());
+    Some((
+        ws.worktree_dir.clone(),
+        ws.repo_id.clone(),
+        live_title,
+        live_description,
+    ))
+}
+
 pub fn build_system_prompt_prefix(data_dir: &Path, repo_id: &str) -> String {
+    build_system_prompt_prefix_with_task(data_dir, repo_id, None, None)
+}
+
+/// Variant that injects the active workspace's task title + description as
+/// the first section of the system prompt. This gives Claude the "why am I
+/// here" context — for Lark-sourced tasks the title and description come
+/// from the Bitable record; for local tasks they come from the user's
+/// NewTaskDialog input. Without this, the agent only sees repo-level
+/// context (conventions, recent activity) and has to ask the user what
+/// the task is.
+pub fn build_system_prompt_prefix_with_task(
+    data_dir: &Path,
+    repo_id: &str,
+    workspace_title: Option<&str>,
+    workspace_description: Option<&str>,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
+
+    let title = workspace_title.unwrap_or("").trim();
+    let desc = workspace_description.unwrap_or("").trim();
+    if !title.is_empty() || !desc.is_empty() {
+        let mut block = String::from("# Current task\n\n");
+        if !title.is_empty() {
+            block.push_str(&format!("**Title:** {title}\n"));
+        }
+        if !desc.is_empty() {
+            block.push_str(&format!("\n**Description:**\n{desc}\n"));
+        }
+        parts.push(block);
+    }
+
     let ctx_dir = data_dir.join("contexts").join(repo_id);
     for fname in ["context.md", "hot.md"] {
         let p = ctx_dir.join(fname);
@@ -794,6 +870,150 @@ mod tests {
         let tmp = make_data_dir();
         let prefix = build_system_prompt_prefix(tmp.path(), "repo_y");
         assert!(prefix.is_empty());
+    }
+
+    fn write_task(
+        state: &Arc<Mutex<AppState>>,
+        task_id: &str,
+        repo_id: &str,
+        ws_id: Option<&str>,
+        title: &str,
+        description: &str,
+    ) {
+        use crate::state::{KanbanColumn, Task};
+        let mut s = state.lock().unwrap();
+        s.tasks.insert(
+            task_id.into(),
+            Task {
+                id: task_id.into(),
+                repo_id: repo_id.into(),
+                workspace_id: ws_id.map(|w| w.into()),
+                title: title.into(),
+                description: description.into(),
+                column: KanbanColumn::InProgress,
+                order: 0,
+                created_at: 0,
+                updated_at: 0,
+            },
+        );
+    }
+
+    #[test]
+    fn resolve_workspace_context_prefers_linked_task_over_snapshot() {
+        // Scenario: user re-maps Description → Acceptance Criteria after
+        // workspace was already created. Workspace snapshot has the OLD
+        // empty description; mirror has the fresh AC content from the
+        // refreshed task. Spawn must surface the live value.
+        let tmp = make_data_dir();
+        let state = make_state();
+        write_workspace(&state, "ws_a", "repo_x", tmp.path().to_path_buf());
+        // Workspace stored with empty description (the original snapshot).
+        // Now seed a task linked to it with rich AC content.
+        write_task(
+            &state,
+            "tk_a",
+            "repo_x",
+            Some("ws_a"),
+            "Pembatasan session login",
+            "Given a user logs in twice, the older session must be terminated.",
+        );
+        let s = state.lock().unwrap();
+        let (_, repo_id, title, desc) = resolve_workspace_context(&s, "ws_a").unwrap();
+        assert_eq!(repo_id, "repo_x");
+        assert_eq!(title, "Pembatasan session login");
+        assert!(desc.contains("older session must be terminated"));
+    }
+
+    #[test]
+    fn resolve_workspace_context_falls_back_to_snapshot_when_no_linked_task() {
+        // Local-only workspace (no Lark-linked task) — use the snapshot.
+        let tmp = make_data_dir();
+        let state = make_state();
+        write_workspace(&state, "ws_b", "repo_x", tmp.path().to_path_buf());
+        let s = state.lock().unwrap();
+        let (_, _, title, desc) = resolve_workspace_context(&s, "ws_b").unwrap();
+        // make_state's workspace has title "T", description "".
+        assert_eq!(title, "T");
+        assert_eq!(desc, "");
+    }
+
+    #[test]
+    fn resolve_workspace_context_falls_back_when_linked_task_has_empty_fields() {
+        // Linked task exists but its description is blank — fall through
+        // to the workspace snapshot rather than emitting blank.
+        let tmp = make_data_dir();
+        let state = make_state();
+        write_workspace(&state, "ws_c", "repo_x", tmp.path().to_path_buf());
+        write_task(&state, "tk_c", "repo_x", Some("ws_c"), "", "");
+        let s = state.lock().unwrap();
+        let (_, _, title, desc) = resolve_workspace_context(&s, "ws_c").unwrap();
+        assert_eq!(title, "T");
+        assert_eq!(desc, "");
+    }
+
+    #[test]
+    fn resolve_workspace_context_ignores_tasks_linked_to_other_workspaces() {
+        let tmp = make_data_dir();
+        let state = make_state();
+        write_workspace(&state, "ws_d", "repo_x", tmp.path().to_path_buf());
+        write_task(
+            &state,
+            "tk_other",
+            "repo_x",
+            Some("ws_OTHER"),
+            "Other task",
+            "Other description",
+        );
+        let s = state.lock().unwrap();
+        let (_, _, title, desc) = resolve_workspace_context(&s, "ws_d").unwrap();
+        assert_eq!(title, "T");
+        assert_eq!(desc, "");
+    }
+
+    #[test]
+    fn resolve_workspace_context_returns_none_for_unknown_workspace() {
+        let state = make_state();
+        let s = state.lock().unwrap();
+        assert!(resolve_workspace_context(&s, "ws_missing").is_none());
+    }
+
+    #[test]
+    fn build_system_prompt_prefix_with_task_injects_title_and_description() {
+        let tmp = make_data_dir();
+        let prefix = build_system_prompt_prefix_with_task(
+            tmp.path(),
+            "repo_x",
+            Some("Pembatasan session login"),
+            Some("Admin tidak boleh login dari 2 device sekaligus."),
+        );
+        assert!(prefix.contains("# Current task"));
+        assert!(prefix.contains("Pembatasan session login"));
+        assert!(prefix.contains("Admin tidak boleh login"));
+    }
+
+    #[test]
+    fn build_system_prompt_prefix_with_task_skips_block_when_both_blank() {
+        let tmp = make_data_dir();
+        let prefix =
+            build_system_prompt_prefix_with_task(tmp.path(), "repo_x", Some(""), Some("   "));
+        assert!(!prefix.contains("# Current task"));
+    }
+
+    #[test]
+    fn build_system_prompt_prefix_with_task_merges_task_and_repo_context() {
+        let tmp = make_data_dir();
+        let ctx_dir = tmp.path().join("contexts/repo_x");
+        std::fs::create_dir_all(&ctx_dir).unwrap();
+        std::fs::write(ctx_dir.join("context.md"), "## Repo conventions\nUse Rust.").unwrap();
+        let prefix =
+            build_system_prompt_prefix_with_task(tmp.path(), "repo_x", Some("Fix login bug"), None);
+        assert!(prefix.contains("# Current task"));
+        assert!(prefix.contains("Fix login bug"));
+        assert!(prefix.contains("Repo conventions"));
+        // Task block should come BEFORE repo context.
+        let task_pos = prefix.find("# Current task").unwrap();
+        let repo_pos = prefix.find("Repo conventions").unwrap();
+        assert!(task_pos < repo_pos);
     }
 
     #[test]
