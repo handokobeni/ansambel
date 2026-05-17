@@ -91,6 +91,36 @@ pub enum FilterConjunction {
     Or,
 }
 
+/// One filter condition matching Lark `records/search` schema.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FilterCondition {
+    /// Bitable field id (stable lookup key — survives renames).
+    pub field_id: String,
+    /// Cached field name (UI display + outgoing API body). Refreshed from
+    /// the LarkProvider field cache before each send.
+    pub field_name: String,
+    pub operator: FilterOperator,
+    /// Per-type value (string for text, option name(s) for select,
+    /// ISO-8601 for date, number-as-string, email/display for person).
+    /// Empty Vec for unary operators (`isEmpty` / `isNotEmpty`).
+    pub value: Vec<String>,
+}
+
+/// Set of filter conditions joined by a single top-level conjunction.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct FilterSpec {
+    #[serde(default)]
+    pub conjunction: FilterConjunction,
+    #[serde(default)]
+    pub conditions: Vec<FilterCondition>,
+}
+
+impl FilterSpec {
+    pub fn is_empty(&self) -> bool {
+        self.conditions.is_empty()
+    }
+}
+
 /// One repo's binding to a Bitable: which table, plus how to map its
 /// fields and status options to Ansambel's task model.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1125,6 +1155,52 @@ mod tests {
             serde_json::to_value(FilterConjunction::Or).unwrap(),
             json!("or")
         );
+    }
+
+    #[test]
+    fn filter_spec_default_is_and_with_empty_conditions() {
+        let spec = FilterSpec::default();
+        assert_eq!(spec.conjunction, FilterConjunction::And);
+        assert!(spec.conditions.is_empty());
+        assert!(spec.is_empty());
+    }
+
+    #[test]
+    fn filter_spec_is_empty_false_when_has_condition() {
+        let spec = FilterSpec {
+            conjunction: FilterConjunction::And,
+            conditions: vec![FilterCondition {
+                field_id: "fld123".into(),
+                field_name: "Status".into(),
+                operator: FilterOperator::Is,
+                value: vec!["Done".into()],
+            }],
+        };
+        assert!(!spec.is_empty());
+    }
+
+    #[test]
+    fn filter_spec_roundtrips_through_json() {
+        let spec = FilterSpec {
+            conjunction: FilterConjunction::Or,
+            conditions: vec![
+                FilterCondition {
+                    field_id: "fld1".into(),
+                    field_name: "Sprint".into(),
+                    operator: FilterOperator::Is,
+                    value: vec!["S1".into()],
+                },
+                FilterCondition {
+                    field_id: "fld2".into(),
+                    field_name: "Owner".into(),
+                    operator: FilterOperator::IsEmpty,
+                    value: vec![],
+                },
+            ],
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        let back: FilterSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec, back);
     }
 
     #[test]
