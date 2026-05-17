@@ -146,6 +146,35 @@ pub async fn detect_lark_schema(
         .map_err(|e| e.to_string())
 }
 
+/// Thin testable wrapper around `LarkClient::bitable_list_views`. Kept as
+/// an `_inner` to mirror `detect_lark_schema_inner` so the Tauri command
+/// stays a one-liner that's exercised only through integration tests.
+pub(crate) async fn list_lark_views_inner(
+    app_token: &str,
+    table_id: &str,
+    client: Arc<crate::platform::lark_client::LarkClient>,
+) -> Result<Vec<crate::platform::lark_client::BitableView>> {
+    client.bitable_list_views(app_token, table_id).await
+}
+
+#[tauri::command]
+pub async fn list_lark_views(
+    app_token: String,
+    table_id: String,
+    app_handle: tauri::AppHandle,
+) -> std::result::Result<Vec<crate::platform::lark_client::BitableView>, String> {
+    let data_dir = data_dir_from(&app_handle)?;
+    let store = crate::commands::lark_auth::KeyringStore;
+    let mut cfg = crate::commands::lark_auth::load_lark_config_inner(&data_dir, &store)
+        .map_err(|e| format!("global Lark credentials missing: {e}"))?;
+    cfg.app_token = app_token.clone();
+    cfg.table_id = table_id.clone();
+    let client = Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
+    list_lark_views_inner(&app_token, &table_id, client)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 fn data_dir_from(app_handle: &tauri::AppHandle) -> std::result::Result<PathBuf, String> {
     use tauri::Manager;
     app_handle
@@ -339,5 +368,47 @@ mod tests {
                 .unwrap();
         assert_eq!(proposed.fields.len(), 1);
         assert_eq!(proposed.suggested.title.field_id, "fld_p");
+    }
+
+    #[tokio::test]
+    async fn list_lark_views_inner_returns_view_list() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        // Token endpoint
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "tenant_access_token": "t", "expire": 3600
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/open-apis/bitable/v1/apps/bascntest/tables/tbltest/views"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [
+                        { "view_id": "vw_sprint", "view_name": "Current Sprint", "view_type": "grid" }
+                    ],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+        let cfg = crate::platform::lark_client::LarkConfig {
+            app_id: "a".into(),
+            app_secret: "s".into(),
+            app_token: "bascntest".into(),
+            table_id: "tbltest".into(),
+            base_url: server.uri(),
+        };
+        let client = Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
+        let views = list_lark_views_inner("bascntest", "tbltest", client)
+            .await
+            .unwrap();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].view_id, "vw_sprint");
     }
 }

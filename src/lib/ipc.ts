@@ -22,6 +22,7 @@ import type {
   LarkStatus,
   SetLarkCredentialsArgs,
   BitableBinding,
+  BitableView,
   ProposedMapping,
 } from './types';
 
@@ -234,6 +235,10 @@ export const api = {
     /** Inspect a Bitable table and propose a FieldMapping + StatusValueMapping. */
     detectSchema: (appToken: string, tableId: string): Promise<ProposedMapping> =>
       invoke('detect_lark_schema', { appToken, tableId }),
+
+    /** List all Bitable views in the table (for the wizard view-scope dropdown). */
+    listViews: (appToken: string, tableId: string): Promise<BitableView[]> =>
+      invoke('list_lark_views', { appToken, tableId }),
   },
 
   script: {
