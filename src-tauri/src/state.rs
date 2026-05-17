@@ -127,6 +127,11 @@ impl FilterSpec {
 pub struct BitableBinding {
     pub app_token: String,
     pub table_id: String,
+    /// Optional filter applied at the Lark server side via the
+    /// `records/search` endpoint. Empty (default) → fetch all records
+    /// via the existing list endpoint.
+    #[serde(default)]
+    pub filters: FilterSpec,
     pub field_mapping: FieldMapping,
     #[serde(default)]
     pub status_value_mapping: StatusValueMapping,
@@ -1204,10 +1209,60 @@ mod tests {
     }
 
     #[test]
+    fn legacy_binding_without_filters_loads_as_default_empty() {
+        let legacy_json = r#"{
+            "app_token": "appXYZ",
+            "table_id": "tblABC",
+            "field_mapping": {
+                "title": { "field_id": "fld1", "field_name": "Title" }
+            },
+            "status_value_mapping": { "entries": {}, "default_column": "todo" },
+            "created_at": 1700000000,
+            "updated_at": 1700000000
+        }"#;
+        let binding: BitableBinding = serde_json::from_str(legacy_json).unwrap();
+        assert!(binding.filters.is_empty());
+        assert_eq!(binding.filters.conjunction, FilterConjunction::And);
+    }
+
+    #[test]
+    fn binding_with_filters_roundtrips() {
+        let binding = BitableBinding {
+            app_token: "appXYZ".into(),
+            table_id: "tblABC".into(),
+            filters: FilterSpec {
+                conjunction: FilterConjunction::And,
+                conditions: vec![FilterCondition {
+                    field_id: "fld1".into(),
+                    field_name: "Status".into(),
+                    operator: FilterOperator::Is,
+                    value: vec!["Done".into()],
+                }],
+            },
+            field_mapping: FieldMapping {
+                title: FieldRef {
+                    field_id: "fld1".into(),
+                    field_name: "Title".into(),
+                },
+                description: None,
+                status: None,
+                order: None,
+            },
+            status_value_mapping: StatusValueMapping::default(),
+            created_at: 1700000000,
+            updated_at: 1700000000,
+        };
+        let json = serde_json::to_string(&binding).unwrap();
+        let back: BitableBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(binding, back);
+    }
+
+    #[test]
     fn binding_serde_round_trip_preserves_fields() {
         let b = BitableBinding {
             app_token: "bascntest".into(),
             table_id: "tbltest".into(),
+            filters: FilterSpec::default(),
             field_mapping: FieldMapping {
                 title: FieldRef {
                     field_id: "fld_pri".into(),

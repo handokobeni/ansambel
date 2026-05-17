@@ -73,6 +73,7 @@ mod tests {
         BitableBinding {
             app_token: "bascntest".into(),
             table_id: "tbltest".into(),
+            filters: crate::state::FilterSpec::default(),
             field_mapping: FieldMapping {
                 title: FieldRef {
                     field_id: "fld_pri".into(),

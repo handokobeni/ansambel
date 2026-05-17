@@ -38,6 +38,7 @@ fn maybe_migrate_to_per_repo_binding(
     let binding = crate::state::BitableBinding {
         app_token,
         table_id,
+        filters: crate::state::FilterSpec::default(),
         field_mapping: crate::state::FieldMapping {
             title: crate::state::FieldRef {
                 field_id: "PENDING_RESOLVE".into(),
@@ -412,6 +413,7 @@ mod migration_tests {
         crate::state::BitableBinding {
             app_token: "x".into(),
             table_id: "y".into(),
+            filters: crate::state::FilterSpec::default(),
             field_mapping: crate::state::FieldMapping {
                 title: crate::state::FieldRef {
                     field_id: "fld_t".into(),
