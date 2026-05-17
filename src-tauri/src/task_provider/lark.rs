@@ -21,6 +21,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
+// Consumed by list_tasks in Task 8 (phase-3a-3-1).
+#[allow(dead_code)]
 /// Rebuild a FilterSpec with each condition's `field_name` overwritten
 /// from a canonical `field_id → field_name` map. Missing ids fall through
 /// with the persisted name (server will surface an error chip-side).
@@ -57,6 +59,7 @@ pub struct LarkProvider {
     table_id: String,
     /// Active filter spec for this provider. Conditions may have stale
     /// `field_name`s that get refreshed via `field_name_by_id()` before use.
+    #[allow(dead_code)] // Consumed by list_tasks in Task 8.
     filters: FilterSpec,
     field_mapping: FieldMapping,
     status_value_mapping: StatusValueMapping,
@@ -117,6 +120,7 @@ impl LarkProvider {
     /// Lazily fetch + cache `{field_id → canonical field_name}` from the
     /// bound table's schema. Rebuilt only on a fresh LarkProvider instance
     /// (i.e. after the binding is saved from the wizard or FilterBar).
+    #[allow(dead_code)] // Consumed by list_tasks in Task 8.
     pub(crate) async fn field_name_by_id(&self) -> Result<&HashMap<String, String>> {
         self.field_name_by_id
             .get_or_try_init(|| async {
