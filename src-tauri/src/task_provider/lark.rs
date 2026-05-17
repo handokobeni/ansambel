@@ -538,11 +538,14 @@ impl TaskProvider for LarkProvider {
 
 /// Returns true when the given error came from a Lark Bitable
 /// "view not found" response (code 1254045). LarkClient surfaces Lark
-/// error codes by stringifying them into the AppError message, so a
-/// substring match on the code is sufficient and avoids leaking an
-/// enum across the client boundary.
+/// error codes by stringifying them into the AppError message using
+/// the canonical `"<endpoint> code {code}: {msg}"` format (see
+/// `platform::lark_client`), so we match on the `"code 1254045"`
+/// substring (with the leading `code ` keyword) to avoid a false
+/// positive when a stray digit run appears inside a `view_id`,
+/// `record_id`, or echoed `msg` field.
 fn is_view_missing_error(err: &crate::error::AppError) -> bool {
-    err.to_string().contains("1254045")
+    err.to_string().contains("code 1254045")
 }
 
 #[cfg(test)]
@@ -1737,5 +1740,21 @@ mod tests {
         let values = StatusValueMapping::default();
         let id = reverse_lookup_option(&values, KanbanColumn::Review);
         assert_eq!(id, None);
+    }
+
+    #[test]
+    fn is_view_missing_error_recognises_canonical_lark_message() {
+        let err = crate::error::AppError::Lark("bitable_list code 1254045: ViewNotFound".into());
+        assert!(is_view_missing_error(&err));
+    }
+
+    #[test]
+    fn is_view_missing_error_rejects_unrelated_digit_run() {
+        // A view_id or record_id containing the digit run must NOT
+        // false-positive.
+        let err = crate::error::AppError::Lark(
+            "bitable_list code 1254000: app_token 1254045 invalid".into(),
+        );
+        assert!(!is_view_missing_error(&err));
     }
 }
