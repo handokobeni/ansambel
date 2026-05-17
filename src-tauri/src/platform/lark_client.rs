@@ -467,6 +467,37 @@ struct BitableCreateFieldData {
     field: Option<BitableField>,
 }
 
+/// A Bitable view returned by the list-views API. `view_type` is the
+/// string Lark uses ("grid", "kanban", "form", "gantt", "gallery", ...).
+/// Filters live inside each view but Lark does not expose the filter
+/// expression on this endpoint — fetching records with `view_id` applies
+/// the filter server-side.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BitableView {
+    pub view_id: String,
+    pub view_name: String,
+    pub view_type: String,
+}
+
+#[derive(Deserialize)]
+struct BitableViewListResponse {
+    code: i64,
+    #[serde(default)]
+    msg: String,
+    #[serde(default)]
+    data: Option<BitableViewListData>,
+}
+
+#[derive(Deserialize)]
+struct BitableViewListData {
+    #[serde(default)]
+    items: Vec<BitableView>,
+    #[serde(default)]
+    has_more: bool,
+    #[serde(default)]
+    page_token: String,
+}
+
 impl LarkClient {
     /// List every record in a Bitable table, optionally filtered. The
     /// filter is passed through verbatim — see Lark Bitable docs for
@@ -723,6 +754,73 @@ impl LarkClient {
             )));
         }
         Ok(())
+    }
+
+    /// List all views in a Bitable table. Used by the binding wizard to
+    /// populate the view-scope dropdown. Auto-paginates up to
+    /// `MAX_LIST_PAGES` pages — production tables rarely have more than
+    /// a few views, so pagination is precautionary.
+    pub async fn bitable_list_views(
+        &self,
+        app_token: &str,
+        table_id: &str,
+    ) -> Result<Vec<BitableView>> {
+        let token = self.tenant_access_token().await?;
+        let mut out: Vec<BitableView> = Vec::new();
+        let mut page_token: Option<String> = None;
+        for _ in 0..MAX_LIST_PAGES {
+            let url = format!(
+                "{}/open-apis/bitable/v1/apps/{}/tables/{}/views",
+                self.config.base_url, app_token, table_id
+            );
+            let resp = self
+                .send_with_retry("bitable_list_views", || {
+                    let mut req = self
+                        .http
+                        .get(&url)
+                        .bearer_auth(&token)
+                        .query(&[("page_size", DEFAULT_PAGE_SIZE.to_string())]);
+                    if let Some(pt) = page_token.as_ref() {
+                        req = req.query(&[("page_token", pt.as_str())]);
+                    }
+                    req
+                })
+                .await?;
+            let status = resp.status();
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| AppError::Lark(format!("bitable_list_views body: {e}")))?;
+            if !status.is_success() {
+                return Err(AppError::Lark(format!(
+                    "bitable_list_views http {status}: {}",
+                    truncate(&text, 200)
+                )));
+            }
+            let parsed: BitableViewListResponse = serde_json::from_str(&text).map_err(|e| {
+                AppError::Lark(format!(
+                    "bitable_list_views parse: {e}; body={}",
+                    truncate(&text, 200)
+                ))
+            })?;
+            if parsed.code != 0 {
+                return Err(AppError::Lark(format!(
+                    "bitable_list_views code {}: {}",
+                    parsed.code, parsed.msg
+                )));
+            }
+            let data = parsed
+                .data
+                .ok_or_else(|| AppError::Lark("bitable_list_views missing data".into()))?;
+            out.extend(data.items);
+            if !data.has_more || data.page_token.is_empty() {
+                return Ok(out);
+            }
+            page_token = Some(data.page_token);
+        }
+        Err(AppError::Lark(format!(
+            "bitable_list_views pagination exceeded {MAX_LIST_PAGES} pages"
+        )))
     }
 
     /// List all fields in a Bitable table. Used by the schema wizard.
@@ -1906,6 +2004,111 @@ mod tests {
         assert_eq!(fields[0].field_type, 1);
         assert_eq!(fields[1].field_name, "kanban_column");
         assert_eq!(fields[1].field_type, 3);
+    }
+
+    // ── bitable list views ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn bitable_list_views_returns_views_in_one_page() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/views",
+            ))
+            .and(header("authorization", "Bearer t_xyz"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "msg": "ok",
+                "data": {
+                    "items": [
+                        { "view_id": "vw_grid", "view_name": "Grid view", "view_type": "grid" },
+                        { "view_id": "vw_sprint", "view_name": "Current Sprint", "view_type": "grid" }
+                    ],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let views = client
+            .bitable_list_views("bascntest", "tbltest")
+            .await
+            .unwrap();
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].view_id, "vw_grid");
+        assert_eq!(views[0].view_name, "Grid view");
+        assert_eq!(views[0].view_type, "grid");
+        assert_eq!(views[1].view_id, "vw_sprint");
+    }
+
+    #[tokio::test]
+    async fn bitable_list_views_paginates() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/views",
+            ))
+            .and(query_param("page_size", "500"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [{ "view_id": "v1", "view_name": "First", "view_type": "grid" }],
+                    "has_more": true,
+                    "page_token": "p2"
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/views",
+            ))
+            .and(query_param("page_token", "p2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [{ "view_id": "v2", "view_name": "Second", "view_type": "kanban" }],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let views = client
+            .bitable_list_views("bascntest", "tbltest")
+            .await
+            .unwrap();
+        assert_eq!(views.len(), 2);
+        assert_eq!(views[0].view_id, "v1");
+        assert_eq!(views[1].view_id, "v2");
+    }
+
+    #[tokio::test]
+    async fn bitable_list_views_surfaces_non_zero_code_as_error() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/views",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 1254000,
+                "msg": "app_token invalid"
+            })))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let err = client
+            .bitable_list_views("bascntest", "tbltest")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("1254000"), "{err}");
     }
 
     // ── bitable create field ─────────────────────────────────────
