@@ -95,6 +95,7 @@
     const binding: BitableBinding = {
       app_token: appToken.trim(),
       table_id: tableId.trim(),
+      filters: existing?.filters ?? { conjunction: 'and', conditions: [] },
       field_mapping: {
         title: titleRef,
         description: fieldRefOf(descFieldId),

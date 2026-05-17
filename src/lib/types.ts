@@ -281,9 +281,36 @@ export type StatusValueMapping = {
   default_column: KanbanColumnLiteral;
 };
 
+export type FilterOperator =
+  | 'is'
+  | 'isNot'
+  | 'contains'
+  | 'doesNotContain'
+  | 'isEmpty'
+  | 'isNotEmpty'
+  | 'isGreater'
+  | 'isGreaterEqual'
+  | 'isLess'
+  | 'isLessEqual';
+
+export type FilterConjunction = 'and' | 'or';
+
+export type FilterCondition = {
+  field_id: string;
+  field_name: string;
+  operator: FilterOperator;
+  value: string[];
+};
+
+export type FilterSpec = {
+  conjunction: FilterConjunction;
+  conditions: FilterCondition[];
+};
+
 export type BitableBinding = {
   app_token: string;
   table_id: string;
+  filters: FilterSpec;
   field_mapping: FieldMapping;
   status_value_mapping: StatusValueMapping;
   created_at: number;

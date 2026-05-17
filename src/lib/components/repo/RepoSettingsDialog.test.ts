@@ -42,6 +42,7 @@ describe('RepoSettingsDialog', () => {
     larkBindings.bindings.set('repo_x', {
       app_token: 'bascntest12345',
       table_id: 'tbltest',
+      filters: { conjunction: 'and', conditions: [] },
       field_mapping: {
         title: { field_id: 'fld_t', field_name: 'Task name' },
         description: null,
@@ -82,6 +83,7 @@ describe('RepoSettingsDialog', () => {
     larkBindings.bindings.set('repo_x', {
       app_token: 'bascntest',
       table_id: 'tbltest',
+      filters: { conjunction: 'and', conditions: [] },
       field_mapping: {
         title: { field_id: 'fld_t', field_name: 'Task name' },
         description: null,
@@ -151,6 +153,7 @@ describe('RepoSettingsDialog', () => {
     larkBindings.bindings.set('repo_x', {
       app_token: 'bascntest',
       table_id: 'tbltest',
+      filters: { conjunction: 'and', conditions: [] },
       field_mapping: {
         title: { field_id: 'fld_t', field_name: 'Task name' },
         description: null,
@@ -216,6 +219,7 @@ describe('RepoSettingsDialog', () => {
     larkBindings.bindings.set('repo_x', {
       app_token: 'bascntest',
       table_id: 'tbltest',
+      filters: { conjunction: 'and', conditions: [] },
       field_mapping: {
         title: { field_id: 'fld_t', field_name: 'Task name' },
         description: null,

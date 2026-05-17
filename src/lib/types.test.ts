@@ -1,5 +1,15 @@
-import { describe, it, expectTypeOf } from 'vitest';
-import type { Message, MessageRole, ToolUse, ToolResult, AgentEvent, AgentStatus } from './types';
+import { describe, expect, it, expectTypeOf } from 'vitest';
+import type {
+  Message,
+  MessageRole,
+  ToolUse,
+  ToolResult,
+  AgentEvent,
+  AgentStatus,
+  BitableBinding,
+  FilterSpec,
+  FilterOperator,
+} from './types';
 
 describe('Phase 1c types', () => {
   it('MessageRole is a union of the 4 roles', () => {
@@ -63,5 +73,43 @@ describe('Phase 1c types', () => {
   it('AgentEvent.Error carries message field', () => {
     const ev: AgentEvent = { type: 'error', message: 'spawn failed' };
     expectTypeOf(ev.message).toBeString();
+  });
+});
+
+describe('FilterSpec types', () => {
+  it('BitableBinding includes filters field with default empty spec shape', () => {
+    const empty: FilterSpec = { conjunction: 'and', conditions: [] };
+    const b: BitableBinding = {
+      app_token: 'app',
+      table_id: 'tbl',
+      filters: empty,
+      field_mapping: {
+        title: { field_id: 'f', field_name: 'F' },
+        description: null,
+        status: null,
+        order: null,
+      },
+      status_value_mapping: { entries: {}, default_column: 'todo' },
+      created_at: 0,
+      updated_at: 0,
+    };
+    expect(b.filters.conditions).toEqual([]);
+    expect(b.filters.conjunction).toBe('and');
+  });
+
+  it('FilterOperator literal type accepts all 10 operators', () => {
+    const ops: FilterOperator[] = [
+      'is',
+      'isNot',
+      'contains',
+      'doesNotContain',
+      'isEmpty',
+      'isNotEmpty',
+      'isGreater',
+      'isGreaterEqual',
+      'isLess',
+      'isLessEqual',
+    ];
+    expect(ops).toHaveLength(10);
   });
 });
