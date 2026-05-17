@@ -253,4 +253,56 @@ describe('RepoSettingsDialog', () => {
     await fireEvent.keyDown(window, { key: 'Escape' });
     expect(onClose).not.toHaveBeenCalled();
   });
+
+  it('shows view row with view name when bound', async () => {
+    larkBindings.bindings.set('repo_x', {
+      app_token: 'bascntest',
+      table_id: 'tbltest',
+      view_id: 'vw_sprint',
+      field_mapping: {
+        title: { field_id: 'fld_t', field_name: 'Task name' },
+        description: null,
+        status: null,
+        order: null,
+      },
+      status_value_mapping: { entries: {}, default_column: 'todo' },
+      created_at: 0,
+      updated_at: 0,
+    });
+    render(RepoSettingsDialog, {
+      props: {
+        repoId: 'repo_x',
+        repoName: 'Repo X',
+        open: true,
+        onClose: vi.fn(),
+      },
+    });
+    expect(screen.getByTestId('binding-view-row')).toHaveTextContent('vw_sprint');
+  });
+
+  it('shows "All records" when no view bound', async () => {
+    larkBindings.bindings.set('repo_x', {
+      app_token: 'bascntest',
+      table_id: 'tbltest',
+      view_id: null,
+      field_mapping: {
+        title: { field_id: 'fld_t', field_name: 'Task name' },
+        description: null,
+        status: null,
+        order: null,
+      },
+      status_value_mapping: { entries: {}, default_column: 'todo' },
+      created_at: 0,
+      updated_at: 0,
+    });
+    render(RepoSettingsDialog, {
+      props: {
+        repoId: 'repo_x',
+        repoName: 'Repo X',
+        open: true,
+        onClose: vi.fn(),
+      },
+    });
+    expect(screen.getByTestId('binding-view-row')).toHaveTextContent('All records');
+  });
 });

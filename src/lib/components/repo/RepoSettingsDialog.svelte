@@ -107,6 +107,9 @@
             <div class="text-[var(--text-muted)] text-[11px]">
               {binding.app_token.slice(0, 12)}… / {binding.table_id}
             </div>
+            <div class="text-[var(--text-muted)] text-[11px]" data-testid="binding-view-row">
+              View: {binding.view_id ?? 'All records (no filter)'}
+            </div>
             <div class="flex gap-2">
               <button
                 type="button"
