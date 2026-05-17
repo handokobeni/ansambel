@@ -20,12 +20,26 @@ describe('FilterBar — empty state', () => {
   });
 
   it('does not show conjunction toggle when 0 or 1 conditions', () => {
-    render(FilterBar, {
+    const { unmount } = render(FilterBar, {
       props: {
         repoId: 'repo-1',
         appToken: 'appA',
         tableId: 'tblA',
         filters: { conjunction: 'and', conditions: [] },
+      },
+    });
+    expect(screen.queryByRole('combobox', { name: /conjunction/i })).not.toBeInTheDocument();
+    unmount();
+
+    render(FilterBar, {
+      props: {
+        repoId: 'repo-1',
+        appToken: 'appA',
+        tableId: 'tblA',
+        filters: {
+          conjunction: 'and',
+          conditions: [{ field_id: 'f1', field_name: 'Status', operator: 'is', value: [] }],
+        },
       },
     });
     expect(screen.queryByRole('combobox', { name: /conjunction/i })).not.toBeInTheDocument();
