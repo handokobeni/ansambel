@@ -5,6 +5,10 @@ import { render, screen } from '@testing-library/svelte';
 import KanbanBoard from './KanbanBoard.svelte';
 import type { Task } from '$lib/types';
 
+vi.mock('$lib/stores/lark-bindings.svelte', () => ({
+  larkBindings: { get: vi.fn(() => undefined) },
+}));
+
 const COLUMNS = ['Todo', 'In Progress', 'Review', 'Done'];
 
 const makeTask = (overrides: Partial<Task> = {}): Task => ({

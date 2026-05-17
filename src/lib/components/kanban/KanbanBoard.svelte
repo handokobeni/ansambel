@@ -3,6 +3,8 @@
   import { dndzone, SHADOW_ITEM_MARKER_PROPERTY_NAME } from 'svelte-dnd-action';
   import type { Task, KanbanColumn } from '$lib/types';
   import TaskCard from './TaskCard.svelte';
+  import FilterBar from './FilterBar.svelte';
+  import { larkBindings } from '$lib/stores/lark-bindings.svelte';
 
   const {
     repoId,
@@ -138,6 +140,16 @@
     }
   }
 </script>
+
+{#if larkBindings.get(repoId)}
+  {@const binding = larkBindings.get(repoId)!}
+  <FilterBar
+    {repoId}
+    appToken={binding.app_token}
+    tableId={binding.table_id}
+    filters={binding.filters}
+  />
+{/if}
 
 <div
   class="kanban-board grid grid-cols-4 gap-3 p-3 h-full overflow-x-auto min-w-0"
