@@ -21,8 +21,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-// Consumed by list_tasks in Task 8 (phase-3a-3-1).
-#[allow(dead_code)]
 /// Rebuild a FilterSpec with each condition's `field_name` overwritten
 /// from a canonical `field_id → field_name` map. Missing ids fall through
 /// with the persisted name (server will surface an error chip-side).
@@ -59,7 +57,6 @@ pub struct LarkProvider {
     table_id: String,
     /// Active filter spec for this provider. Conditions may have stale
     /// `field_name`s that get refreshed via `field_name_by_id()` before use.
-    #[allow(dead_code)] // Consumed by list_tasks in Task 8.
     filters: FilterSpec,
     field_mapping: FieldMapping,
     status_value_mapping: StatusValueMapping,
@@ -120,7 +117,6 @@ impl LarkProvider {
     /// Lazily fetch + cache `{field_id → canonical field_name}` from the
     /// bound table's schema. Rebuilt only on a fresh LarkProvider instance
     /// (i.e. after the binding is saved from the wizard or FilterBar).
-    #[allow(dead_code)] // Consumed by list_tasks in Task 8.
     pub(crate) async fn field_name_by_id(&self) -> Result<&HashMap<String, String>> {
         self.field_name_by_id
             .get_or_try_init(|| async {
@@ -346,13 +342,20 @@ fn column_rank(c: &KanbanColumn) -> u8 {
 #[async_trait]
 impl TaskProvider for LarkProvider {
     async fn list_tasks(&self, repo_filter: Option<&str>) -> Result<Vec<Task>> {
-        // Fetch all records and filter client-side so rows with missing
-        // repo_id can fall back to the caller's filter value. The Lark-side
-        // filter expression would silently drop those rows.
-        let records = self
-            .client
-            .bitable_list_records(&self.app_token, &self.table_id, None)
-            .await?;
+        // Route to the search endpoint when filters are active so Lark
+        // applies server-side filtering; fall back to list when no filters
+        // are set so we avoid an unnecessary schema fetch.
+        let records: Vec<BitableRecord> = if self.filters.is_empty() {
+            self.client
+                .bitable_list_records(&self.app_token, &self.table_id, None)
+                .await?
+        } else {
+            let canonical = self.field_name_by_id().await?;
+            let refreshed = refresh_field_names(&self.filters, canonical);
+            self.client
+                .bitable_search_records(&self.app_token, &self.table_id, &refreshed)
+                .await?
+        };
         let primary = self.primary_field_name().await;
         let total = records.len();
         let mut skipped = 0usize;
@@ -1659,5 +1662,123 @@ mod tests {
         // Deleted field: fall back to the persisted name; server will error,
         // surface to user via the chip "broken filter" UI.
         assert_eq!(refreshed.conditions[0].field_name, "Was Status");
+    }
+
+    fn build_provider_with_filter(
+        mock: &wiremock::MockServer,
+        filters: crate::state::FilterSpec,
+    ) -> LarkProvider {
+        let client = std::sync::Arc::new(LarkClient::new(LarkConfig {
+            app_id: "id".into(),
+            app_secret: "sec".into(),
+            app_token: "appA".into(),
+            table_id: "tblA".into(),
+            base_url: mock.uri(),
+        }));
+        LarkProvider::new(
+            client,
+            "appA".into(),
+            "tblA".into(),
+            filters,
+            FieldMapping {
+                title: FieldRef {
+                    field_id: "fld1".into(),
+                    field_name: "Title".into(),
+                },
+                description: None,
+                status: None,
+                order: None,
+            },
+            StatusValueMapping::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn lark_provider_uses_list_endpoint_when_filters_empty() {
+        use crate::state::{FilterConjunction, FilterSpec};
+
+        let mock = MockServer::start().await;
+        mount_token(&mock).await;
+        // List endpoint (GET) must be called.
+        Mock::given(method("GET"))
+            .and(path("/open-apis/bitable/v1/apps/appA/tables/tblA/records"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": { "items": [], "has_more": false, "page_token": "", "total": 0 }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        // Search endpoint must NOT be called.
+        Mock::given(method("POST"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
+            ))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let provider = build_provider_with_filter(
+            &mock,
+            FilterSpec {
+                conjunction: FilterConjunction::And,
+                conditions: vec![],
+            },
+        );
+        let _ = provider.list_tasks(Some("repo-1")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lark_provider_uses_search_endpoint_when_filters_non_empty() {
+        use crate::state::{FilterCondition, FilterConjunction, FilterOperator, FilterSpec};
+
+        let mock = MockServer::start().await;
+        mount_token(&mock).await;
+        // Schema fetch (for field-name cache).
+        Mock::given(method("GET"))
+            .and(path("/open-apis/bitable/v1/apps/appA/tables/tblA/fields"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": { "items": [
+                    { "field_id": "fld1", "field_name": "Status", "type": 3,
+                      "is_primary": false, "property": null }
+                ], "has_more": false, "page_token": null }
+            })))
+            .mount(&mock)
+            .await;
+        // List endpoint must NOT be called.
+        Mock::given(method("GET"))
+            .and(path("/open-apis/bitable/v1/apps/appA/tables/tblA/records"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock)
+            .await;
+        // Search endpoint MUST be called.
+        Mock::given(method("POST"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": { "items": [], "has_more": false, "page_token": null, "total": 0 }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let provider = build_provider_with_filter(
+            &mock,
+            FilterSpec {
+                conjunction: FilterConjunction::And,
+                conditions: vec![FilterCondition {
+                    field_id: "fld1".into(),
+                    field_name: "Old Name".into(),
+                    operator: FilterOperator::Is,
+                    value: vec!["Done".into()],
+                }],
+            },
+        );
+        let _ = provider.list_tasks(Some("repo-1")).await.unwrap();
     }
 }
