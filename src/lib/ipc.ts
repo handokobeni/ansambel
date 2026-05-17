@@ -23,6 +23,7 @@ import type {
   SetLarkCredentialsArgs,
   BitableBinding,
   ProposedMapping,
+  BitableField,
 } from './types';
 
 export type ListMessagesOpts = {
@@ -234,6 +235,10 @@ export const api = {
     /** Inspect a Bitable table and propose a FieldMapping + StatusValueMapping. */
     detectSchema: (appToken: string, tableId: string): Promise<ProposedMapping> =>
       invoke('detect_lark_schema', { appToken, tableId }),
+
+    /** List all fields for a Bitable table. */
+    listFields: (appToken: string, tableId: string): Promise<BitableField[]> =>
+      invoke('list_lark_fields', { appToken, tableId }),
   },
 
   script: {

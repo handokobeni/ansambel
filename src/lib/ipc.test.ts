@@ -508,6 +508,21 @@ describe('api.lark', () => {
   });
 });
 
+describe('api.lark.listFields', () => {
+  it('invokes list_lark_fields with camelCase params and returns BitableField[]', async () => {
+    vi.mocked(invoke).mockResolvedValue([
+      { field_id: 'fld1', field_name: 'Title', type: 1, is_primary: true, property: null },
+    ]);
+    const result = await api.lark.listFields('appA', 'tblA');
+    expect(invoke).toHaveBeenCalledWith('list_lark_fields', {
+      appToken: 'appA',
+      tableId: 'tblA',
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0].field_name).toBe('Title');
+  });
+});
+
 describe('agentChannel', () => {
   it('returns a Tauri Channel-shaped object with onmessage setter', () => {
     const ch = agentChannel();
