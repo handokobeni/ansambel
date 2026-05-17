@@ -539,6 +539,98 @@ impl LarkClient {
         )))
     }
 
+    /// Search Bitable records using the POST `records/search` endpoint with a
+    /// typed filter body. Auto-paginates up to `MAX_LIST_PAGES` pages,
+    /// matching the pattern of `bitable_list_records`.
+    pub async fn bitable_search_records(
+        &self,
+        app_token: &str,
+        table_id: &str,
+        filter: &crate::state::FilterSpec,
+    ) -> Result<Vec<BitableRecord>> {
+        #[derive(Deserialize)]
+        struct SearchPageData {
+            #[serde(default)]
+            items: Vec<BitableRecord>,
+            #[serde(default)]
+            has_more: bool,
+            #[serde(default)]
+            page_token: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        struct SearchResponse {
+            code: i64,
+            #[serde(default)]
+            msg: String,
+            #[serde(default)]
+            data: Option<SearchPageData>,
+        }
+
+        let token = self.tenant_access_token().await?;
+        let mut out: Vec<BitableRecord> = Vec::new();
+        let mut page_token: Option<String> = None;
+        let body = serde_json::json!({ "filter": filter });
+
+        for _ in 0..MAX_LIST_PAGES {
+            let url = format!(
+                "{}/open-apis/bitable/v1/apps/{}/tables/{}/records/search",
+                self.config.base_url, app_token, table_id
+            );
+            let resp = self
+                .send_with_retry("bitable_search", || {
+                    let mut req = self
+                        .http
+                        .post(&url)
+                        .bearer_auth(&token)
+                        .query(&[("page_size", DEFAULT_PAGE_SIZE.to_string())])
+                        .json(&body);
+                    if let Some(pt) = page_token.as_ref() {
+                        req = req.query(&[("page_token", pt.as_str())]);
+                    }
+                    req
+                })
+                .await?;
+            let status = resp.status();
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| AppError::Lark(format!("bitable_search body: {e}")))?;
+            if !status.is_success() {
+                return Err(AppError::Lark(format!(
+                    "bitable_search http {status}: {}",
+                    truncate(&text, 200)
+                )));
+            }
+            let parsed: SearchResponse = serde_json::from_str(&text).map_err(|e| {
+                AppError::Lark(format!(
+                    "bitable_search parse: {e}; body={}",
+                    truncate(&text, 200)
+                ))
+            })?;
+            if parsed.code != 0 {
+                return Err(AppError::Lark(format!(
+                    "bitable_search_records code {}: {}",
+                    parsed.code, parsed.msg
+                )));
+            }
+            let data = parsed
+                .data
+                .ok_or_else(|| AppError::Lark("bitable_search missing data".into()))?;
+            out.extend(data.items);
+            if !data.has_more {
+                return Ok(out);
+            }
+            match data.page_token {
+                Some(pt) if !pt.is_empty() => page_token = Some(pt),
+                _ => return Ok(out),
+            }
+        }
+        Err(AppError::Lark(format!(
+            "bitable_search pagination exceeded {MAX_LIST_PAGES} pages"
+        )))
+    }
+
     /// Create a single record. `fields` is a JSON object — the keys
     /// must match the table's column names, values match the declared
     /// types (e.g. number, text, single-select).
@@ -2046,5 +2138,223 @@ mod tests {
             is_primary: false,
         };
         assert!(f.options().is_empty());
+    }
+
+    // ── bitable_search_records ───────────────────────────────────
+
+    #[tokio::test]
+    async fn bitable_search_records_posts_filter_body_with_and_conjunction() {
+        use crate::state::{FilterCondition, FilterConjunction, FilterOperator, FilterSpec};
+        use wiremock::matchers::{body_json, header_exists, method, path};
+
+        let mock = MockServer::start().await;
+        mount_token(&mock).await;
+
+        Mock::given(method("POST"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
+            ))
+            .and(header_exists("Authorization"))
+            .and(body_json(serde_json::json!({
+                "filter": {
+                    "conjunction": "and",
+                    "conditions": [
+                        { "field_id": "fld1", "field_name": "Status", "operator": "is", "value": ["Done"] }
+                    ]
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "msg": "success",
+                "data": {
+                    "items": [
+                        { "record_id": "rec1", "fields": { "Title": "T1" } }
+                    ],
+                    "has_more": false,
+                    "page_token": null,
+                    "total": 1
+                }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let client = LarkClient::new(LarkConfig {
+            app_id: "id".into(),
+            app_secret: "sec".into(),
+            app_token: "appA".into(),
+            table_id: "tblA".into(),
+            base_url: mock.uri(),
+        });
+
+        let spec = FilterSpec {
+            conjunction: FilterConjunction::And,
+            conditions: vec![FilterCondition {
+                field_id: "fld1".into(),
+                field_name: "Status".into(),
+                operator: FilterOperator::Is,
+                value: vec!["Done".into()],
+            }],
+        };
+        let records = client
+            .bitable_search_records("appA", "tblA", &spec)
+            .await
+            .expect("search ok");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].record_id, "rec1");
+    }
+
+    #[tokio::test]
+    async fn bitable_search_records_posts_or_conjunction() {
+        use crate::state::{FilterCondition, FilterConjunction, FilterOperator, FilterSpec};
+        use wiremock::matchers::{body_partial_json, method, path};
+
+        let mock = MockServer::start().await;
+        mount_token(&mock).await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
+            ))
+            .and(body_partial_json(serde_json::json!({
+                "filter": { "conjunction": "or" }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": { "items": [], "has_more": false, "page_token": null, "total": 0 }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let client = LarkClient::new(LarkConfig {
+            app_id: "id".into(),
+            app_secret: "sec".into(),
+            app_token: "appA".into(),
+            table_id: "tblA".into(),
+            base_url: mock.uri(),
+        });
+
+        let spec = FilterSpec {
+            conjunction: FilterConjunction::Or,
+            conditions: vec![FilterCondition {
+                field_id: "fld1".into(),
+                field_name: "A".into(),
+                operator: FilterOperator::IsEmpty,
+                value: vec![],
+            }],
+        };
+        let r = client
+            .bitable_search_records("appA", "tblA", &spec)
+            .await
+            .unwrap();
+        assert!(r.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bitable_search_records_paginates() {
+        use crate::state::{FilterCondition, FilterConjunction, FilterOperator, FilterSpec};
+        use wiremock::matchers::{method, path, query_param};
+
+        let mock = MockServer::start().await;
+        mount_token(&mock).await;
+
+        // Page 1: has_more=true, returns page_token "tok2"
+        Mock::given(method("POST"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
+            ))
+            .and(query_param("page_size", "500"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": {
+                    "items": [{ "record_id": "r1", "fields": {} }],
+                    "has_more": true, "page_token": "tok2", "total": 2
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&mock)
+            .await;
+
+        // Page 2: page_token=tok2, returns last item
+        Mock::given(method("POST"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
+            ))
+            .and(query_param("page_token", "tok2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": {
+                    "items": [{ "record_id": "r2", "fields": {} }],
+                    "has_more": false, "page_token": null, "total": 2
+                }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let client = LarkClient::new(LarkConfig {
+            app_id: "id".into(),
+            app_secret: "sec".into(),
+            app_token: "appA".into(),
+            table_id: "tblA".into(),
+            base_url: mock.uri(),
+        });
+
+        let spec = FilterSpec {
+            conjunction: FilterConjunction::And,
+            conditions: vec![FilterCondition {
+                field_id: "fld1".into(),
+                field_name: "A".into(),
+                operator: FilterOperator::IsNotEmpty,
+                value: vec![],
+            }],
+        };
+        let r = client
+            .bitable_search_records("appA", "tblA", &spec)
+            .await
+            .unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].record_id, "r1");
+        assert_eq!(r[1].record_id, "r2");
+    }
+
+    #[tokio::test]
+    async fn bitable_search_records_surfaces_non_zero_code_as_error() {
+        use crate::state::{FilterConjunction, FilterSpec};
+        use wiremock::matchers::{method, path};
+
+        let mock = MockServer::start().await;
+        mount_token(&mock).await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 1254100, "msg": "invalid filter field_name", "data": {}
+            })))
+            .mount(&mock)
+            .await;
+
+        let client = LarkClient::new(LarkConfig {
+            app_id: "id".into(),
+            app_secret: "sec".into(),
+            app_token: "appA".into(),
+            table_id: "tblA".into(),
+            base_url: mock.uri(),
+        });
+
+        let spec = FilterSpec {
+            conjunction: FilterConjunction::And,
+            conditions: vec![],
+        };
+        let err = client
+            .bitable_search_records("appA", "tblA", &spec)
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("1254100"),
+            "expected code in error, got: {msg}"
+        );
     }
 }
