@@ -9,19 +9,55 @@
 use super::{CreateTaskArgs, TaskPatch, TaskProvider};
 use crate::error::Result;
 use crate::platform::lark_client::{BitableOption, BitableRecord, LarkClient};
-use crate::state::{BitableBinding, FieldMapping, KanbanColumn, StatusValueMapping, Task};
+use crate::state::{
+    BitableBinding, FieldMapping, FilterCondition, FilterSpec, KanbanColumn, StatusValueMapping,
+    Task,
+};
 use crate::task_provider::lark_field_resolver::{
     resolve_description, resolve_order, resolve_status, resolve_title,
 };
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+
+/// Rebuild a FilterSpec with each condition's `field_name` overwritten
+/// from a canonical `field_id → field_name` map. Missing ids fall through
+/// with the persisted name (server will surface an error chip-side).
+pub(crate) fn refresh_field_names(
+    spec: &FilterSpec,
+    canonical: &HashMap<String, String>,
+) -> FilterSpec {
+    let conditions = spec
+        .conditions
+        .iter()
+        .map(|c| {
+            let canonical_name = canonical
+                .get(&c.field_id)
+                .cloned()
+                .unwrap_or_else(|| c.field_name.clone());
+            FilterCondition {
+                field_id: c.field_id.clone(),
+                field_name: canonical_name,
+                operator: c.operator.clone(),
+                value: c.value.clone(),
+            }
+        })
+        .collect();
+    FilterSpec {
+        conjunction: spec.conjunction.clone(),
+        conditions,
+    }
+}
 
 #[derive(Debug)]
 pub struct LarkProvider {
     client: Arc<LarkClient>,
     app_token: String,
     table_id: String,
+    /// Active filter spec for this provider. Conditions may have stale
+    /// `field_name`s that get refreshed via `field_name_by_id()` before use.
+    filters: FilterSpec,
     field_mapping: FieldMapping,
     status_value_mapping: StatusValueMapping,
     /// Lazy-loaded Bitable primary-column field name. Fetched once per
@@ -37,6 +73,12 @@ pub struct LarkProvider {
     /// reject with `1254062 SingleSelectFieldConvFail`. Cached as empty
     /// `Vec` when no status field is mapped or the fetch fails.
     status_options: OnceCell<Vec<BitableOption>>,
+    /// Lazy-loaded map of `field_id → canonical field_name` from the bound
+    /// table's schema. Used to refresh stale `field_name` values in
+    /// `FilterSpec` conditions before sending to the Lark API. Rebuilt only
+    /// on a fresh `LarkProvider` instance (i.e. after the binding is saved
+    /// from the wizard or FilterBar).
+    field_name_by_id: OnceCell<HashMap<String, String>>,
 }
 
 impl LarkProvider {
@@ -44,6 +86,7 @@ impl LarkProvider {
         client: Arc<LarkClient>,
         app_token: String,
         table_id: String,
+        filters: FilterSpec,
         field_mapping: FieldMapping,
         status_value_mapping: StatusValueMapping,
     ) -> Self {
@@ -51,10 +94,12 @@ impl LarkProvider {
             client,
             app_token,
             table_id,
+            filters,
             field_mapping,
             status_value_mapping,
             primary_field_name: OnceCell::new(),
             status_options: OnceCell::new(),
+            field_name_by_id: OnceCell::new(),
         }
     }
 
@@ -63,9 +108,30 @@ impl LarkProvider {
             client,
             binding.app_token,
             binding.table_id,
+            binding.filters,
             binding.field_mapping,
             binding.status_value_mapping,
         )
+    }
+
+    /// Lazily fetch + cache `{field_id → canonical field_name}` from the
+    /// bound table's schema. Rebuilt only on a fresh LarkProvider instance
+    /// (i.e. after the binding is saved from the wizard or FilterBar).
+    pub(crate) async fn field_name_by_id(&self) -> Result<&HashMap<String, String>> {
+        self.field_name_by_id
+            .get_or_try_init(|| async {
+                let fields = self
+                    .client
+                    .bitable_list_fields(&self.app_token, &self.table_id)
+                    .await?;
+                Ok::<_, crate::error::AppError>(
+                    fields
+                        .into_iter()
+                        .map(|f| (f.field_id, f.field_name))
+                        .collect::<HashMap<_, _>>(),
+                )
+            })
+            .await
     }
 
     /// Returns the Bitable primary column's field name, or `None` if the
@@ -525,6 +591,7 @@ mod tests {
             client,
             "bascntest".into(),
             "tbltest".into(),
+            crate::state::FilterSpec::default(),
             canonical_mapping(),
             canonical_values(),
         )
@@ -768,6 +835,7 @@ mod tests {
             client,
             "bascntest".into(),
             "tbltest".into(),
+            crate::state::FilterSpec::default(),
             mapping,
             canonical_values(),
         );
@@ -1013,6 +1081,7 @@ mod tests {
             client,
             "bascntest".into(),
             "tbltest".into(),
+            crate::state::FilterSpec::default(),
             mapping,
             values,
         );
@@ -1485,5 +1554,106 @@ mod tests {
         let values = StatusValueMapping::default();
         let id = reverse_lookup_option(&values, KanbanColumn::Review);
         assert_eq!(id, None);
+    }
+
+    #[tokio::test]
+    async fn lark_provider_caches_field_name_by_id() {
+        use crate::state::{FilterConjunction, FilterSpec};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        mount_token(&mock).await;
+        Mock::given(method("GET"))
+            .and(path("/open-apis/bitable/v1/apps/appA/tables/tblA/fields"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": { "items": [
+                    { "field_id": "fld1", "field_name": "Renamed Status", "type": 3,
+                      "is_primary": false, "property": null }
+                ], "has_more": false, "page_token": null }
+            })))
+            .expect(1) // proves OnceCell only calls once
+            .mount(&mock)
+            .await;
+
+        let client = std::sync::Arc::new(LarkClient::new(LarkConfig {
+            app_id: "id".into(),
+            app_secret: "sec".into(),
+            app_token: "appA".into(),
+            table_id: "tblA".into(),
+            base_url: mock.uri(),
+        }));
+        let provider = LarkProvider::new(
+            client,
+            "appA".into(),
+            "tblA".into(),
+            FilterSpec {
+                conjunction: FilterConjunction::And,
+                conditions: vec![],
+            },
+            FieldMapping {
+                title: FieldRef {
+                    field_id: "fld1".into(),
+                    field_name: "Title".into(),
+                },
+                description: None,
+                status: None,
+                order: None,
+            },
+            StatusValueMapping::default(),
+        );
+
+        let cache1 = provider.field_name_by_id().await.unwrap().clone();
+        let cache2 = provider.field_name_by_id().await.unwrap().clone();
+        assert_eq!(
+            cache1.get("fld1").map(String::as_str),
+            Some("Renamed Status")
+        );
+        assert_eq!(cache1, cache2);
+    }
+
+    #[test]
+    fn refresh_field_names_overwrites_from_canonical() {
+        use crate::state::{FilterCondition, FilterConjunction, FilterOperator, FilterSpec};
+        use std::collections::HashMap;
+
+        let spec = FilterSpec {
+            conjunction: FilterConjunction::And,
+            conditions: vec![FilterCondition {
+                field_id: "fld1".into(),
+                field_name: "Old Name".into(),
+                operator: FilterOperator::Is,
+                value: vec!["x".into()],
+            }],
+        };
+        let mut canonical = HashMap::new();
+        canonical.insert("fld1".to_string(), "New Name".to_string());
+
+        let refreshed = refresh_field_names(&spec, &canonical);
+        assert_eq!(refreshed.conditions[0].field_name, "New Name");
+        assert_eq!(refreshed.conditions[0].field_id, "fld1");
+        assert_eq!(refreshed.conditions[0].value, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn refresh_field_names_keeps_old_name_when_id_missing_from_cache() {
+        use crate::state::{FilterCondition, FilterConjunction, FilterOperator, FilterSpec};
+        use std::collections::HashMap;
+
+        let spec = FilterSpec {
+            conjunction: FilterConjunction::And,
+            conditions: vec![FilterCondition {
+                field_id: "fld_deleted".into(),
+                field_name: "Was Status".into(),
+                operator: FilterOperator::Is,
+                value: vec!["x".into()],
+            }],
+        };
+        let canonical: HashMap<String, String> = HashMap::new();
+        let refreshed = refresh_field_names(&spec, &canonical);
+        // Deleted field: fall back to the persisted name; server will error,
+        // surface to user via the chip "broken filter" UI.
+        assert_eq!(refreshed.conditions[0].field_name, "Was Status");
     }
 }
