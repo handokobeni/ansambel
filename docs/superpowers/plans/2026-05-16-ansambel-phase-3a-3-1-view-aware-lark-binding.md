@@ -1,4 +1,4 @@
-# Phase 3a-4 — View-Aware Lark Binding Implementation Plan
+# Phase 3a-3.1 — View-Aware Lark Binding Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:subagent-driven-development (recommended) or
@@ -22,7 +22,7 @@ surfaces a `lark-view-missing` event for a non-blocking banner.
 Testing Library, Playwright (env-gated).
 
 **Spec:**
-`docs/superpowers/specs/2026-05-16-phase-3a-4-view-aware-lark-binding-design.md`
+`docs/superpowers/specs/2026-05-16-phase-3a-3-1-view-aware-lark-binding-design.md`
 
 ---
 
@@ -321,7 +321,7 @@ Expected: clean.
 
 ```bash
 git add src-tauri/src/platform/lark_client.rs
-git commit -m "feat(phase-3a-4): add bitable_list_views helper + BitableView type"
+git commit -m "feat(phase-3a-3-1): add bitable_list_views helper + BitableView type"
 ```
 
 ---
@@ -489,7 +489,7 @@ Expected: clean.
 
 ```bash
 git add src-tauri/src/platform/lark_client.rs src-tauri/src/task_provider/lark.rs
-git commit -m "feat(phase-3a-4): bitable_list_records accepts optional view_id"
+git commit -m "feat(phase-3a-3-1): bitable_list_records accepts optional view_id"
 ```
 
 ---
@@ -512,7 +512,7 @@ Add to `src-tauri/src/persistence/lark_repo_bindings.rs` test module:
         let tmp = tempdir().unwrap();
         let path = lark_repo_bindings_file(tmp.path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        // A schema-v1 file that predates Phase 3a-4 (no view_id key).
+        // A schema-v1 file that predates Phase 3a-3.1 (no view_id key).
         let legacy_json = serde_json::json!({
             "schema_version": 1,
             "bindings": {
@@ -607,7 +607,7 @@ fn default_schema_version() -> u32 {
 Just below `save_bindings`, add the migration helper:
 
 ```rust
-/// Idempotent Phase 3a-4 migration. Reads the bindings file, and if its
+/// Idempotent Phase 3a-3.1 migration. Reads the bindings file, and if its
 /// `schema_version` is still 1, rewrites it to 2. The `view_id` field is
 /// added by `#[serde(default)]` on `BitableBinding` — no per-binding
 /// rewrite is required. Returns the resulting (post-migration) schema
@@ -765,7 +765,7 @@ Expected: clean.
 ```bash
 git add src-tauri/src/state.rs src-tauri/src/persistence/lark_repo_bindings.rs \
         src/lib/types.ts src/lib/components/lark/LarkBindingWizard.svelte
-git commit -m "feat(phase-3a-4): add view_id to BitableBinding; bump schema 1->2"
+git commit -m "feat(phase-3a-3-1): add view_id to BitableBinding; bump schema 1->2"
 ```
 
 ---
@@ -937,7 +937,7 @@ Expected: clean.
 
 ```bash
 git add src-tauri/src/commands/lark_repo_binding.rs src-tauri/src/lib.rs src/lib/ipc.ts
-git commit -m "feat(phase-3a-4): list_lark_views Tauri command + ipc wrapper"
+git commit -m "feat(phase-3a-3-1): list_lark_views Tauri command + ipc wrapper"
 ```
 
 ---
@@ -1110,7 +1110,7 @@ Expected: clean.
 
 ```bash
 git add src-tauri/src/task_provider/lark.rs
-git commit -m "feat(phase-3a-4): LarkProvider threads view_id through list_tasks"
+git commit -m "feat(phase-3a-3-1): LarkProvider threads view_id through list_tasks"
 ```
 
 ---
@@ -1417,7 +1417,7 @@ Expected: clean.
 
 ```bash
 git add src-tauri/src/task_provider/lark.rs
-git commit -m "feat(phase-3a-4): LarkProvider falls back when view is missing"
+git commit -m "feat(phase-3a-3-1): LarkProvider falls back when view is missing"
 ```
 
 ---
@@ -1583,7 +1583,7 @@ In `setup()` (right after `let data_dir = ...` but before the bindings load),
 call the migrator from Task 3:
 
 ```rust
-            // Phase 3a-4 schema migration (v1 → v2). No-op for fresh
+            // Phase 3a-3.1 schema migration (v1 → v2). No-op for fresh
             // installs; bumps the version + makes future migrations
             // observable. Failure is non-fatal — log + continue.
             if let Err(e) = crate::persistence::lark_repo_bindings::migrate_v1_to_v2(&data_dir) {
@@ -1611,7 +1611,7 @@ Expected: clean.
 
 ```bash
 git add src-tauri/src/lib.rs src-tauri/src/commands/lark_repo_binding.rs
-git commit -m "feat(phase-3a-4): wire view-missing sink + run v1->v2 migration on startup"
+git commit -m "feat(phase-3a-3-1): wire view-missing sink + run v1->v2 migration on startup"
 ```
 
 ---
@@ -1932,7 +1932,7 @@ Expected: clean.
 ```bash
 git add src/lib/components/lark/LarkBindingWizard.svelte \
         src/lib/components/lark/LarkBindingWizard.test.ts
-git commit -m "feat(phase-3a-4): wizard step 1.5 view picker"
+git commit -m "feat(phase-3a-3-1): wizard step 1.5 view picker"
 ```
 
 ---
@@ -2051,7 +2051,7 @@ Expected: clean.
 ```bash
 git add src/lib/components/repo/RepoSettingsDialog.svelte \
         src/lib/components/repo/RepoSettingsDialog.test.ts
-git commit -m "feat(phase-3a-4): RepoSettingsDialog shows bound view"
+git commit -m "feat(phase-3a-3-1): RepoSettingsDialog shows bound view"
 ```
 
 ---
@@ -2152,7 +2152,7 @@ Expected: pass.
 
 ```bash
 git add src/lib/stores/view-missing.svelte.ts src/lib/stores/view-missing.svelte.test.ts
-git commit -m "feat(phase-3a-4): view-missing svelte store"
+git commit -m "feat(phase-3a-3-1): view-missing svelte store"
 ```
 
 ---
@@ -2299,7 +2299,7 @@ Expected: clean.
 
 ```bash
 git add src/lib/components/TitleBar.svelte src/lib/components/TitleBar.test.ts
-git commit -m "feat(phase-3a-4): view-missing banner + tauri event listener"
+git commit -m "feat(phase-3a-3-1): view-missing banner + tauri event listener"
 ```
 
 ---
@@ -2488,7 +2488,7 @@ Expected: clean.
 
 ```bash
 git add src-tauri/src/lib.rs
-git commit -m "test(phase-3a-4): wiremock integration tests for view_id flow"
+git commit -m "test(phase-3a-3-1): wiremock integration tests for view_id flow"
 ```
 
 ---
@@ -2519,7 +2519,7 @@ Create `tests/e2e/lark-binding-view-scope.spec.ts`:
 import { test, expect } from '@playwright/test';
 import { launchAnsambel, withMockLark } from './helpers';
 
-test.describe('Phase 3a-4 view-aware Lark binding', () => {
+test.describe('Phase 3a-3.1 view-aware Lark binding', () => {
   test('step 1.5 lists views and defaults to all records', async ({
     context,
   }) => {
@@ -2656,7 +2656,7 @@ Expected: clean.
 
 ```bash
 git add tests/e2e/lark-binding-view-scope.spec.ts tests/e2e/helpers/
-git commit -m "test(phase-3a-4): e2e playwright scenarios for view-aware binding"
+git commit -m "test(phase-3a-3-1): e2e playwright scenarios for view-aware binding"
 ```
 
 ---
@@ -2665,7 +2665,7 @@ git commit -m "test(phase-3a-4): e2e playwright scenarios for view-aware binding
 
 **Files:**
 
-- All Phase 3a-4 files
+- All Phase 3a-3.1 files
 
 - [ ] **Step 1: Run full test suites**
 
@@ -2723,10 +2723,10 @@ Run the dev app, open RepoSettings, walk the wizard end-to-end:
 - [ ] **Step 5: Update CHANGELOG / journal**
 
 If the project maintains a journal (per Phase 3a-3 cadence), add a
-`docs/journal/2026-05-16-phase-3a-4.md` entry:
+`docs/journal/2026-05-16-phase-3a-3-1.md` entry:
 
 ```markdown
-# 2026-05-16 — Phase 3a-4 view-aware Lark binding
+# 2026-05-16 — Phase 3a-3.1 view-aware Lark binding
 
 Ansambel now honors Lark Bitable per-view filters. Bindings gain an optional
 `view_id`; the wizard exposes a new Step 1.5 view picker; view-deletion falls
@@ -2738,14 +2738,14 @@ PR: #<TBD>
 - [ ] **Step 6: Commit final touches**
 
 ```bash
-git add docs/journal/2026-05-16-phase-3a-4.md
-git commit -m "docs(journal): 2026-05-16 Phase 3a-4 view-aware Lark binding"
+git add docs/journal/2026-05-16-phase-3a-3-1.md
+git commit -m "docs(journal): 2026-05-16 Phase 3a-3.1 view-aware Lark binding"
 ```
 
 - [ ] **Step 7: Open PR**
 
 Branch off `main`; push; open PR with title
-`feat(phase-3a-4): view-aware Lark binding`. Include:
+`feat(phase-3a-3-1): view-aware Lark binding`. Include:
 
 - Link to spec.
 - Brief summary (3 bullets max).

@@ -1,4 +1,4 @@
-# Phase 3a-4 — View-Aware Lark Binding
+# Phase 3a-3.1 — View-Aware Lark Binding
 
 **Status:** Approved — ready for plan. **Phase predecessor:**
 [3a-3 Per-Repo Lark Binding](2026-05-15-phase-3a-3-per-repo-lark-binding-design.md)
@@ -24,7 +24,7 @@ high in user value: one optional field on the binding, one wizard step, one
 query-param wire change. No client-side filter grammar; no parallel filter DSL.
 
 The user's mental model is _"I configure filters in Lark, Ansambel reflects
-them"_. Phase 3a-4 makes that true.
+them"_. Phase 3a-3.1 makes that true.
 
 ## Goals
 
