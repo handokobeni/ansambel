@@ -567,10 +567,39 @@ impl LarkClient {
             data: Option<SearchPageData>,
         }
 
+        // Wire DTO — strips `field_id` from each condition before sending.
+        // Lark's records/search endpoint does not recognise `field_id` and
+        // returns code 1254018 (InvalidFilter) if any unknown key is present.
+        // We keep `field_id` in the persisted `FilterCondition` as the stable
+        // rename-resilient lookup key; it is only removed here at the call site.
+        #[derive(serde::Serialize)]
+        struct WireFilter<'a> {
+            conjunction: &'a crate::state::FilterConjunction,
+            conditions: Vec<WireCondition<'a>>,
+        }
+        #[derive(serde::Serialize)]
+        struct WireCondition<'a> {
+            field_name: &'a str,
+            operator: &'a crate::state::FilterOperator,
+            value: &'a [String],
+        }
+        let wire = WireFilter {
+            conjunction: &filter.conjunction,
+            conditions: filter
+                .conditions
+                .iter()
+                .map(|c| WireCondition {
+                    field_name: &c.field_name,
+                    operator: &c.operator,
+                    value: &c.value,
+                })
+                .collect(),
+        };
+        let body = serde_json::json!({ "filter": wire });
+
         let token = self.tenant_access_token().await?;
         let mut out: Vec<BitableRecord> = Vec::new();
         let mut page_token: Option<String> = None;
-        let body = serde_json::json!({ "filter": filter });
 
         for _ in 0..MAX_LIST_PAGES {
             let url = format!(
@@ -2150,6 +2179,10 @@ mod tests {
         let mock = MockServer::start().await;
         mount_token(&mock).await;
 
+        // The wire body must NOT contain field_id — Lark rejects it with
+        // code 1254018 (InvalidFilter). Only field_name / operator / value
+        // are sent over the wire; field_id is kept in the persisted state
+        // as a stable rename-resilient lookup key.
         Mock::given(method("POST"))
             .and(path(
                 "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
@@ -2159,7 +2192,7 @@ mod tests {
                 "filter": {
                     "conjunction": "and",
                     "conditions": [
-                        { "field_id": "fld1", "field_name": "Status", "operator": "is", "value": ["Done"] }
+                        { "field_name": "Status", "operator": "is", "value": ["Done"] }
                     ]
                 }
             })))
@@ -2316,6 +2349,63 @@ mod tests {
         assert_eq!(r.len(), 2);
         assert_eq!(r[0].record_id, "r1");
         assert_eq!(r[1].record_id, "r2");
+    }
+
+    #[tokio::test]
+    async fn bitable_search_records_does_not_send_field_id_in_conditions() {
+        // Regression guard for Lark error code 1254018 (InvalidFilter).
+        // The records/search endpoint rejects ANY unrecognised key in the
+        // filter body. `field_id` is used internally for rename-resilient
+        // lookups but must be stripped before the request leaves the client.
+        use crate::state::{FilterCondition, FilterConjunction, FilterOperator, FilterSpec};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        mount_token(&mock).await;
+
+        Mock::given(method("POST"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
+            ))
+            .and(move |req: &Request| {
+                // Assertion: the serialised body must not contain the string
+                // "field_id" — Lark returns code 1254018 if it does.
+                let body = String::from_utf8_lossy(&req.body);
+                !body.contains("field_id")
+            })
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": { "items": [], "has_more": false, "page_token": null, "total": 0 }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let client = LarkClient::new(LarkConfig {
+            app_id: "id".into(),
+            app_secret: "sec".into(),
+            app_token: "appA".into(),
+            table_id: "tblA".into(),
+            base_url: mock.uri(),
+        });
+
+        let spec = FilterSpec {
+            conjunction: FilterConjunction::And,
+            conditions: vec![FilterCondition {
+                field_id: "fld_should_not_leak".into(),
+                field_name: "Status".into(),
+                operator: FilterOperator::Is,
+                value: vec!["Done".into()],
+            }],
+        };
+        // If field_id leaks into the body the mock's matcher will reject the
+        // request (wiremock returns 404 for unmatched requests), causing the
+        // client to surface an HTTP error — test would fail at this unwrap.
+        let _ = client
+            .bitable_search_records("appA", "tblA", &spec)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
