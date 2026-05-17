@@ -83,17 +83,12 @@ pub enum FilterOperator {
 }
 
 /// Conjunction joining multiple filter conditions (AND / OR).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FilterConjunction {
+    #[default]
     And,
     Or,
-}
-
-impl Default for FilterConjunction {
-    fn default() -> Self {
-        Self::And
-    }
 }
 
 /// One repo's binding to a Bitable: which table, plus how to map its
