@@ -1,5 +1,6 @@
 import { api } from '$lib/ipc';
 import { larkBindings } from '$lib/stores/lark-bindings.svelte';
+import { tasks } from '$lib/stores/tasks.svelte';
 import { addToast } from '$lib/stores/toasts.svelte';
 import type { BitableBinding, FilterSpec } from '$lib/types';
 
@@ -32,7 +33,7 @@ class FilterStore {
       setTimeout(async () => {
         try {
           await api.lark.setRepoBinding(repoId, { ...current, filters: spec });
-          await api.task.refresh(repoId);
+          await tasks.refresh(repoId);
           this.originals.delete(repoId);
         } catch (err) {
           const baseline = this.originals.get(repoId);

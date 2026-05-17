@@ -1,14 +1,16 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 const setRepoBinding = vi.fn();
-const refresh = vi.fn();
+const tasksRefresh = vi.fn();
 const addToast = vi.fn();
 
 vi.mock('$lib/ipc', () => ({
   api: {
     lark: { setRepoBinding: (...a: unknown[]) => setRepoBinding(...a) },
-    task: { refresh: (...a: unknown[]) => refresh(...a) },
   },
+}));
+vi.mock('$lib/stores/tasks.svelte', () => ({
+  tasks: { refresh: (...a: unknown[]) => tasksRefresh(...a) },
 }));
 vi.mock('$lib/stores/toasts.svelte', () => ({ addToast: (...a: unknown[]) => addToast(...a) }));
 
@@ -34,7 +36,7 @@ vi.mock('$lib/stores/lark-bindings.svelte', () => ({
 
 beforeEach(() => {
   setRepoBinding.mockReset();
-  refresh.mockReset();
+  tasksRefresh.mockReset();
   addToast.mockReset();
   bindings.set('repo-1', { ...baseBinding });
   vi.useFakeTimers();
@@ -44,7 +46,7 @@ describe('filterStore.update', () => {
   it('lands optimistic update immediately then persists after 300 ms debounce', async () => {
     const { filterStore } = await import('./lark-binding-filters.svelte');
     setRepoBinding.mockResolvedValue(undefined);
-    refresh.mockResolvedValue(undefined);
+    tasksRefresh.mockResolvedValue(undefined);
 
     const next = {
       conjunction: 'and' as const,
@@ -57,7 +59,7 @@ describe('filterStore.update', () => {
 
     await vi.advanceTimersByTimeAsync(300);
     expect(setRepoBinding).toHaveBeenCalledOnce();
-    expect(refresh).toHaveBeenCalledOnce();
+    expect(tasksRefresh).toHaveBeenCalledOnce();
   });
 
   it('reverts optimistic update and toasts when persist fails', async () => {
