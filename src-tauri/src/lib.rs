@@ -800,4 +800,157 @@ mod migration_tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Primary-fallback task");
     }
+
+    // ── Task 12: view_id flow integration tests ───────────────────────────
+
+    #[tokio::test]
+    async fn wizard_save_with_view_id_persists_and_provider_uses_it() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        // Token endpoint
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "tenant_access_token": "t", "expire": 3600
+            })))
+            .mount(&server)
+            .await;
+        // Records endpoint MUST receive view_id=vw_sprint to satisfy this mock
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .and(query_param("view_id", "vw_sprint"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [
+                        { "record_id": "rec1", "fields": { "Task name": "Sprint task" } }
+                    ],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let binding = crate::state::BitableBinding {
+            app_token: "bascntest".into(),
+            table_id: "tbltest".into(),
+            view_id: Some("vw_sprint".into()),
+            field_mapping: crate::state::FieldMapping {
+                title: crate::state::FieldRef {
+                    field_id: "fld_t".into(),
+                    field_name: "Task name".into(),
+                },
+                description: None,
+                status: None,
+                order: None,
+            },
+            status_value_mapping: crate::state::StatusValueMapping::default(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let cfg = crate::platform::lark_client::LarkConfig {
+            app_id: "a".into(),
+            app_secret: "s".into(),
+            app_token: "bascntest".into(),
+            table_id: "tbltest".into(),
+            base_url: server.uri(),
+        };
+        let client = std::sync::Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
+        let provider = crate::task_provider::lark::LarkProvider::from_binding(client, binding);
+        use crate::task_provider::TaskProvider;
+        let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Sprint task");
+    }
+
+    #[tokio::test]
+    async fn view_deleted_after_binding_falls_back_and_continues() {
+        use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "tenant_access_token": "t", "expire": 3600
+            })))
+            .mount(&server)
+            .await;
+        // First: view-not-found
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .and(query_param("view_id", "vw_gone"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 1254045, "msg": "ViewNotFound"
+            })))
+            .mount(&server)
+            .await;
+        // Fallback: unfiltered
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .and(query_param_is_missing("view_id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [
+                        { "record_id": "rec1", "fields": { "Task name": "All tasks" } }
+                    ],
+                    "has_more": false, "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+        let cfg = crate::platform::lark_client::LarkConfig {
+            app_id: "a".into(),
+            app_secret: "s".into(),
+            app_token: "bascntest".into(),
+            table_id: "tbltest".into(),
+            base_url: server.uri(),
+        };
+        let client = std::sync::Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
+        let binding = crate::state::BitableBinding {
+            app_token: "bascntest".into(),
+            table_id: "tbltest".into(),
+            view_id: Some("vw_gone".into()),
+            field_mapping: crate::state::FieldMapping {
+                title: crate::state::FieldRef {
+                    field_id: "fld_t".into(),
+                    field_name: "Task name".into(),
+                },
+                description: None,
+                status: None,
+                order: None,
+            },
+            status_value_mapping: crate::state::StatusValueMapping::default(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        #[derive(Debug, Default)]
+        struct CountingSink {
+            count: std::sync::Mutex<usize>,
+        }
+        impl crate::task_provider::lark::ViewMissingSink for CountingSink {
+            fn emit_view_missing(&self, _: &str, _: &str) {
+                *self.count.lock().unwrap() += 1;
+            }
+        }
+        let sink = std::sync::Arc::new(CountingSink::default());
+        let provider = crate::task_provider::lark::LarkProvider::from_binding_with_sink(
+            client,
+            binding,
+            "repo_x".into(),
+            sink.clone(),
+        );
+        use crate::task_provider::TaskProvider;
+        let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(*sink.count.lock().unwrap(), 1);
+    }
 }
