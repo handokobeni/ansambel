@@ -72,4 +72,36 @@ describe('filterStore.update', () => {
     expect(bindings.get('repo-1').filters).toEqual(baseBinding.filters);
     expect(addToast).toHaveBeenCalledOnce();
   });
+
+  it('reverts to the original baseline after rapid update→update→fail', async () => {
+    const { filterStore } = await import('./lark-binding-filters.svelte');
+    // First call: succeed nothing yet — we'll cancel via second call before timer fires.
+    // Second call: reject.
+    setRepoBinding.mockRejectedValueOnce(new Error('disk full'));
+
+    const specA = {
+      conjunction: 'and' as const,
+      conditions: [{ field_id: 'a', field_name: 'A', operator: 'is' as const, value: ['x'] }],
+    };
+    const specB = {
+      conjunction: 'or' as const,
+      conditions: [{ field_id: 'b', field_name: 'B', operator: 'is' as const, value: ['y'] }],
+    };
+
+    await filterStore.update('repo-1', specA);
+    // Specs A wrote optimistically.
+    expect(bindings.get('repo-1').filters).toEqual(specA);
+    // Now call B before A's debounce fires (default fake-timer pos = 0).
+    await filterStore.update('repo-1', specB);
+    expect(bindings.get('repo-1').filters).toEqual(specB);
+
+    // Fire the (single, debounced) timer; the persist fails.
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.runAllTimersAsync();
+
+    // Revert must go back to the true baseline (baseBinding.filters),
+    // NOT to specA (which was an intermediate optimistic state).
+    expect(bindings.get('repo-1').filters).toEqual(baseBinding.filters);
+    expect(addToast).toHaveBeenCalledOnce();
+  });
 });
