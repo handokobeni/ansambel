@@ -110,3 +110,57 @@ describe('FilterBar — add condition flow', () => {
     expect(labels).toEqual(['is', 'isNot', 'contains', 'doesNotContain', 'isEmpty', 'isNotEmpty']);
   });
 });
+
+import { filterStore } from '$lib/stores/lark-binding-filters.svelte';
+
+describe('FilterBar — chip mutations', () => {
+  it('clicking × removes that condition and calls filterStore.update', async () => {
+    const updateMock = vi.mocked(filterStore.update);
+    updateMock.mockClear();
+    render(FilterBar, {
+      props: {
+        repoId: 'r1',
+        appToken: 'appA',
+        tableId: 'tblA',
+        filters: {
+          conjunction: 'and',
+          conditions: [{ field_id: 'fldS', field_name: 'Status', operator: 'is', value: ['Done'] }],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /remove condition/i }));
+    expect(updateMock).toHaveBeenCalledWith(
+      'r1',
+      expect.objectContaining({
+        conditions: [],
+      })
+    );
+  });
+
+  it('changing AND/OR triggers update with new conjunction', async () => {
+    const updateMock = vi.mocked(filterStore.update);
+    updateMock.mockClear();
+    render(FilterBar, {
+      props: {
+        repoId: 'r1',
+        appToken: 'appA',
+        tableId: 'tblA',
+        filters: {
+          conjunction: 'and',
+          conditions: [
+            { field_id: 'a', field_name: 'A', operator: 'is', value: ['x'] },
+            { field_id: 'b', field_name: 'B', operator: 'is', value: ['y'] },
+          ],
+        },
+      },
+    });
+    const select = screen.getByRole('combobox', { name: /conjunction/i }) as HTMLSelectElement;
+    await fireEvent.change(select, { target: { value: 'or' } });
+    expect(updateMock).toHaveBeenCalledWith(
+      'r1',
+      expect.objectContaining({
+        conjunction: 'or',
+      })
+    );
+  });
+});
