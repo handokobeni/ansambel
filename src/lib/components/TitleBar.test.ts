@@ -8,6 +8,12 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: vi.fn(),
 }));
 
+// TitleBar mounts a `lark-view-missing` event listener; stub Tauri's event
+// module so `listen()` doesn't reach for an IPC bridge that JSDOM lacks.
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn().mockResolvedValue(() => {}),
+}));
+
 // SettingsDialog → LarkSettings calls invoke('get_lark_status') on mount;
 // stub it so opening the dialog in tests doesn't hit the network.
 vi.mock('@tauri-apps/api/core', () => ({
@@ -56,6 +62,25 @@ import { repos } from '$lib/stores/repos.svelte';
 import { workspaces } from '$lib/stores/workspaces.svelte';
 import { tasks } from '$lib/stores/tasks.svelte';
 import { getToasts, removeToast } from '$lib/stores/toasts.svelte';
+import { viewMissing } from '$lib/stores/view-missing.svelte';
+
+/**
+ * Helper for the view-missing banner tests: stub `repos.getSelected()` to
+ * return a minimal RepoInfo for `repoId`, then render the TitleBar. Keeps the
+ * fixture in one place so we don't repeat the RepoInfo literal in every test.
+ */
+function renderTitleBarForRepo(repoId: string) {
+  vi.mocked(repos.getSelected).mockReturnValue({
+    id: repoId,
+    name: repoId,
+    path: `/home/user/${repoId}`,
+    gh_profile: null,
+    default_branch: 'main',
+    created_at: 1776000000,
+    updated_at: 1776000000,
+  });
+  return render(TitleBar);
+}
 
 function clearAllToasts(): void {
   for (const id of Array.from(getToasts().keys())) removeToast(id);
@@ -278,6 +303,33 @@ describe('TitleBar repo context menu', () => {
     vi.mocked(repos.getSelected).mockReturnValue(null);
     render(TitleBar);
     expect(screen.queryByTestId('open-repo-settings')).toBeNull();
+  });
+});
+
+describe('TitleBar view-missing banner', () => {
+  beforeEach(() => {
+    viewMissing.clear();
+  });
+
+  it('shows banner when viewMissing store has entry for selected repo', async () => {
+    viewMissing.clear();
+    viewMissing.report('repo_x', 'vw_gone');
+    renderTitleBarForRepo('repo_x');
+    expect(screen.getByTestId('view-missing-banner')).toHaveTextContent('vw_gone');
+  });
+
+  it('dismiss removes the banner', async () => {
+    viewMissing.report('repo_x', 'vw_gone');
+    renderTitleBarForRepo('repo_x');
+    await fireEvent.click(screen.getByTestId('view-missing-dismiss'));
+    expect(screen.queryByTestId('view-missing-banner')).not.toBeInTheDocument();
+  });
+
+  it('hides banner when selected repo has no missing view', async () => {
+    viewMissing.clear();
+    viewMissing.report('repo_other', 'vw_gone');
+    renderTitleBarForRepo('repo_x');
+    expect(screen.queryByTestId('view-missing-banner')).not.toBeInTheDocument();
   });
 });
 

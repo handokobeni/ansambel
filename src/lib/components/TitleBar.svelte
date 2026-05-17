@@ -1,11 +1,13 @@
 <!-- src/lib/components/TitleBar.svelte -->
 <script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
+  import { listen } from '@tauri-apps/api/event';
   import { repos } from '$lib/stores/repos.svelte';
   import { workspaces } from '$lib/stores/workspaces.svelte';
   import { tasks } from '$lib/stores/tasks.svelte';
   import { addToast } from '$lib/stores/toasts.svelte';
   import { theme } from '$lib/stores/theme.svelte';
+  import { viewMissing } from '$lib/stores/view-missing.svelte';
   import { tooltip } from '$lib/actions';
   import SettingsDialog from './SettingsDialog.svelte';
   import RepoSettingsDialog from '$lib/components/repo/RepoSettingsDialog.svelte';
@@ -28,6 +30,28 @@
   let repoSettingsOpen = $state(false);
 
   const selectedRepo = $derived(repos.getSelected());
+
+  // Subscribe to the backend `lark-view-missing` event so the store reflects
+  // every fallback the provider emits. The $effect cleanup tears down the
+  // listener on unmount; we capture the unlisten fn from the awaited promise
+  // because `listen()` resolves AFTER mount.
+  let unlistenViewMissing: (() => void) | null = null;
+  $effect(() => {
+    listen<{ repo_id: string; view_id: string }>('lark-view-missing', (event) =>
+      viewMissing.report(event.payload.repo_id, event.payload.view_id)
+    ).then((un) => (unlistenViewMissing = un));
+    return () => {
+      unlistenViewMissing?.();
+      unlistenViewMissing = null;
+    };
+  });
+
+  // Per-repo lookup so the banner only shows for the currently selected repo —
+  // other repos may have a stale missing-view entry but should stay quiet
+  // until the user navigates to them.
+  const missingViewForSelected = $derived(
+    selectedRepo ? (viewMissing.entries.get(selectedRepo.id) ?? null) : null
+  );
 
   async function handleAddRepo() {
     if (adding) return;
@@ -52,6 +76,34 @@
     }
   }
 </script>
+
+{#if missingViewForSelected}
+  <div
+    class="flex items-center gap-2 px-3 py-1.5 bg-[var(--bg-warning,#3b3000)] border-b border-[var(--border-warning,#a87900)] text-[11px] text-[var(--text-warning,#fcd34d)]"
+    data-testid="view-missing-banner"
+  >
+    <span>
+      The Lark view bound to {selectedRepo?.name ?? 'this repo'} no longer exists (id:
+      {missingViewForSelected}). Showing all records.
+    </span>
+    <button
+      type="button"
+      onclick={() => (repoSettingsOpen = true)}
+      class="px-1.5 py-0.5 rounded border border-[var(--border-warning,#a87900)]"
+      data-testid="view-missing-reconfigure"
+    >
+      Reconfigure
+    </button>
+    <button
+      type="button"
+      onclick={() => selectedRepo && viewMissing.dismiss(selectedRepo.id)}
+      class="px-1.5 py-0.5 rounded border border-[var(--border-warning,#a87900)]"
+      data-testid="view-missing-dismiss"
+    >
+      Dismiss
+    </button>
+  </div>
+{/if}
 
 <header
   class="titlebar flex items-center justify-between h-10 px-3 bg-[var(--bg-titlebar)] border-b border-[var(--border)] flex-shrink-0 select-none"
