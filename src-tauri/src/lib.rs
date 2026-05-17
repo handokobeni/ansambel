@@ -97,6 +97,11 @@ pub fn run() {
             // `settings` is moved into AppState.
             let migrated = maybe_migrate_to_per_repo_binding(&data_dir, &settings);
 
+            // Bump lark binding schema v1 → v3 (no v2 ever shipped).
+            if let Err(e) = persistence::lark_repo_bindings::migrate_v1_to_v3(&data_dir) {
+                tracing::warn!("lark binding schema migration failed: {e}");
+            }
+
             let state = crate::state::AppState {
                 repos,
                 workspaces,
@@ -762,5 +767,18 @@ mod migration_tests {
         let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Primary-fallback task");
+    }
+
+    #[test]
+    fn setup_bumps_schema_to_v3_on_legacy_v1_file() {
+        use crate::persistence::lark_repo_bindings::{load_bindings, migrate_v1_to_v3};
+        use crate::platform::paths::lark_repo_bindings_file;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = lark_repo_bindings_file(tmp.path());
+        std::fs::write(&path, r#"{"schema_version":1,"bindings":{}}"#).unwrap();
+
+        let v = migrate_v1_to_v3(tmp.path()).unwrap();
+        assert_eq!(v, 3);
+        assert_eq!(load_bindings(tmp.path()).unwrap().schema_version, 3);
     }
 }
