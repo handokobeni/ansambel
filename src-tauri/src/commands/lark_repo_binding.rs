@@ -165,6 +165,7 @@ mod tests {
         BitableBinding {
             app_token: "bascntest".into(),
             table_id: "tbltest".into(),
+            view_id: None,
             field_mapping: FieldMapping {
                 title: FieldRef {
                     field_id: "fld_t".into(),

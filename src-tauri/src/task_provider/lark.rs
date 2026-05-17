@@ -1454,6 +1454,7 @@ mod tests {
         let binding = BitableBinding {
             app_token: "bascntest".into(),
             table_id: "tbltest".into(),
+            view_id: None,
             field_mapping: canonical_mapping(),
             status_value_mapping: canonical_values(),
             created_at: 0,

@@ -66,11 +66,18 @@ impl Default for StatusValueMapping {
 }
 
 /// One repo's binding to a Bitable: which table, plus how to map its
-/// fields and status options to Ansambel's task model.
+/// fields and status options to Ansambel's task model. Optionally scoped
+/// to a single Bitable view via `view_id` so the kanban honors the
+/// view's filter server-side.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct BitableBinding {
     pub app_token: String,
     pub table_id: String,
+    /// Optional Bitable view id. When `Some`, `LarkProvider::list_tasks`
+    /// passes `view_id=...` to Lark so the view's filter applies
+    /// server-side. `None` (the legacy default) fetches the full table.
+    #[serde(default)]
+    pub view_id: Option<String>,
     pub field_mapping: FieldMapping,
     #[serde(default)]
     pub status_value_mapping: StatusValueMapping,
@@ -1047,6 +1054,7 @@ mod tests {
         let b = BitableBinding {
             app_token: "bascntest".into(),
             table_id: "tbltest".into(),
+            view_id: None,
             field_mapping: FieldMapping {
                 title: FieldRef {
                     field_id: "fld_pri".into(),

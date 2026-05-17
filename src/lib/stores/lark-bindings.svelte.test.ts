@@ -22,6 +22,7 @@ import type { BitableBinding } from '$lib/types';
 const makeBinding = (overrides: Partial<BitableBinding> = {}): BitableBinding => ({
   app_token: 'bascn',
   table_id: 'tbl',
+  view_id: null,
   field_mapping: {
     title: { field_id: 'fld_t', field_name: 'Task name' },
     description: null,

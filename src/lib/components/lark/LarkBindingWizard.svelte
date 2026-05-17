@@ -95,6 +95,7 @@
     const binding: BitableBinding = {
       app_token: appToken.trim(),
       table_id: tableId.trim(),
+      view_id: existing?.view_id ?? null,
       field_mapping: {
         title: titleRef,
         description: fieldRefOf(descFieldId),

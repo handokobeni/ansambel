@@ -22,7 +22,7 @@ pub(crate) struct BindingsFile {
 }
 
 fn default_schema_version() -> u32 {
-    1
+    2
 }
 
 impl Default for BindingsFile {
@@ -41,6 +41,25 @@ pub(crate) fn load_bindings(data_dir: &Path) -> Result<BindingsFile> {
 pub(crate) fn save_bindings(data_dir: &Path, file: &BindingsFile) -> Result<()> {
     let path = lark_repo_bindings_file(data_dir);
     write_atomic(&path, file)
+}
+
+/// Idempotent Phase 3a-3.1 migration. Reads the bindings file, and if its
+/// `schema_version` is still 1, rewrites it to 2. The `view_id` field is
+/// added by `#[serde(default)]` on `BitableBinding` — no per-binding
+/// rewrite is required. Returns the resulting (post-migration) schema
+/// version for logging.
+//
+// `allow(dead_code)` until Task 7 wires the call into `lib.rs::setup`.
+// Tests in this module exercise the function so coverage is not lost.
+#[allow(dead_code)]
+pub(crate) fn migrate_v1_to_v2(data_dir: &Path) -> Result<u32> {
+    let mut file = load_bindings(data_dir)?;
+    if file.schema_version >= 2 {
+        return Ok(file.schema_version);
+    }
+    file.schema_version = 2;
+    save_bindings(data_dir, &file)?;
+    Ok(2)
 }
 
 pub(crate) fn get_binding(data_dir: &Path, repo_id: &str) -> Result<Option<BitableBinding>> {
@@ -73,6 +92,7 @@ mod tests {
         BitableBinding {
             app_token: "bascntest".into(),
             table_id: "tbltest".into(),
+            view_id: None,
             field_mapping: FieldMapping {
                 title: FieldRef {
                     field_id: "fld_pri".into(),
@@ -93,7 +113,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let f = load_bindings(tmp.path()).unwrap();
         assert_eq!(f.bindings.len(), 0);
-        assert_eq!(f.schema_version, 1);
+        assert_eq!(f.schema_version, 2);
     }
 
     #[test]
@@ -145,7 +165,106 @@ mod tests {
         let path = lark_repo_bindings_file(tmp.path());
         let raw = std::fs::read_to_string(&path).unwrap();
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["schema_version"], 2);
         assert!(value["bindings"].is_object());
+    }
+
+    #[test]
+    fn legacy_binding_without_view_id_loads_as_none() {
+        let tmp = tempdir().unwrap();
+        let path = lark_repo_bindings_file(tmp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // A schema-v1 file that predates Phase 3a-3.1 (no view_id key).
+        let legacy_json = serde_json::json!({
+            "schema_version": 1,
+            "bindings": {
+                "repo_x": {
+                    "app_token": "bascntest",
+                    "table_id": "tbltest",
+                    "field_mapping": {
+                        "title": { "field_id": "fld_t", "field_name": "Task name" }
+                    },
+                    "status_value_mapping": {
+                        "entries": {},
+                        "default_column": "todo"
+                    },
+                    "created_at": 1747200000,
+                    "updated_at": 1747200000
+                }
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&legacy_json).unwrap()).unwrap();
+        let loaded = load_bindings(tmp.path()).unwrap();
+        let b = loaded.bindings.get("repo_x").unwrap();
+        assert_eq!(b.view_id, None);
+        assert_eq!(b.app_token, "bascntest");
+    }
+
+    #[test]
+    fn binding_with_view_id_some_round_trips() {
+        let tmp = tempdir().unwrap();
+        let mut b = make_binding();
+        b.view_id = Some("vw_sprint".into());
+        set_binding(tmp.path(), "repo_x", b).unwrap();
+        let loaded = load_bindings(tmp.path()).unwrap();
+        let got = loaded.bindings.get("repo_x").unwrap();
+        assert_eq!(got.view_id, Some("vw_sprint".into()));
+    }
+
+    #[test]
+    fn migrate_v1_to_v2_bumps_version_and_preserves_bindings() {
+        let tmp = tempdir().unwrap();
+        let path = lark_repo_bindings_file(tmp.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let v1_json = serde_json::json!({
+            "schema_version": 1,
+            "bindings": {
+                "repo_x": {
+                    "app_token": "bascntest",
+                    "table_id": "tbltest",
+                    "field_mapping": {
+                        "title": { "field_id": "fld_t", "field_name": "Task name" }
+                    },
+                    "status_value_mapping": { "entries": {}, "default_column": "todo" },
+                    "created_at": 1, "updated_at": 1
+                }
+            }
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&v1_json).unwrap()).unwrap();
+        assert_eq!(migrate_v1_to_v2(tmp.path()).unwrap(), 2);
+        let loaded = load_bindings(tmp.path()).unwrap();
+        assert_eq!(loaded.schema_version, 2);
+        assert_eq!(
+            loaded.bindings.get("repo_x").unwrap().app_token,
+            "bascntest"
+        );
+        assert_eq!(loaded.bindings.get("repo_x").unwrap().view_id, None);
+    }
+
+    #[test]
+    fn migrate_v1_to_v2_is_idempotent() {
+        let tmp = tempdir().unwrap();
+        set_binding(tmp.path(), "repo_x", make_binding()).unwrap();
+        // First call: already at v2 (set_binding writes default v2). Should
+        // return 2 without rewriting.
+        let v = migrate_v1_to_v2(tmp.path()).unwrap();
+        assert_eq!(v, 2);
+        // Second call: still 2.
+        let v = migrate_v1_to_v2(tmp.path()).unwrap();
+        assert_eq!(v, 2);
+    }
+
+    #[test]
+    fn migrate_v1_to_v2_no_op_when_file_absent() {
+        let tmp = tempdir().unwrap();
+        // No bindings file yet — load returns default (v2), migrator returns
+        // 2 without creating a file.
+        assert_eq!(migrate_v1_to_v2(tmp.path()).unwrap(), 2);
+    }
+
+    #[test]
+    fn default_schema_version_is_2() {
+        let f = BindingsFile::default();
+        assert_eq!(f.schema_version, 2);
     }
 }

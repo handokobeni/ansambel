@@ -284,10 +284,17 @@ export type StatusValueMapping = {
 export type BitableBinding = {
   app_token: string;
   table_id: string;
+  view_id: string | null;
   field_mapping: FieldMapping;
   status_value_mapping: StatusValueMapping;
   created_at: number;
   updated_at: number;
+};
+
+export type BitableView = {
+  view_id: string;
+  view_name: string;
+  view_type: string;
 };
 
 export type BitableField = {
