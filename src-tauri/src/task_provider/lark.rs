@@ -27,7 +27,6 @@ pub trait ViewMissingSink: Send + Sync + std::fmt::Debug {
 
 /// Default no-op sink used when no event emitter has been wired in.
 /// Production code paths swap this out via `from_binding_with_sink` (Task 7).
-#[allow(dead_code)] // wired in Task 7 by Tauri-backed adapter
 #[derive(Debug, Default)]
 pub struct NoopSink;
 impl ViewMissingSink for NoopSink {
@@ -106,7 +105,6 @@ impl LarkProvider {
     /// view-missing event fires when fallback kicks in. The two-arg
     /// `from_binding` is kept for tests and other call sites that don't
     /// need event emission.
-    #[allow(dead_code)] // wired in Task 7 by Tauri-backed adapter
     pub fn from_binding_with_sink(
         client: Arc<LarkClient>,
         binding: BitableBinding,

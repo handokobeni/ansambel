@@ -40,6 +40,7 @@ pub async fn set_lark_repo_binding(
         binding,
         &data_dir,
         provider_handle.inner().clone(),
+        Some(app_handle),
     )
     .await
     .map_err(|e| e.to_string())
@@ -50,6 +51,7 @@ pub(crate) async fn set_lark_repo_binding_inner(
     mut binding: BitableBinding,
     data_dir: &std::path::Path,
     handle: TaskProviderHandle,
+    app_handle: Option<tauri::AppHandle>,
 ) -> Result<()> {
     if binding.field_mapping.title.field_id.is_empty() {
         return Err(AppError::InvalidState("title field is required".into()));
@@ -68,9 +70,22 @@ pub(crate) async fn set_lark_repo_binding_inner(
     cfg.app_token = binding.app_token.clone();
     cfg.table_id = binding.table_id.clone();
     let client = Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
-    let provider: Arc<dyn crate::task_provider::TaskProvider> = Arc::new(
-        crate::task_provider::lark::LarkProvider::from_binding(client, binding),
-    );
+    let provider: Arc<dyn crate::task_provider::TaskProvider> = if let Some(h) = app_handle {
+        let sink: Arc<dyn crate::task_provider::lark::ViewMissingSink> =
+            Arc::new(crate::TauriViewMissingSink { app_handle: h });
+        Arc::new(
+            crate::task_provider::lark::LarkProvider::from_binding_with_sink(
+                client,
+                binding,
+                repo_id.to_string(),
+                sink,
+            ),
+        )
+    } else {
+        Arc::new(crate::task_provider::lark::LarkProvider::from_binding(
+            client, binding,
+        ))
+    };
 
     {
         let mut guard = handle.write().await;
@@ -221,7 +236,7 @@ mod tests {
         let mut b = sample_binding();
         b.field_mapping.title.field_id = String::new();
         let handle = empty_handle();
-        let err = set_lark_repo_binding_inner("repo_x", b, tmp.path(), handle)
+        let err = set_lark_repo_binding_inner("repo_x", b, tmp.path(), handle, None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("title field is required"));

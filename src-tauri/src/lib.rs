@@ -10,6 +10,28 @@ pub mod platform;
 pub mod state;
 pub mod task_provider;
 
+/// Tauri-backed adapter for [`crate::task_provider::lark::ViewMissingSink`].
+/// Emits the `lark-view-missing` event on the main window so the frontend
+/// banner (Phase 3a-3.1 Tasks 10+11) can prompt the user to reselect a view.
+#[derive(Debug, Clone)]
+pub(crate) struct TauriViewMissingSink {
+    pub(crate) app_handle: tauri::AppHandle,
+}
+
+impl crate::task_provider::lark::ViewMissingSink for TauriViewMissingSink {
+    fn emit_view_missing(&self, repo_id: &str, view_id: &str) {
+        if let Some(window) = self.app_handle.get_webview_window("main") {
+            let _ = window.emit(
+                "lark-view-missing",
+                serde_json::json!({
+                    "repo_id": repo_id,
+                    "view_id": view_id,
+                }),
+            );
+        }
+    }
+}
+
 /// Auto-migrate the user's Phase 3a-2 global Lark config to a per-repo
 /// binding on first launch after upgrade. Idempotent; no-op when:
 ///   - bindings file already exists with at least one entry, OR
@@ -116,12 +138,20 @@ pub fn run() {
                 std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
             app.manage(provider_handle.clone());
 
+            // Phase 3a-3.1 schema migration (v1 → v2). No-op for fresh
+            // installs; bumps the version + makes future migrations
+            // observable. Failure is non-fatal — log + continue.
+            if let Err(e) = crate::persistence::lark_repo_bindings::migrate_v1_to_v2(&data_dir) {
+                tracing::warn!(error = %e, "lark_repo_bindings v1->v2 migration failed");
+            }
+
             // Build providers for every repo that has a binding.
             let bindings = crate::persistence::lark_repo_bindings::load_bindings(&data_dir)
                 .unwrap_or_default();
             {
                 let handle = provider_handle.clone();
                 let data_dir_clone = data_dir.clone();
+                let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     for (repo_id, binding) in bindings.bindings.iter() {
                         let store = crate::commands::lark_auth::KeyringStore;
@@ -140,11 +170,17 @@ pub fn run() {
                         cfg.table_id = binding.table_id.clone();
                         let client =
                             std::sync::Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
+                        let sink: std::sync::Arc<dyn crate::task_provider::lark::ViewMissingSink> =
+                            std::sync::Arc::new(TauriViewMissingSink {
+                                app_handle: app_handle.clone(),
+                            });
                         let provider: std::sync::Arc<dyn crate::task_provider::TaskProvider> =
                             std::sync::Arc::new(
-                                crate::task_provider::lark::LarkProvider::from_binding(
+                                crate::task_provider::lark::LarkProvider::from_binding_with_sink(
                                     client,
                                     binding.clone(),
+                                    repo_id.clone(),
+                                    sink,
                                 ),
                             );
                         handle.write().await.insert(repo_id.clone(), provider);

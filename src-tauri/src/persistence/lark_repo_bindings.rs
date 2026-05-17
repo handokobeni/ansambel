@@ -48,10 +48,6 @@ pub(crate) fn save_bindings(data_dir: &Path, file: &BindingsFile) -> Result<()> 
 /// added by `#[serde(default)]` on `BitableBinding` — no per-binding
 /// rewrite is required. Returns the resulting (post-migration) schema
 /// version for logging.
-//
-// `allow(dead_code)` until Task 7 wires the call into `lib.rs::setup`.
-// Tests in this module exercise the function so coverage is not lost.
-#[allow(dead_code)]
 pub(crate) fn migrate_v1_to_v2(data_dir: &Path) -> Result<u32> {
     let mut file = load_bindings(data_dir)?;
     if file.schema_version >= 2 {
