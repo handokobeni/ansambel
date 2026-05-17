@@ -4,6 +4,7 @@
   import { addToast } from '$lib/stores/toasts.svelte';
   import type {
     BitableBinding,
+    BitableView,
     FieldMapping,
     ProposedMapping,
     StatusValueMapping,
@@ -22,7 +23,7 @@
     onCancel: () => void;
   } = $props();
 
-  type Step = 1 | 2 | 3;
+  type Step = 1 | 1.5 | 2 | 3;
   // Parent re-mounts wizard when `existing` changes (via {#if editingBinding}),
   // so capturing the initial value is intentional here.
   // svelte-ignore state_referenced_locally
@@ -35,13 +36,28 @@
   let detectError = $state<string | null>(null);
   let proposal = $state<ProposedMapping | null>(null);
 
-  let titleFieldId = $state<string>('');
-  let descFieldId = $state<string>('');
-  let statusFieldId = $state<string>('');
-  let orderFieldId = $state<string>('');
+  let views = $state<BitableView[]>([]);
+  // svelte-ignore state_referenced_locally
+  let viewId = $state<string>(existing?.view_id ?? '');
+  let loadingViews = $state(false);
 
-  let valueMap = $state<Record<string, KanbanColumnLiteral>>({});
-  let defaultColumn = $state<KanbanColumnLiteral>('todo');
+  // svelte-ignore state_referenced_locally
+  let titleFieldId = $state<string>(existing?.field_mapping.title.field_id ?? '');
+  // svelte-ignore state_referenced_locally
+  let descFieldId = $state<string>(existing?.field_mapping.description?.field_id ?? '');
+  // svelte-ignore state_referenced_locally
+  let statusFieldId = $state<string>(existing?.field_mapping.status?.field_id ?? '');
+  // svelte-ignore state_referenced_locally
+  let orderFieldId = $state<string>(existing?.field_mapping.order?.field_id ?? '');
+
+  // svelte-ignore state_referenced_locally
+  let valueMap = $state<Record<string, KanbanColumnLiteral>>({
+    ...(existing?.status_value_mapping.entries ?? {}),
+  });
+  // svelte-ignore state_referenced_locally
+  let defaultColumn = $state<KanbanColumnLiteral>(
+    existing?.status_value_mapping.default_column ?? 'todo'
+  );
 
   let saving = $state(false);
 
@@ -49,20 +65,26 @@
     if (!appToken.trim() || !tableId.trim()) return;
     detecting = true;
     detectError = null;
+    loadingViews = true;
     try {
-      const p = await api.lark.detectSchema(appToken.trim(), tableId.trim());
+      const [p, vs] = await Promise.all([
+        api.lark.detectSchema(appToken.trim(), tableId.trim()),
+        api.lark.listViews(appToken.trim(), tableId.trim()),
+      ]);
       proposal = p;
+      views = vs;
       titleFieldId = p.suggested.title.field_id;
       descFieldId = p.suggested.description?.field_id ?? '';
       statusFieldId = p.suggested.status?.field_id ?? '';
       orderFieldId = p.suggested.order?.field_id ?? '';
       valueMap = { ...p.suggested_status_values.entries };
       defaultColumn = p.suggested_status_values.default_column;
-      step = 2;
+      step = 1.5;
     } catch (err) {
       detectError = err instanceof Error ? err.message : String(err);
     } finally {
       detecting = false;
+      loadingViews = false;
     }
   }
 
@@ -70,9 +92,21 @@
   const statusIsSingleSelect = $derived(statusField?.type === 3);
 
   function fieldRefOf(id: string) {
-    if (!id || !proposal) return null;
-    const f = proposal.fields.find((x) => x.field_id === id);
-    return f ? { field_id: f.field_id, field_name: f.field_name } : null;
+    if (!id) return null;
+    if (proposal) {
+      const f = proposal.fields.find((x) => x.field_id === id);
+      if (f) return { field_id: f.field_id, field_name: f.field_name };
+    }
+    // Fall back to refs on the existing binding (edit flow without re-detect).
+    if (existing) {
+      const fm = existing.field_mapping;
+      for (const ref of [fm.title, fm.description, fm.status, fm.order]) {
+        if (ref && ref.field_id === id) {
+          return { field_id: ref.field_id, field_name: ref.field_name };
+        }
+      }
+    }
+    return null;
   }
 
   function handleContinueStep2() {
@@ -85,7 +119,9 @@
   }
 
   async function handleSave() {
-    if (!proposal) return;
+    // Allow save when editing without a fresh proposal — existing binding
+    // already carries the field refs we need.
+    if (!proposal && !existing) return;
     saving = true;
     const titleRef = fieldRefOf(titleFieldId);
     if (!titleRef) {
@@ -95,7 +131,7 @@
     const binding: BitableBinding = {
       app_token: appToken.trim(),
       table_id: tableId.trim(),
-      view_id: existing?.view_id ?? null,
+      view_id: viewId.trim() === '' ? null : viewId.trim(),
       field_mapping: {
         title: titleRef,
         description: fieldRefOf(descFieldId),
@@ -184,9 +220,47 @@
         </button>
       </div>
     </section>
+  {:else if step === 1.5}
+    <section class="flex flex-col gap-3" data-testid="wizard-step-1-5">
+      <h3 class="text-xs font-semibold text-[var(--text-primary)]">
+        Scope this binding (1.5 of 3)
+      </h3>
+      <label class="flex flex-col gap-1 text-[11px]">
+        View
+        <select
+          bind:value={viewId}
+          class={selectClass}
+          data-testid="wizard-view-select"
+          disabled={loadingViews}
+        >
+          <option value="">All records (no view filter)</option>
+          {#each views as v (v.view_id)}
+            <option value={v.view_id}>{v.view_name} ({v.view_type})</option>
+          {/each}
+        </select>
+      </label>
+      <p class="text-[11px] text-[var(--text-muted)]">
+        When a view is selected, Ansambel honors that view's filter from Lark.
+      </p>
+      <div class="flex gap-2 justify-end">
+        <button
+          type="button"
+          onclick={() => (step = 1)}
+          class="px-2 py-1 text-xs rounded border border-[var(--border-light)]">← Back</button
+        >
+        <button
+          type="button"
+          onclick={() => (step = 2)}
+          class="px-2 py-1 text-xs rounded bg-[var(--accent)] text-white"
+          data-testid="wizard-view-continue"
+        >
+          Continue →
+        </button>
+      </div>
+    </section>
   {:else if step === 2}
     <section class="flex flex-col gap-3" data-testid="wizard-step-2">
-      <h3 class="text-xs font-semibold text-[var(--text-primary)]">Map your fields (2 of 3)</h3>
+      <h3 class="text-xs font-semibold text-[var(--text-primary)]">Map your fields (2 of 4)</h3>
       <label class="flex flex-col gap-1 text-[11px]">
         Title* required
         <select bind:value={titleFieldId} class={selectClass} data-testid="wizard-title-field">
@@ -241,7 +315,7 @@
     </section>
   {:else}
     <section class="flex flex-col gap-3" data-testid="wizard-step-3">
-      <h3 class="text-xs font-semibold text-[var(--text-primary)]">Map status options (3 of 3)</h3>
+      <h3 class="text-xs font-semibold text-[var(--text-primary)]">Map status options (3 of 4)</h3>
       {#each statusField?.property?.options ?? [] as opt (opt.id)}
         <label class="flex flex-col gap-1 text-[11px]">
           "{opt.name}"

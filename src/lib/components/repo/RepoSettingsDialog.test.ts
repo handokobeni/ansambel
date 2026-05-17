@@ -9,6 +9,7 @@ vi.mock('$lib/ipc', () => ({
       setRepoBinding: vi.fn(),
       deleteRepoBinding: vi.fn(),
       detectSchema: vi.fn(),
+      listViews: vi.fn().mockResolvedValue([]),
     },
   },
 }));
@@ -205,6 +206,8 @@ describe('RepoSettingsDialog', () => {
     });
     await fireEvent.click(screen.getByTestId('wizard-detect'));
     await new Promise((r) => setTimeout(r, 0));
+    // Step 1.5 rendered (view picker); accept default "All records" and continue
+    await fireEvent.click(screen.getByTestId('wizard-view-continue'));
     // Step 2 rendered; status is not single-select so "Save & Sync" goes directly
     await fireEvent.click(screen.getByTestId('wizard-continue'));
     await new Promise((r) => setTimeout(r, 0));

@@ -1,16 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import LarkBindingWizard from './LarkBindingWizard.svelte';
-import type { BitableBinding } from '$lib/types';
+import type { BitableBinding, ProposedMapping } from '$lib/types';
 
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn(),
-  Channel: class {},
+vi.mock('$lib/ipc', () => ({
+  api: {
+    lark: {
+      detectSchema: vi.fn(),
+      listViews: vi.fn(),
+    },
+  },
 }));
 
-import { invoke } from '@tauri-apps/api/core';
+vi.mock('$lib/stores/toasts.svelte', () => ({
+  addToast: vi.fn(),
+}));
 
-const proposalFixture = {
+import { api } from '$lib/ipc';
+import { addToast } from '$lib/stores/toasts.svelte';
+
+const proposalFixture: ProposedMapping = {
   fields: [
     { field_id: 'fld_pri', field_name: 'Task name', type: 1, is_primary: true },
     {
@@ -44,6 +53,7 @@ const proposalFixture = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(api.lark.listViews).mockResolvedValue([]);
 });
 
 describe('LarkBindingWizard', () => {
@@ -80,7 +90,7 @@ describe('LarkBindingWizard', () => {
   });
 
   it('Step 1 detect error stays on step and shows banner', async () => {
-    vi.mocked(invoke).mockRejectedValueOnce(new Error('91402 not found'));
+    vi.mocked(api.lark.detectSchema).mockRejectedValueOnce(new Error('91402 not found'));
     render(LarkBindingWizard, {
       props: {
         repoId: 'repo_x',
@@ -96,13 +106,14 @@ describe('LarkBindingWizard', () => {
       target: { value: 'y' },
     });
     await fireEvent.click(screen.getByTestId('wizard-detect'));
-    await new Promise((r) => setTimeout(r, 0));
-    expect(screen.getByTestId('wizard-detect-error').textContent).toContain('91402');
+    await waitFor(() =>
+      expect(screen.getByTestId('wizard-detect-error').textContent).toContain('91402')
+    );
     expect(screen.getByTestId('wizard-step-1')).toBeTruthy();
   });
 
-  it('moves to Step 2 on successful detect, pre-fills suggestions', async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(proposalFixture);
+  it('moves to Step 1.5 on successful detect, pre-fills suggestions', async () => {
+    vi.mocked(api.lark.detectSchema).mockResolvedValueOnce(proposalFixture);
     render(LarkBindingWizard, {
       props: {
         repoId: 'repo_x',
@@ -118,14 +129,16 @@ describe('LarkBindingWizard', () => {
       target: { value: 'tbl' },
     });
     await fireEvent.click(screen.getByTestId('wizard-detect'));
-    await new Promise((r) => setTimeout(r, 0));
+    await waitFor(() => expect(screen.getByTestId('wizard-step-1-5')).toBeTruthy());
+    // Advance through Step 1.5 to Step 2 and verify the title pre-fill is intact.
+    await fireEvent.click(screen.getByTestId('wizard-view-continue'));
     expect(screen.getByTestId('wizard-step-2')).toBeTruthy();
     const titleSel = screen.getByTestId('wizard-title-field') as HTMLSelectElement;
     expect(titleSel.value).toBe('fld_pri');
   });
 
   it('Step 2 → Step 3 when status field is single-select', async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(proposalFixture);
+    vi.mocked(api.lark.detectSchema).mockResolvedValueOnce(proposalFixture);
     render(LarkBindingWizard, {
       props: {
         repoId: 'repo_x',
@@ -141,13 +154,14 @@ describe('LarkBindingWizard', () => {
       target: { value: 'tbl' },
     });
     await fireEvent.click(screen.getByTestId('wizard-detect'));
-    await new Promise((r) => setTimeout(r, 0));
+    await waitFor(() => expect(screen.getByTestId('wizard-step-1-5')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('wizard-view-continue'));
     await fireEvent.click(screen.getByTestId('wizard-continue'));
     expect(screen.getByTestId('wizard-step-3')).toBeTruthy();
   });
 
   it('Step 3 Save calls onSave with assembled binding', async () => {
-    vi.mocked(invoke).mockResolvedValueOnce(proposalFixture);
+    vi.mocked(api.lark.detectSchema).mockResolvedValueOnce(proposalFixture);
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(LarkBindingWizard, {
       props: { repoId: 'repo_x', existing: null, onSave, onCancel: vi.fn() },
@@ -159,11 +173,11 @@ describe('LarkBindingWizard', () => {
       target: { value: 'tbl' },
     });
     await fireEvent.click(screen.getByTestId('wizard-detect'));
-    await new Promise((r) => setTimeout(r, 0));
+    await waitFor(() => expect(screen.getByTestId('wizard-step-1-5')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('wizard-view-continue'));
     await fireEvent.click(screen.getByTestId('wizard-continue'));
     await fireEvent.click(screen.getByTestId('wizard-save'));
-    await new Promise((r) => setTimeout(r, 0));
-    expect(onSave).toHaveBeenCalled();
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
     const call = onSave.mock.calls[0][0];
     expect(call.app_token).toBe('bascn');
     expect(call.field_mapping.title.field_id).toBe('fld_pri');
@@ -180,9 +194,7 @@ describe('LarkBindingWizard', () => {
   });
 
   it('handleSave toasts on onSave error', async () => {
-    vi.mock('$lib/stores/toasts.svelte', () => ({ addToast: vi.fn() }));
-    const { addToast } = await import('$lib/stores/toasts.svelte');
-    vi.mocked(invoke).mockResolvedValueOnce(proposalFixture);
+    vi.mocked(api.lark.detectSchema).mockResolvedValueOnce(proposalFixture);
     const onSave = vi.fn().mockRejectedValue(new Error('save fail'));
     render(LarkBindingWizard, {
       props: { repoId: 'repo_x', existing: null, onSave, onCancel: vi.fn() },
@@ -194,13 +206,14 @@ describe('LarkBindingWizard', () => {
       target: { value: 'tbl' },
     });
     await fireEvent.click(screen.getByTestId('wizard-detect'));
-    await new Promise((r) => setTimeout(r, 0));
+    await waitFor(() => expect(screen.getByTestId('wizard-step-1-5')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('wizard-view-continue'));
     await fireEvent.click(screen.getByTestId('wizard-continue'));
     // At step 3 now — click Save
     await fireEvent.click(screen.getByTestId('wizard-save'));
-    await new Promise((r) => setTimeout(r, 0));
-    // The catch block should have called addToast
-    expect(addToast).toHaveBeenCalledWith(expect.stringContaining('save fail'), 'error');
+    await waitFor(() =>
+      expect(addToast).toHaveBeenCalledWith(expect.stringContaining('save fail'), 'error')
+    );
   });
 
   it('existing binding starts at Step 2 (pre-filled tokens, no proposal yet)', () => {
@@ -227,7 +240,7 @@ describe('LarkBindingWizard', () => {
 
   it('handleSave early-returns when titleFieldId resolves to null (no proposal fields match)', async () => {
     // Set up a proposal with no fields matching the auto-selected titleFieldId
-    const emptyFieldsProposal = {
+    const emptyFieldsProposal: ProposedMapping = {
       fields: [],
       suggested: {
         title: { field_id: 'fld_missing', field_name: 'Gone' },
@@ -238,7 +251,7 @@ describe('LarkBindingWizard', () => {
       status_options: [],
       suggested_status_values: { entries: {}, default_column: 'todo' },
     };
-    vi.mocked(invoke).mockResolvedValueOnce(emptyFieldsProposal);
+    vi.mocked(api.lark.detectSchema).mockResolvedValueOnce(emptyFieldsProposal);
     const onSave = vi.fn();
     render(LarkBindingWizard, {
       props: { repoId: 'repo_x', existing: null, onSave, onCancel: vi.fn() },
@@ -246,7 +259,8 @@ describe('LarkBindingWizard', () => {
     await fireEvent.input(screen.getByTestId('wizard-app-token'), { target: { value: 'x' } });
     await fireEvent.input(screen.getByTestId('wizard-table-id'), { target: { value: 'y' } });
     await fireEvent.click(screen.getByTestId('wizard-detect'));
-    await new Promise((r) => setTimeout(r, 0));
+    await waitFor(() => expect(screen.getByTestId('wizard-step-1-5')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('wizard-view-continue'));
     // Now at step 2, but no field options. titleFieldId='fld_missing' is set from suggested
     // but fields array is empty so fieldRefOf will return null → handleSave returns early
     await fireEvent.click(screen.getByTestId('wizard-continue'));
@@ -258,7 +272,7 @@ describe('LarkBindingWizard', () => {
   it('Step 2 continues directly to save when status type=3 but no options (property.options absent)', async () => {
     // handleContinueStep2 checks statusIsSingleSelect && statusField?.property?.options
     // If property.options is absent/falsy, it falls through to handleSave directly
-    const noOptionsProposal = {
+    const noOptionsProposal: ProposedMapping = {
       fields: [
         { field_id: 'fld_pri', field_name: 'Task name', type: 1, is_primary: true },
         {
@@ -278,7 +292,7 @@ describe('LarkBindingWizard', () => {
       status_options: [],
       suggested_status_values: { entries: {}, default_column: 'todo' },
     };
-    vi.mocked(invoke).mockResolvedValueOnce(noOptionsProposal);
+    vi.mocked(api.lark.detectSchema).mockResolvedValueOnce(noOptionsProposal);
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(LarkBindingWizard, {
       props: { repoId: 'repo_x', existing: null, onSave, onCancel: vi.fn() },
@@ -286,11 +300,139 @@ describe('LarkBindingWizard', () => {
     await fireEvent.input(screen.getByTestId('wizard-app-token'), { target: { value: 'x' } });
     await fireEvent.input(screen.getByTestId('wizard-table-id'), { target: { value: 'y' } });
     await fireEvent.click(screen.getByTestId('wizard-detect'));
-    await new Promise((r) => setTimeout(r, 0));
+    await waitFor(() => expect(screen.getByTestId('wizard-step-1-5')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('wizard-view-continue'));
     // type=3 (single-select) but no options → falls through to handleSave directly
     await fireEvent.click(screen.getByTestId('wizard-continue'));
-    await new Promise((r) => setTimeout(r, 0));
-    // onSave called directly from step 2 (no step 3)
-    expect(onSave).toHaveBeenCalled();
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+  });
+});
+
+describe('LarkBindingWizard step 1.5 (view picker)', () => {
+  beforeEach(() => {
+    const fixture: ProposedMapping = {
+      fields: [
+        {
+          field_id: 'fld_t',
+          field_name: 'Task name',
+          type: 1,
+          is_primary: true,
+        },
+      ],
+      suggested: {
+        title: { field_id: 'fld_t', field_name: 'Task name' },
+        description: null,
+        status: null,
+        order: null,
+      },
+      status_options: null,
+      suggested_status_values: { entries: {}, default_column: 'todo' },
+    };
+    vi.mocked(api.lark.detectSchema).mockResolvedValue(fixture);
+    vi.mocked(api.lark.listViews).mockResolvedValue([
+      { view_id: 'vw_grid', view_name: 'Grid view', view_type: 'grid' },
+      { view_id: 'vw_sprint', view_name: 'Current Sprint', view_type: 'grid' },
+    ]);
+  });
+
+  it('renders dropdown with "All records (no view filter)" first', async () => {
+    render(LarkBindingWizard, {
+      props: {
+        repoId: 'repo_x',
+        existing: null,
+        onSave: vi.fn(),
+        onCancel: vi.fn(),
+      },
+    });
+    await fireEvent.input(screen.getByTestId('wizard-app-token'), {
+      target: { value: 'bascntest' },
+    });
+    await fireEvent.input(screen.getByTestId('wizard-table-id'), {
+      target: { value: 'tbltest' },
+    });
+    await fireEvent.click(screen.getByTestId('wizard-detect'));
+    await waitFor(() => expect(screen.getByTestId('wizard-step-1-5')).toBeInTheDocument());
+    const select = screen.getByTestId('wizard-view-select') as HTMLSelectElement;
+    expect(select.options[0].value).toBe('');
+    expect(select.options[0].textContent).toContain('All records');
+    expect(select.options[1].value).toBe('vw_grid');
+    expect(select.options[2].value).toBe('vw_sprint');
+    expect(select.value).toBe('');
+  });
+
+  it('selecting a view stores its id and Continue advances to step 2', async () => {
+    render(LarkBindingWizard, {
+      props: {
+        repoId: 'repo_x',
+        existing: null,
+        onSave: vi.fn(),
+        onCancel: vi.fn(),
+      },
+    });
+    await fireEvent.input(screen.getByTestId('wizard-app-token'), {
+      target: { value: 'bascntest' },
+    });
+    await fireEvent.input(screen.getByTestId('wizard-table-id'), {
+      target: { value: 'tbltest' },
+    });
+    await fireEvent.click(screen.getByTestId('wizard-detect'));
+    const select = await screen.findByTestId('wizard-view-select');
+    await fireEvent.change(select, { target: { value: 'vw_sprint' } });
+    await fireEvent.click(screen.getByTestId('wizard-view-continue'));
+    expect(screen.getByTestId('wizard-step-2')).toBeInTheDocument();
+  });
+
+  it('proceeds even when view list is empty', async () => {
+    vi.mocked(api.lark.listViews).mockResolvedValue([]);
+    render(LarkBindingWizard, {
+      props: {
+        repoId: 'repo_x',
+        existing: null,
+        onSave: vi.fn(),
+        onCancel: vi.fn(),
+      },
+    });
+    await fireEvent.input(screen.getByTestId('wizard-app-token'), {
+      target: { value: 'bascntest' },
+    });
+    await fireEvent.input(screen.getByTestId('wizard-table-id'), {
+      target: { value: 'tbltest' },
+    });
+    await fireEvent.click(screen.getByTestId('wizard-detect'));
+    const select = await screen.findByTestId('wizard-view-select');
+    expect((select as HTMLSelectElement).options.length).toBe(1);
+    await fireEvent.click(screen.getByTestId('wizard-view-continue'));
+    expect(screen.getByTestId('wizard-step-2')).toBeInTheDocument();
+  });
+
+  it('pre-selects view_id when editing existing binding and preserves it through Save', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(LarkBindingWizard, {
+      props: {
+        repoId: 'repo_x',
+        existing: {
+          app_token: 'bascntest',
+          table_id: 'tbltest',
+          view_id: 'vw_sprint',
+          field_mapping: {
+            title: { field_id: 'fld_t', field_name: 'Task name' },
+            description: null,
+            status: null,
+            order: null,
+          },
+          status_value_mapping: { entries: {}, default_column: 'todo' },
+          created_at: 1747200000,
+          updated_at: 1747200000,
+        },
+        onSave,
+        onCancel: vi.fn(),
+      },
+    });
+    // Editing flow opens at step 2. Save immediately and verify view_id
+    // round-trips through the saved binding.
+    await fireEvent.click(screen.getByTestId('wizard-continue'));
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    const saved = onSave.mock.calls[0][0];
+    expect(saved.view_id).toBe('vw_sprint');
   });
 });
