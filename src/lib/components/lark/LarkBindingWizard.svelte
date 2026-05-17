@@ -67,18 +67,25 @@
     detectError = null;
     loadingViews = true;
     try {
-      const [p, vs] = await Promise.all([
-        api.lark.detectSchema(appToken.trim(), tableId.trim()),
-        api.lark.listViews(appToken.trim(), tableId.trim()),
-      ]);
+      const p = await api.lark.detectSchema(appToken.trim(), tableId.trim());
       proposal = p;
-      views = vs;
       titleFieldId = p.suggested.title.field_id;
       descFieldId = p.suggested.description?.field_id ?? '';
       statusFieldId = p.suggested.status?.field_id ?? '';
       orderFieldId = p.suggested.order?.field_id ?? '';
       valueMap = { ...p.suggested_status_values.entries };
       defaultColumn = p.suggested_status_values.default_column;
+      // Views are nice-to-have. If the call fails, fall back to an empty
+      // list — the user can still proceed with "All records (no view filter)".
+      try {
+        views = await api.lark.listViews(appToken.trim(), tableId.trim());
+      } catch (vErr) {
+        views = [];
+        addToast(
+          `Could not load views: ${vErr instanceof Error ? vErr.message : String(vErr)}. Defaulting to "All records".`,
+          'error'
+        );
+      }
       step = 1.5;
     } catch (err) {
       detectError = err instanceof Error ? err.message : String(err);
@@ -168,7 +175,7 @@
   {#if step === 1}
     <section class="flex flex-col gap-3" data-testid="wizard-step-1">
       <h3 class="text-xs font-semibold text-[var(--text-primary)]">
-        Connect to Lark Bitable (1 of 3)
+        Connect to Lark Bitable (1 of 4)
       </h3>
       <label class="flex flex-col gap-1 text-[11px]">
         App Token
@@ -222,9 +229,7 @@
     </section>
   {:else if step === 1.5}
     <section class="flex flex-col gap-3" data-testid="wizard-step-1-5">
-      <h3 class="text-xs font-semibold text-[var(--text-primary)]">
-        Scope this binding (1.5 of 3)
-      </h3>
+      <h3 class="text-xs font-semibold text-[var(--text-primary)]">Scope this binding (2 of 4)</h3>
       <label class="flex flex-col gap-1 text-[11px]">
         View
         <select
@@ -260,7 +265,7 @@
     </section>
   {:else if step === 2}
     <section class="flex flex-col gap-3" data-testid="wizard-step-2">
-      <h3 class="text-xs font-semibold text-[var(--text-primary)]">Map your fields (2 of 4)</h3>
+      <h3 class="text-xs font-semibold text-[var(--text-primary)]">Map your fields (3 of 4)</h3>
       <label class="flex flex-col gap-1 text-[11px]">
         Title* required
         <select bind:value={titleFieldId} class={selectClass} data-testid="wizard-title-field">
@@ -315,7 +320,7 @@
     </section>
   {:else}
     <section class="flex flex-col gap-3" data-testid="wizard-step-3">
-      <h3 class="text-xs font-semibold text-[var(--text-primary)]">Map status options (3 of 4)</h3>
+      <h3 class="text-xs font-semibold text-[var(--text-primary)]">Map status options (4 of 4)</h3>
       {#each statusField?.property?.options ?? [] as opt (opt.id)}
         <label class="flex flex-col gap-1 text-[11px]">
           "{opt.name}"

@@ -405,6 +405,30 @@ describe('LarkBindingWizard step 1.5 (view picker)', () => {
     expect(screen.getByTestId('wizard-step-2')).toBeInTheDocument();
   });
 
+  it('proceeds to step 1.5 even when listViews fails', async () => {
+    vi.mocked(api.lark.listViews).mockRejectedValue(new Error('views API forbidden'));
+    render(LarkBindingWizard, {
+      props: {
+        repoId: 'repo_x',
+        existing: null,
+        onSave: vi.fn(),
+        onCancel: vi.fn(),
+      },
+    });
+    await fireEvent.input(screen.getByTestId('wizard-app-token'), {
+      target: { value: 'bascntest' },
+    });
+    await fireEvent.input(screen.getByTestId('wizard-table-id'), {
+      target: { value: 'tbltest' },
+    });
+    await fireEvent.click(screen.getByTestId('wizard-detect'));
+    await waitFor(() => expect(screen.getByTestId('wizard-step-1-5')).toBeInTheDocument());
+    const select = screen.getByTestId('wizard-view-select') as HTMLSelectElement;
+    // Only the "All records" fallback option, no view rows.
+    expect(select.options.length).toBe(1);
+    expect(select.options[0].textContent).toContain('All records');
+  });
+
   it('pre-selects view_id when editing existing binding and preserves it through Save', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(LarkBindingWizard, {
