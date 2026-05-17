@@ -66,6 +66,7 @@
   }
 
   async function addCondition(op: FilterOperator) {
+    /* v8 ignore next -- pickedField is always set before the operator listbox renders */
     if (!pickedField) return;
     const cond: FilterCondition = {
       field_id: pickedField.field_id,
