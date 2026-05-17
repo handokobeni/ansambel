@@ -146,14 +146,20 @@ pub async fn detect_lark_schema(
         .map_err(|e| e.to_string())
 }
 
-/// Thin testable wrapper around `LarkClient::bitable_list_views`. Kept as
-/// an `_inner` to mirror `detect_lark_schema_inner` so the Tauri command
-/// stays a one-liner that's exercised only through integration tests.
+/// Thin testable wrapper around `LarkClient::bitable_list_views`. Mirrors
+/// `detect_lark_schema_inner`'s signature so the creds-missing path is
+/// unit-testable and the Tauri command stays a one-liner.
 pub(crate) async fn list_lark_views_inner(
     app_token: &str,
     table_id: &str,
-    client: Arc<crate::platform::lark_client::LarkClient>,
+    data_dir: &std::path::Path,
+    store: &dyn crate::commands::lark_auth::SecretStore,
 ) -> Result<Vec<crate::platform::lark_client::BitableView>> {
+    let mut cfg = crate::commands::lark_auth::load_lark_config_inner(data_dir, store)
+        .map_err(|e| AppError::InvalidState(format!("global Lark credentials missing: {e}")))?;
+    cfg.app_token = app_token.to_string();
+    cfg.table_id = table_id.to_string();
+    let client = Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
     client.bitable_list_views(app_token, table_id).await
 }
 
@@ -165,12 +171,7 @@ pub async fn list_lark_views(
 ) -> std::result::Result<Vec<crate::platform::lark_client::BitableView>, String> {
     let data_dir = data_dir_from(&app_handle)?;
     let store = crate::commands::lark_auth::KeyringStore;
-    let mut cfg = crate::commands::lark_auth::load_lark_config_inner(&data_dir, &store)
-        .map_err(|e| format!("global Lark credentials missing: {e}"))?;
-    cfg.app_token = app_token.clone();
-    cfg.table_id = table_id.clone();
-    let client = Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
-    list_lark_views_inner(&app_token, &table_id, client)
+    list_lark_views_inner(&app_token, &table_id, &data_dir, &store)
         .await
         .map_err(|e| e.to_string())
 }
@@ -397,18 +398,40 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let cfg = crate::platform::lark_client::LarkConfig {
-            app_id: "a".into(),
-            app_secret: "s".into(),
-            app_token: "bascntest".into(),
-            table_id: "tbltest".into(),
-            base_url: server.uri(),
+
+        // Persist creds via the public setter — proves list_lark_views_inner
+        // loads the global config from disk + store the same way the Tauri
+        // command will at runtime.
+        let tmp = tempdir().unwrap();
+        let store = crate::commands::lark_auth::InMemorySecretStore::new();
+        let args = crate::commands::lark_auth::SetLarkCredentialsArgs {
+            app_id: "cli_test".into(),
+            app_secret: "shh".into(),
+            base_url: Some(server.uri()),
         };
-        let client = Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
-        let views = list_lark_views_inner("bascntest", "tbltest", client)
+        crate::commands::lark_auth::set_lark_credentials_inner(args, tmp.path(), &store).unwrap();
+
+        let views = list_lark_views_inner("bascntest", "tbltest", tmp.path(), &store)
             .await
             .unwrap();
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].view_id, "vw_sprint");
+    }
+
+    #[tokio::test]
+    async fn list_lark_views_inner_errors_when_creds_missing() {
+        let tmp = tempdir().unwrap();
+        let store = crate::commands::lark_auth::InMemorySecretStore::new();
+        // No settings file + empty store → load_lark_config_inner fails;
+        // list_lark_views_inner must wrap that as InvalidState with
+        // the "global Lark credentials missing" prefix.
+        let err = list_lark_views_inner("bascntest", "tbltest", tmp.path(), &store)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("global Lark credentials missing"),
+            "got: {err}"
+        );
     }
 }
