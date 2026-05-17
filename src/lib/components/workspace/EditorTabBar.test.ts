@@ -84,4 +84,21 @@ describe('EditorTabBar', () => {
     await fireEvent.keyDown(close, { key: 'Enter' });
     expect(editorTabs.open('ws_a')).toEqual([]);
   });
+
+  it('Space key on the close button triggers close', async () => {
+    editorTabs.openFile('ws_a', 'a.ts', 'A', 'sha', false);
+    const { findAllByTestId } = render(EditorTabBar, { props: { workspaceId: 'ws_a' } });
+    const close = (await findAllByTestId('editor-tab-close'))[0];
+    await fireEvent.keyDown(close, { key: ' ' });
+    expect(editorTabs.open('ws_a')).toEqual([]);
+  });
+
+  it('other keys on close button are ignored', async () => {
+    editorTabs.openFile('ws_a', 'a.ts', 'A', 'sha', false);
+    const { findAllByTestId } = render(EditorTabBar, { props: { workspaceId: 'ws_a' } });
+    const close = (await findAllByTestId('editor-tab-close'))[0];
+    await fireEvent.keyDown(close, { key: 'Tab' });
+    // File still open — Tab key is not handled
+    expect(editorTabs.open('ws_a')).toHaveLength(1);
+  });
 });

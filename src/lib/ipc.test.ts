@@ -16,7 +16,7 @@ vi.mock('@tauri-apps/api/core', () => {
 import { invoke } from '@tauri-apps/api/core';
 import { api, agentChannel } from './ipc';
 import type { Repo, WorkspaceInfo } from './types';
-import type { Task, CreateTaskArgs, TaskPatch } from './types';
+import type { Task, CreateTaskArgs, TaskPatch, BitableBinding } from './types';
 
 const mockRepo: Repo = {
   id: 'repo_abc123',
@@ -303,39 +303,6 @@ describe('api.task new wrappers', () => {
     await api.task.refresh();
     expect(invoke).toHaveBeenCalledWith('refresh_tasks', { repoId: undefined });
   });
-
-  it('setSource: invokes set_task_source with source', async () => {
-    vi.mocked(invoke).mockResolvedValue(undefined);
-    await api.task.setSource('lark');
-    expect(invoke).toHaveBeenCalledWith('set_task_source', { source: 'lark' });
-  });
-
-  it('getSource: invokes get_task_source and returns the source', async () => {
-    vi.mocked(invoke).mockResolvedValue('lark');
-    const s = await api.task.getSource();
-    expect(invoke).toHaveBeenCalledWith('get_task_source');
-    expect(s).toBe('lark');
-  });
-});
-
-describe('api.lark.verifySchema', () => {
-  it('invokes verify_lark_schema and returns SchemaCheckResult', async () => {
-    const result = {
-      ok: true,
-      created: ['title'],
-      already_present: ['repo_id'],
-      type_mismatches: [],
-    };
-    vi.mocked(invoke).mockResolvedValue(result);
-    const out = await api.lark.verifySchema();
-    expect(invoke).toHaveBeenCalledWith('verify_lark_schema');
-    expect(out).toEqual(result);
-  });
-
-  it('rejects with Lark API error', async () => {
-    vi.mocked(invoke).mockRejectedValue(new Error('Lark API: app_secret missing'));
-    await expect(api.lark.verifySchema()).rejects.toThrow('app_secret');
-  });
 });
 
 describe('api.agent', () => {
@@ -410,8 +377,6 @@ describe('api.lark', () => {
   const mockStatus = {
     configured: true,
     app_id: 'cli_test',
-    app_token: 'bascn',
-    table_id: 'tbl',
     base_url: 'https://open.larksuite.com',
     has_secret: true,
   };
@@ -421,14 +386,10 @@ describe('api.lark', () => {
     const out = await api.lark.setCredentials({
       appId: 'cli_test',
       appSecret: 'shh',
-      appToken: 'bascn',
-      tableId: 'tbl',
     });
     expect(invoke).toHaveBeenCalledWith('set_lark_credentials', {
       appId: 'cli_test',
       appSecret: 'shh',
-      appToken: 'bascn',
-      tableId: 'tbl',
       baseUrl: null,
     });
     expect(out).toEqual(mockStatus);
@@ -439,24 +400,20 @@ describe('api.lark', () => {
     await api.lark.setCredentials({
       appId: 'cli',
       appSecret: 's',
-      appToken: 'b',
-      tableId: 't',
       baseUrl: 'https://open.feishu.cn',
     });
     expect(invoke).toHaveBeenCalledWith('set_lark_credentials', {
       appId: 'cli',
       appSecret: 's',
-      appToken: 'b',
-      tableId: 't',
       baseUrl: 'https://open.feishu.cn',
     });
   });
 
   it('setCredentials: propagates rejection on validation error', async () => {
     vi.mocked(invoke).mockRejectedValue(new Error('Lark API: app_id must not be empty'));
-    await expect(
-      api.lark.setCredentials({ appId: '', appSecret: 's', appToken: 'b', tableId: 't' })
-    ).rejects.toThrow('app_id must not be empty');
+    await expect(api.lark.setCredentials({ appId: '', appSecret: 's' })).rejects.toThrow(
+      'app_id must not be empty'
+    );
   });
 
   it('getStatus: invokes get_lark_status with no args and returns LarkStatus', async () => {
@@ -466,62 +423,87 @@ describe('api.lark', () => {
     expect(out).toEqual(mockStatus);
   });
 
-  it('testConnection: sends null sentinels when called with no override', async () => {
+  it('testConnection: invokes test_lark_connection with creds', async () => {
     vi.mocked(invoke).mockResolvedValue(undefined);
-    await api.lark.testConnection();
+    await api.lark.testConnection('bascn', 'tbl');
     expect(invoke).toHaveBeenCalledWith('test_lark_connection', {
-      appId: null,
-      appSecret: null,
-      appToken: null,
-      tableId: null,
-      baseUrl: null,
-    });
-  });
-
-  it('testConnection: forwards override values for pre-save validation', async () => {
-    vi.mocked(invoke).mockResolvedValue(undefined);
-    await api.lark.testConnection({
-      appId: 'cli',
-      appSecret: 'shh',
       appToken: 'bascn',
       tableId: 'tbl',
-    });
-    expect(invoke).toHaveBeenCalledWith('test_lark_connection', {
-      appId: 'cli',
-      appSecret: 'shh',
-      appToken: 'bascn',
-      tableId: 'tbl',
-      baseUrl: null,
-    });
-  });
-
-  it('testConnection: forwards baseUrl override when provided', async () => {
-    vi.mocked(invoke).mockResolvedValue(undefined);
-    await api.lark.testConnection({
-      appId: 'cli',
-      appSecret: 'shh',
-      appToken: 'bascn',
-      tableId: 'tbl',
-      baseUrl: 'https://open.feishu.cn',
-    });
-    expect(invoke).toHaveBeenCalledWith('test_lark_connection', {
-      appId: 'cli',
-      appSecret: 'shh',
-      appToken: 'bascn',
-      tableId: 'tbl',
-      baseUrl: 'https://open.feishu.cn',
     });
   });
 
   it('testConnection: rejects with Lark API error', async () => {
     vi.mocked(invoke).mockRejectedValue(new Error('Lark API: tenant_access_token code 99991663'));
-    await expect(api.lark.testConnection()).rejects.toThrow('99991663');
+    await expect(api.lark.testConnection('bascn', 'tbl')).rejects.toThrow('99991663');
   });
 
   it('clear: invokes clear_lark_credentials with no args', async () => {
     vi.mocked(invoke).mockResolvedValue(undefined);
     await api.lark.clear();
     expect(invoke).toHaveBeenCalledWith('clear_lark_credentials');
+  });
+
+  it('api.lark.getRepoBinding invokes get_lark_repo_binding with repoId', async () => {
+    vi.mocked(invoke).mockResolvedValue(null);
+    await api.lark.getRepoBinding('repo_x');
+    expect(invoke).toHaveBeenCalledWith('get_lark_repo_binding', {
+      repoId: 'repo_x',
+    });
+  });
+
+  it('api.lark.setRepoBinding passes binding payload', async () => {
+    const binding: BitableBinding = {
+      app_token: 'bascn',
+      table_id: 'tbl',
+      field_mapping: {
+        title: { field_id: 'fld_t', field_name: 'Task name' },
+        description: null,
+        status: null,
+        order: null,
+      },
+      status_value_mapping: { entries: {}, default_column: 'todo' },
+      created_at: 0,
+      updated_at: 0,
+    };
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.lark.setRepoBinding('repo_x', binding);
+    expect(invoke).toHaveBeenCalledWith('set_lark_repo_binding', {
+      repoId: 'repo_x',
+      binding,
+    });
+  });
+
+  it('api.lark.deleteRepoBinding invokes delete_lark_repo_binding', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.lark.deleteRepoBinding('repo_x');
+    expect(invoke).toHaveBeenCalledWith('delete_lark_repo_binding', {
+      repoId: 'repo_x',
+    });
+  });
+
+  it('api.lark.listRepoBindings invokes list_lark_repo_bindings', async () => {
+    vi.mocked(invoke).mockResolvedValue({});
+    await api.lark.listRepoBindings();
+    expect(invoke).toHaveBeenCalledWith('list_lark_repo_bindings');
+  });
+
+  it('api.lark.detectSchema invokes detect_lark_schema with creds', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      fields: [],
+      suggested: {
+        title: { field_id: '', field_name: '' },
+        description: null,
+        status: null,
+        order: null,
+      },
+      status_options: null,
+      suggested_status_values: { entries: {}, default_column: 'todo' },
+    });
+    await api.lark.detectSchema('bascn', 'tbl');
+    expect(invoke).toHaveBeenCalledWith('detect_lark_schema', {
+      appToken: 'bascn',
+      tableId: 'tbl',
+    });
   });
 });
 

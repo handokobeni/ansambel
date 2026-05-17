@@ -8,6 +8,7 @@
   import { theme } from '$lib/stores/theme.svelte';
   import { tooltip } from '$lib/actions';
   import SettingsDialog from './SettingsDialog.svelte';
+  import RepoSettingsDialog from '$lib/components/repo/RepoSettingsDialog.svelte';
   import type { Mode } from '$lib/types';
 
   // Reading `theme.colorMode` (a `$state` field) inside this $derived
@@ -24,6 +25,7 @@
 
   let adding = $state(false);
   let settingsOpen = $state(false);
+  let repoSettingsOpen = $state(false);
 
   const selectedRepo = $derived(repos.getSelected());
 
@@ -54,16 +56,51 @@
 <header
   class="titlebar flex items-center justify-between h-10 px-3 bg-[var(--bg-titlebar)] border-b border-[var(--border)] flex-shrink-0 select-none"
 >
-  <div class="flex items-center gap-2">
-    <span
-      class="text-sm font-semibold text-[var(--text-primary)] max-w-[200px] overflow-hidden text-ellipsis whitespace-nowrap"
-    >
-      {#if selectedRepo}
+  <div class="flex items-center gap-1.5">
+    {#if selectedRepo}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <span
+        class="text-sm font-semibold text-[var(--text-primary)] max-w-[200px] overflow-hidden text-ellipsis whitespace-nowrap"
+        data-testid={`repo-row-${selectedRepo.id}`}
+        oncontextmenu={(e) => {
+          e.preventDefault();
+          repoSettingsOpen = true;
+        }}
+      >
         {selectedRepo.name}
-      {:else}
-        <span class="text-[var(--text-muted)]">No repo selected</span>
-      {/if}
-    </span>
+      </span>
+      <button
+        type="button"
+        class="flex items-center justify-center w-6 h-6 rounded text-[var(--text-dim)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer"
+        onclick={() => (repoSettingsOpen = true)}
+        aria-label="Repo settings"
+        data-testid="open-repo-settings"
+        use:tooltip={{ text: 'Repo settings (Lark sync, …)' }}
+      >
+        <svg
+          viewBox="0 0 24 24"
+          width="13"
+          height="13"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="3" />
+          <path
+            d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+          />
+        </svg>
+      </button>
+    {:else}
+      <span
+        class="text-sm font-semibold text-[var(--text-muted)] max-w-[200px] overflow-hidden text-ellipsis whitespace-nowrap"
+      >
+        No repo selected
+      </span>
+    {/if}
   </div>
 
   {#if mode !== undefined && onModeChange !== undefined}
@@ -187,3 +224,12 @@
 </header>
 
 <SettingsDialog open={settingsOpen} onClose={() => (settingsOpen = false)} />
+
+{#if selectedRepo && repoSettingsOpen}
+  <RepoSettingsDialog
+    repoId={selectedRepo.id}
+    repoName={selectedRepo.name}
+    open={true}
+    onClose={() => (repoSettingsOpen = false)}
+  />
+{/if}

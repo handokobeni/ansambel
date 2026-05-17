@@ -13,8 +13,8 @@ use crate::state::{KanbanColumn, Task};
 use async_trait::async_trait;
 
 pub mod lark;
+pub mod lark_field_resolver;
 pub mod local;
-pub mod schema;
 
 /// Argument bundle for create_task. Mirrors what the frontend posts;
 /// each provider decides its own ID strategy (LocalProvider generates

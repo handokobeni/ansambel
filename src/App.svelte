@@ -10,16 +10,19 @@
   import SearchModal from '$lib/components/workspace/SearchModal.svelte';
   import { workspaceTabs } from '$lib/stores/workspace-tabs.svelte';
   import type { SearchMode } from '$lib/types';
-  import { api } from '$lib/ipc';
+  import { listen } from '@tauri-apps/api/event';
   import { repos } from '$lib/stores/repos.svelte';
   import { workspaces } from '$lib/stores/workspaces.svelte';
   import { tasks } from '$lib/stores/tasks.svelte';
+  import { larkBindings } from '$lib/stores/lark-bindings.svelte';
   import { modeStore } from '$lib/stores/mode.svelte';
   import { theme } from '$lib/stores/theme.svelte';
+  import { addToast } from '$lib/stores/toasts.svelte';
   import { ShortcutRegistry } from '$lib/keyboard';
   import type { KanbanColumn } from '$lib/types';
 
   let registry: ShortcutRegistry | undefined;
+  let unlistenMigrated: (() => void) | null = null;
   let showNewTask = $state(false);
   let searchOpen = $state(false);
   let searchMode = $state<SearchMode>('filename');
@@ -72,6 +75,7 @@
     });
 
     await repos.load();
+    await larkBindings.load();
     // Cold-start auto-select: selectedRepoId is in-memory only, so on every
     // restart it lands as null. Without this fallback the kanban renders
     // "Add a repo to start" even when tasks.json/workspaces.json on disk
@@ -90,6 +94,12 @@
         tasks.loadForRepo(repos.selectedRepoId),
       ]);
     }
+
+    listen<string>('lark-migrated', () => {
+      addToast('Lark config migrated. Review the mapping in repo settings.', 'info');
+    }).then((u) => {
+      unlistenMigrated = u;
+    });
   });
 
   // Window-focus refresh: when the OS window regains focus and the active
@@ -98,12 +108,12 @@
     let focusDebounce: ReturnType<typeof setTimeout> | null = null;
 
     async function handleFocus() {
-      const source = await api.task.getSource().catch(() => 'local' as const);
-      if (source !== 'lark') return;
+      const repo = repos.getSelected();
+      if (!repo) return;
+      if (!larkBindings.has(repo.id)) return; // local mode, no refresh
       if (focusDebounce) clearTimeout(focusDebounce);
       focusDebounce = setTimeout(() => {
-        const repo = repos.getSelected();
-        if (repo) tasks.refresh(repo.id).catch(() => {});
+        tasks.refresh(repo.id).catch(() => {});
       }, 2000);
     }
 
@@ -116,6 +126,7 @@
 
   onDestroy(() => {
     registry?.destroy();
+    unlistenMigrated?.();
   });
 
   async function handleMove(taskId: string, column: KanbanColumn, order: number) {

@@ -6,6 +6,7 @@ pub mod file_io;
 pub mod files;
 pub mod helpers;
 pub mod lark_auth;
+pub mod lark_repo_binding;
 pub mod repo;
 pub mod scripts;
 pub mod search;

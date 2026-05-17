@@ -390,11 +390,13 @@ struct BitableEmptyResponse {
     msg: String,
 }
 
-/// Field metadata as returned by Bitable. `field_type` is the numeric
-/// code Lark uses (1=Text, 2=Number, 3=SingleSelect, 5=DateTime,
-/// 7=Checkbox, 15=URL, 17=Attachment). Property is free-form JSON
-/// whose shape depends on the type.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+/// A Bitable field descriptor returned by the list-fields API.
+/// `field_type` is the numeric code Lark uses (1=Text, 2=Number,
+/// 3=SingleSelect, 5=DateTime, 7=Checkbox, 15=URL, 17=Attachment).
+/// `property` is free-form JSON whose shape depends on the type.
+/// Derives `Serialize` so it can be forwarded to the frontend via
+/// `ProposedMapping` without re-mapping.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BitableField {
     pub field_id: String,
     pub field_name: String,
@@ -408,6 +410,31 @@ pub struct BitableField {
     /// before the user populates the wizard-created `title` field.
     #[serde(default)]
     pub is_primary: bool,
+}
+
+/// One option of a Bitable single-select field. Lives inside
+/// `BitableField.property.options`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BitableOption {
+    pub id: String,
+    pub name: String,
+}
+
+impl BitableField {
+    /// Extracts the single-select options list from `property.options`.
+    /// Returns an empty Vec for fields that aren't single-select.
+    pub fn options(&self) -> Vec<BitableOption> {
+        self.property
+            .as_ref()
+            .and_then(|p| p.get("options"))
+            .and_then(|o| o.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Deserialize)]
@@ -1987,5 +2014,37 @@ mod tests {
             s.starts_with("Lark API: tenant_access_token request:"),
             "got: {s}"
         );
+    }
+
+    #[test]
+    fn bitable_field_options_extracts_from_property() {
+        let f = BitableField {
+            field_id: "fld_x".into(),
+            field_name: "Status".into(),
+            field_type: 3,
+            property: Some(serde_json::json!({
+                "options": [
+                    {"id": "opt_1", "name": "To Do"},
+                    {"id": "opt_2", "name": "Done"}
+                ]
+            })),
+            is_primary: false,
+        };
+        let opts = f.options();
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].id, "opt_1");
+        assert_eq!(opts[1].name, "Done");
+    }
+
+    #[test]
+    fn bitable_field_options_empty_when_no_property() {
+        let f = BitableField {
+            field_id: "fld_x".into(),
+            field_name: "Text".into(),
+            field_type: 1,
+            property: None,
+            is_primary: false,
+        };
+        assert!(f.options().is_empty());
     }
 }

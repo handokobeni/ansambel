@@ -1,14 +1,18 @@
-// Phase 3a-2 — LarkProvider.
+// Phase 3a-3 — LarkProvider accepts FieldMapping.
 //
-// Maps Bitable rows ↔ Task structs and routes all CRUD through the
-// shared LarkClient (rate-limit-guarded, 429-aware). Task.id = Lark
-// record_id (format `rec...`); the local `tk_` prefix doesn't apply
-// when this provider is active because hydrate is single-provider.
+// Maps Bitable rows ↔ Task structs via a user-configured `FieldMapping`
+// (produced by the binding wizard) instead of hard-coded field names.
+// CRUD routes through the shared LarkClient (rate-limit-guarded, 429-aware).
+// Task.id = Lark record_id (format `rec...`); the local `tk_` prefix doesn't
+// apply when this provider is active because hydrate is single-provider.
 
 use super::{CreateTaskArgs, TaskPatch, TaskProvider};
-use crate::error::{AppError, Result};
-use crate::platform::lark_client::{BitableRecord, LarkClient};
-use crate::state::{KanbanColumn, Task};
+use crate::error::Result;
+use crate::platform::lark_client::{BitableOption, BitableRecord, LarkClient};
+use crate::state::{BitableBinding, FieldMapping, KanbanColumn, StatusValueMapping, Task};
+use crate::task_provider::lark_field_resolver::{
+    resolve_description, resolve_order, resolve_status, resolve_title,
+};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -18,22 +22,50 @@ pub struct LarkProvider {
     client: Arc<LarkClient>,
     app_token: String,
     table_id: String,
+    field_mapping: FieldMapping,
+    status_value_mapping: StatusValueMapping,
     /// Lazy-loaded Bitable primary-column field name. Fetched once per
     /// provider instance via `bitable_list_fields`; used as a read-only
-    /// fallback when the `title` field on a record is empty. Outer init
+    /// fallback when the mapped `title` field on a record is empty. Outer init
     /// failures are swallowed (cached as `None`) so a transient schema
     /// fetch error doesn't break task hydrate.
     primary_field_name: OnceCell<Option<String>>,
+    /// Lazy-loaded option list for the mapped status field. Needed by the
+    /// write path: Lark Bitable's `records/update` endpoint expects the
+    /// option's NAME (plain string) for single-select fields, not its id.
+    /// Without this lookup we'd send `{"id": "opt_xxx"}` and Lark would
+    /// reject with `1254062 SingleSelectFieldConvFail`. Cached as empty
+    /// `Vec` when no status field is mapped or the fetch fails.
+    status_options: OnceCell<Vec<BitableOption>>,
 }
 
 impl LarkProvider {
-    pub fn new(client: Arc<LarkClient>, app_token: String, table_id: String) -> Self {
+    pub fn new(
+        client: Arc<LarkClient>,
+        app_token: String,
+        table_id: String,
+        field_mapping: FieldMapping,
+        status_value_mapping: StatusValueMapping,
+    ) -> Self {
         Self {
             client,
             app_token,
             table_id,
+            field_mapping,
+            status_value_mapping,
             primary_field_name: OnceCell::new(),
+            status_options: OnceCell::new(),
         }
+    }
+
+    pub fn from_binding(client: Arc<LarkClient>, binding: BitableBinding) -> Self {
+        Self::new(
+            client,
+            binding.app_token,
+            binding.table_id,
+            binding.field_mapping,
+            binding.status_value_mapping,
+        )
     }
 
     /// Returns the Bitable primary column's field name, or `None` if the
@@ -41,57 +73,59 @@ impl LarkProvider {
     async fn primary_field_name(&self) -> Option<String> {
         self.primary_field_name
             .get_or_init(|| async {
-                match self
-                    .client
+                self.client
                     .bitable_list_fields(&self.app_token, &self.table_id)
                     .await
-                {
-                    Ok(fields) => fields
-                        .into_iter()
-                        .find(|f| f.is_primary)
-                        .map(|f| f.field_name),
-                    Err(_) => None,
-                }
+                    .ok()
+                    .and_then(|fields| {
+                        fields
+                            .into_iter()
+                            .find(|f| f.is_primary)
+                            .map(|f| f.field_name)
+                    })
             })
             .await
             .clone()
     }
-}
 
-/// Locates the kanban-status value on a record. The canonical
-/// `kanban_column` field wins when present; otherwise we scan record
-/// fields for one whose name suggests a status taxonomy (case-insensitive
-/// substring of "status", "stage", "phase", or "kanban"). This lets us
-/// hydrate existing Bitables that name their status column "Task Status",
-/// "Workflow Status", "Stage", etc. without forcing a rename.
-pub(super) fn find_kanban_value(
-    fields: &serde_json::Map<String, serde_json::Value>,
-) -> Option<&str> {
-    let value_of = |key: &str| {
-        fields
-            .get(key)
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-    };
-    if let Some(v) = value_of("kanban_column") {
-        return Some(v);
+    /// One-shot: kanban column → option name (via reverse-lookup of the
+    /// mapped option id, then schema lookup of its name). Returns `None`
+    /// when no mapping exists for the column, or the option id is stale.
+    async fn resolve_status_name(&self, column: KanbanColumn) -> Option<String> {
+        let opt_id = reverse_lookup_option(&self.status_value_mapping, column)?;
+        self.status_option_name(&opt_id).await
     }
-    for (name, raw) in fields {
-        let normalized: String = name
-            .chars()
-            .filter(|c| c.is_alphanumeric())
-            .flat_map(char::to_lowercase)
-            .collect();
-        let looks_like_status = ["status", "stage", "phase", "kanban"]
-            .iter()
-            .any(|kw| normalized.contains(kw));
-        if looks_like_status {
-            if let Some(s) = raw.as_str().filter(|s| !s.is_empty()) {
-                return Some(s);
-            }
-        }
+
+    /// Resolves an option id to its name (text) via the cached status
+    /// field options. Returns `None` when no status field is mapped, the
+    /// schema fetch fails, or the option id is stale (e.g. user renamed
+    /// the option in Bitable after binding was saved). Callers fall back
+    /// to a canonical literal in that case.
+    async fn status_option_name(&self, option_id: &str) -> Option<String> {
+        let opts = self
+            .status_options
+            .get_or_init(|| async {
+                let Some(status_ref) = self.field_mapping.status.as_ref() else {
+                    return Vec::new();
+                };
+                let Ok(fields) = self
+                    .client
+                    .bitable_list_fields(&self.app_token, &self.table_id)
+                    .await
+                else {
+                    return Vec::new();
+                };
+                fields
+                    .into_iter()
+                    .find(|f| f.field_id == status_ref.field_id)
+                    .map(|f| f.options())
+                    .unwrap_or_default()
+            })
+            .await;
+        opts.iter()
+            .find(|o| o.id == option_id)
+            .map(|o| o.name.clone())
     }
-    None
 }
 
 /// Maps a Bitable `kanban_column` value to our 4-column enum. The exact
@@ -111,7 +145,7 @@ pub(super) fn find_kanban_value(
 ///
 /// Returns `None` for inputs that don't match any pattern; the caller
 /// surfaces the raw value in the error so the user can debug.
-pub(super) fn parse_kanban_column(value: &str) -> Option<KanbanColumn> {
+pub(crate) fn parse_kanban_column(value: &str) -> Option<KanbanColumn> {
     match value {
         "todo" => return Some(KanbanColumn::Todo),
         "in_progress" => return Some(KanbanColumn::InProgress),
@@ -167,91 +201,48 @@ pub(super) fn parse_kanban_column(value: &str) -> Option<KanbanColumn> {
     None
 }
 
+fn column_to_str(c: KanbanColumn) -> &'static str {
+    match c {
+        KanbanColumn::Todo => "todo",
+        KanbanColumn::InProgress => "in_progress",
+        KanbanColumn::Review => "review",
+        KanbanColumn::Done => "done",
+    }
+}
+
+/// Reverse-lookup a `KanbanColumn` in the `StatusValueMapping` and return
+/// the first matching option id. Used when writing status back to Bitable.
+fn reverse_lookup_option(values: &StatusValueMapping, target: KanbanColumn) -> Option<String> {
+    values
+        .entries
+        .iter()
+        .find(|(_, col)| **col == target)
+        .map(|(id, _)| id.clone())
+}
+
 /// Lark-API row → Task. Returns an error if a required field is
-/// missing/malformed; this surfaces "schema not initialized" cleanly.
+/// missing/malformed; this surfaces "title not resolvable" cleanly.
 ///
-/// `primary_field_name` is consulted as a fallback when the `title` field
-/// is missing or empty — that lets existing Bitables whose data lives in
-/// the locked primary column (e.g. "Task name") render without forcing
-/// the user to duplicate every row's title into the wizard-created field.
+/// `primary_field_name` is consulted as a fallback when the mapped title
+/// field is missing or empty — that lets existing Bitables whose data lives
+/// in the locked primary column render without forcing the user to duplicate
+/// every row's title.
 ///
-/// `default_repo_id` is used when the record's `repo_id` field is missing
-/// or empty — typically passed as the current repo filter so existing
-/// Bitables without a per-row repo concept still hydrate into Ansambel's
-/// active repo.
+/// `default_repo_id` is used when there is no repo_id field in the mapping —
+/// typically passed as the current repo filter so existing Bitables without a
+/// per-row repo concept still hydrate into Ansambel's active repo.
 fn record_to_task(
     rec: &BitableRecord,
+    mapping: &FieldMapping,
+    status_values: &StatusValueMapping,
     primary_field_name: Option<&str>,
     default_repo_id: Option<&str>,
 ) -> Result<Task> {
-    let fields = rec.fields.as_object().ok_or_else(|| {
-        AppError::Lark(format!("record {} fields is not an object", rec.record_id))
-    })?;
-
-    let title_from = |name: &str| {
-        fields
-            .get(name)
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-    };
-    let title = title_from("title")
-        .or_else(|| primary_field_name.and_then(title_from))
-        .ok_or_else(|| {
-            AppError::Lark(format!(
-                "record {} missing required field 'title' (also empty in primary column {:?})",
-                rec.record_id, primary_field_name
-            ))
-        })?
-        .to_string();
-
-    let description = fields
-        .get("description")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    // kanban_column: prefer canonical field, then any status-like alias.
-    // Unknown values (or no status field at all) collapse to Todo so the
-    // task remains visible. Per-record diagnostics go to `debug!` (opt-in
-    // via RUST_LOG) — at WARN level we'd flood the log on Bitables with
-    // hundreds of un-triaged rows. The list_tasks caller emits a single
-    // summary at WARN level instead.
-    let column = match find_kanban_value(fields) {
-        Some(v) => parse_kanban_column(v).unwrap_or_else(|| {
-            tracing::debug!(
-                record_id = %rec.record_id,
-                value = %v,
-                "kanban_column value did not match any taxonomy; defaulting to Todo"
-            );
-            KanbanColumn::Todo
-        }),
-        None => {
-            tracing::debug!(
-                record_id = %rec.record_id,
-                "no kanban_column or status-like field set; defaulting to Todo"
-            );
-            KanbanColumn::Todo
-        }
-    };
-
-    // repo_id: prefer explicit field, then caller's default, then fall
-    // back to empty string. Hydrating with an empty repo_id keeps rows
-    // visible in the AppState mirror; caller (e.g. set_task_source) can
-    // post-process to assign a sensible default before rendering.
-    let repo_id = fields
-        .get("repo_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .or(default_repo_id)
-        .unwrap_or("")
-        .to_string();
-
-    let order = fields
-        .get("order_within_column")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0) as i32;
-
-    // Lark returns ms since epoch; our Task uses seconds.
+    let title = resolve_title(rec, mapping, primary_field_name)?;
+    let description = resolve_description(rec, mapping);
+    let column = resolve_status(rec, mapping, status_values);
+    let order = resolve_order(rec, mapping);
+    let repo_id = default_repo_id.unwrap_or("").to_string();
     let created_at = rec
         .extra_i64("created_time")
         .map(|ms| ms / 1000)
@@ -260,7 +251,6 @@ fn record_to_task(
         .extra_i64("last_modified_time")
         .map(|ms| ms / 1000)
         .unwrap_or(created_at);
-
     Ok(Task {
         id: rec.record_id.clone(),
         repo_id,
@@ -283,15 +273,6 @@ fn column_rank(c: &KanbanColumn) -> u8 {
     }
 }
 
-fn column_to_str(c: KanbanColumn) -> &'static str {
-    match c {
-        KanbanColumn::Todo => "todo",
-        KanbanColumn::InProgress => "in_progress",
-        KanbanColumn::Review => "review",
-        KanbanColumn::Done => "done",
-    }
-}
-
 #[async_trait]
 impl TaskProvider for LarkProvider {
     async fn list_tasks(&self, repo_filter: Option<&str>) -> Result<Vec<Task>> {
@@ -307,8 +288,14 @@ impl TaskProvider for LarkProvider {
         let mut skipped = 0usize;
         let mut tasks: Vec<Task> = records
             .iter()
-            .filter_map(
-                |r| match record_to_task(r, primary.as_deref(), repo_filter) {
+            .filter_map(|r| {
+                match record_to_task(
+                    r,
+                    &self.field_mapping,
+                    &self.status_value_mapping,
+                    primary.as_deref(),
+                    repo_filter,
+                ) {
                     Ok(t) => Some(t),
                     Err(e) => {
                         tracing::debug!(
@@ -319,8 +306,8 @@ impl TaskProvider for LarkProvider {
                         skipped += 1;
                         None
                     }
-                },
-            )
+                }
+            })
             .collect();
         if skipped > 0 {
             tracing::warn!(
@@ -328,9 +315,6 @@ impl TaskProvider for LarkProvider {
                 total,
                 "skipped {skipped}/{total} Bitable records that could not be parsed (run with RUST_LOG=debug for per-record details)"
             );
-        }
-        if let Some(filter) = repo_filter {
-            tasks.retain(|t| t.repo_id == filter);
         }
         // Same ordering convention as LocalProvider: column ASC then order DESC.
         tasks.sort_by(
@@ -343,34 +327,74 @@ impl TaskProvider for LarkProvider {
     }
 
     async fn create_task(&self, args: CreateTaskArgs) -> Result<Task> {
-        let column = args.column.unwrap_or_default();
-        let fields = serde_json::json!({
-            "title": args.title,
-            "description": args.description,
-            "kanban_column": column_to_str(column),
-            "repo_id": args.repo_id,
-            "order_within_column": 0
-        });
+        let column = args.column.clone().unwrap_or_default();
+        let mut fields = serde_json::Map::new();
+        fields.insert(
+            self.field_mapping.title.field_name.clone(),
+            serde_json::Value::String(args.title.clone()),
+        );
+        if let Some(desc_ref) = &self.field_mapping.description {
+            fields.insert(
+                desc_ref.field_name.clone(),
+                serde_json::Value::String(args.description.clone()),
+            );
+        }
+        if let Some(status_ref) = &self.field_mapping.status {
+            // Lark Bitable's single-select WRITE endpoint expects the
+            // option's name as a plain string, NOT `{"id": ...}` (that
+            // shape is read-only). We reverse-lookup the mapped option id
+            // then resolve it to a name via the cached schema. Fallback to
+            // the canonical literal when either lookup misses, so a
+            // freshly-created provider still writes a parseable value.
+            let status_value = if let Some(name) = self.resolve_status_name(column.clone()).await {
+                serde_json::Value::String(name)
+            } else {
+                serde_json::Value::String(column_to_str(column.clone()).to_string())
+            };
+            fields.insert(status_ref.field_name.clone(), status_value);
+        }
+        // Write order as 0 on creation via mapped field when available.
+        if let Some(order_ref) = &self.field_mapping.order {
+            fields.insert(order_ref.field_name.clone(), serde_json::json!(0));
+        }
         let record = self
             .client
-            .bitable_create_record(&self.app_token, &self.table_id, fields)
+            .bitable_create_record(
+                &self.app_token,
+                &self.table_id,
+                serde_json::Value::Object(fields),
+            )
             .await?;
         let primary = self.primary_field_name().await;
-        // On create we know the canonical repo_id because we just wrote it;
-        // pass it as default to cover the rare case where Bitable strips it.
-        record_to_task(&record, primary.as_deref(), Some(args.repo_id.as_str()))
+        record_to_task(
+            &record,
+            &self.field_mapping,
+            &self.status_value_mapping,
+            primary.as_deref(),
+            Some(args.repo_id.as_str()),
+        )
     }
 
     async fn update_task(&self, id: &str, patch: TaskPatch) -> Result<Task> {
         let mut fields = serde_json::Map::new();
         if let Some(title) = patch.title {
-            fields.insert("title".into(), serde_json::Value::String(title));
+            fields.insert(
+                self.field_mapping.title.field_name.clone(),
+                serde_json::Value::String(title),
+            );
         }
         if let Some(description) = patch.description {
-            fields.insert("description".into(), serde_json::Value::String(description));
+            if let Some(desc_ref) = &self.field_mapping.description {
+                fields.insert(
+                    desc_ref.field_name.clone(),
+                    serde_json::Value::String(description),
+                );
+            }
         }
         if let Some(order) = patch.order {
-            fields.insert("order_within_column".into(), serde_json::json!(order));
+            if let Some(order_ref) = &self.field_mapping.order {
+                fields.insert(order_ref.field_name.clone(), serde_json::json!(order));
+            }
         }
         self.client
             .bitable_update_record(
@@ -387,23 +411,50 @@ impl TaskProvider for LarkProvider {
             .bitable_get_record(&self.app_token, &self.table_id, id)
             .await?;
         let primary = self.primary_field_name().await;
-        record_to_task(&rec, primary.as_deref(), None)
+        record_to_task(
+            &rec,
+            &self.field_mapping,
+            &self.status_value_mapping,
+            primary.as_deref(),
+            None,
+        )
     }
 
     async fn move_task(&self, id: &str, column: KanbanColumn, order: i32) -> Result<Task> {
-        let fields = serde_json::json!({
-            "kanban_column": column_to_str(column),
-            "order_within_column": order
-        });
+        let mut fields = serde_json::Map::new();
+        if let Some(status_ref) = &self.field_mapping.status {
+            // See create_task comment: Bitable expects the option name as
+            // a plain string, not `{"id": ...}`.
+            let status_value = if let Some(name) = self.resolve_status_name(column.clone()).await {
+                serde_json::Value::String(name)
+            } else {
+                serde_json::Value::String(column_to_str(column).to_string())
+            };
+            fields.insert(status_ref.field_name.clone(), status_value);
+        }
+        if let Some(order_ref) = &self.field_mapping.order {
+            fields.insert(order_ref.field_name.clone(), serde_json::json!(order));
+        }
         self.client
-            .bitable_update_record(&self.app_token, &self.table_id, id, fields)
+            .bitable_update_record(
+                &self.app_token,
+                &self.table_id,
+                id,
+                serde_json::Value::Object(fields),
+            )
             .await?;
         let rec = self
             .client
             .bitable_get_record(&self.app_token, &self.table_id, id)
             .await?;
         let primary = self.primary_field_name().await;
-        record_to_task(&rec, primary.as_deref(), None)
+        record_to_task(
+            &rec,
+            &self.field_mapping,
+            &self.status_value_mapping,
+            primary.as_deref(),
+            None,
+        )
     }
 
     async fn delete_task(&self, id: &str) -> Result<()> {
@@ -417,6 +468,7 @@ impl TaskProvider for LarkProvider {
 mod tests {
     use super::*;
     use crate::platform::lark_client::{LarkClient, LarkConfig};
+    use crate::state::FieldRef;
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -442,9 +494,40 @@ mod tests {
             .await;
     }
 
+    fn canonical_mapping() -> FieldMapping {
+        FieldMapping {
+            title: FieldRef {
+                field_id: "fld_t".into(),
+                field_name: "title".into(),
+            },
+            description: Some(FieldRef {
+                field_id: "fld_d".into(),
+                field_name: "description".into(),
+            }),
+            status: Some(FieldRef {
+                field_id: "fld_s".into(),
+                field_name: "kanban_column".into(),
+            }),
+            order: Some(FieldRef {
+                field_id: "fld_o".into(),
+                field_name: "order_within_column".into(),
+            }),
+        }
+    }
+
+    fn canonical_values() -> StatusValueMapping {
+        StatusValueMapping::default()
+    }
+
     fn make_provider(uri: &str) -> LarkProvider {
         let client = Arc::new(LarkClient::new(make_config(uri)));
-        LarkProvider::new(client, "bascntest".into(), "tbltest".into())
+        LarkProvider::new(
+            client,
+            "bascntest".into(),
+            "tbltest".into(),
+            canonical_mapping(),
+            canonical_values(),
+        )
     }
 
     #[tokio::test]
@@ -590,10 +673,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lark_provider_list_filters_repo_client_side() {
-        // Lark-side filter dropped (so rows with missing repo_id can fall
-        // back to the caller's filter). Verify the client-side retain keeps
-        // only matching repo_id rows.
+    async fn lark_provider_list_assigns_all_records_filter_repo_id() {
+        // With per-repo FieldMapping, the provider is bound to one repo.
+        // All records from this Bitable belong to the repo the caller
+        // passes as repo_filter; the retain keeps all of them because
+        // they're all stamped with the same repo_id.
         let server = MockServer::start().await;
         mount_token(&server).await;
         Mock::given(method("GET"))
@@ -605,12 +689,12 @@ mod tests {
                 "data": {
                     "items": [
                         {
-                            "record_id": "rec_match",
-                            "fields": {"title": "Match", "kanban_column": "todo", "repo_id": "repo_xyz"}
+                            "record_id": "rec_a",
+                            "fields": {"title": "Task A", "kanban_column": "todo"}
                         },
                         {
-                            "record_id": "rec_other",
-                            "fields": {"title": "Other", "kanban_column": "todo", "repo_id": "repo_other"}
+                            "record_id": "rec_b",
+                            "fields": {"title": "Task B", "kanban_column": "done"}
                         }
                     ],
                     "has_more": false,
@@ -621,8 +705,9 @@ mod tests {
             .await;
         let provider = make_provider(&server.uri());
         let tasks = provider.list_tasks(Some("repo_xyz")).await.unwrap();
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].id, "rec_match");
+        // Both records belong to the bound repo.
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.iter().all(|t| t.repo_id == "repo_xyz"));
     }
 
     #[tokio::test]
@@ -658,12 +743,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lark_provider_list_finds_status_via_alternative_field_names() {
-        // The user's Bitable has the data in a field called "Task Status".
-        // We should auto-detect status-like fields by name.
+    async fn lark_provider_list_finds_status_via_field_name_in_mapping() {
+        // When mapping.status.field_name is "Task Status", the provider
+        // should read that field from the record and fuzzy-parse it.
         let server = MockServer::start().await;
         mount_token(&server).await;
         mount_fields_with_primary(&server, "Task name").await;
+
+        // Build a provider with "Task Status" as the status field name
+        let client = Arc::new(LarkClient::new(make_config(&server.uri())));
+        let mapping = FieldMapping {
+            title: FieldRef {
+                field_id: "fld_pri".into(),
+                field_name: "Task name".into(),
+            },
+            description: None,
+            status: Some(FieldRef {
+                field_id: "fld_s".into(),
+                field_name: "Task Status".into(),
+            }),
+            order: None,
+        };
+        let provider = LarkProvider::new(
+            client,
+            "bascntest".into(),
+            "tbltest".into(),
+            mapping,
+            canonical_values(),
+        );
+
         Mock::given(method("GET"))
             .and(path(
                 "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
@@ -683,14 +791,14 @@ mod tests {
                             "record_id": "rec_workflow_status",
                             "fields": {
                                 "Task name": "Released feature",
-                                "Workflow Status": "Delivered"
+                                "Task Status": "Delivered"
                             }
                         },
                         {
                             "record_id": "rec_stage",
                             "fields": {
                                 "Task name": "Stage feature",
-                                "Stage": "In Progress"
+                                "Task Status": "In Progress"
                             }
                         }
                     ],
@@ -700,7 +808,6 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let provider = make_provider(&server.uri());
         let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
         assert_eq!(tasks.len(), 3);
         let by_id: std::collections::HashMap<_, _> =
@@ -708,85 +815,6 @@ mod tests {
         assert_eq!(by_id["rec_task_status"].column, KanbanColumn::Review);
         assert_eq!(by_id["rec_workflow_status"].column, KanbanColumn::Done);
         assert_eq!(by_id["rec_stage"].column, KanbanColumn::InProgress);
-    }
-
-    #[tokio::test]
-    async fn lark_provider_list_prefers_kanban_column_over_status_aliases() {
-        // When both `kanban_column` and `Task Status` exist, the explicit
-        // canonical field wins (user override).
-        let server = MockServer::start().await;
-        mount_token(&server).await;
-        mount_fields_with_primary(&server, "Task name").await;
-        Mock::given(method("GET"))
-            .and(path(
-                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "code": 0,
-                "data": {
-                    "items": [{
-                        "record_id": "rec_both",
-                        "fields": {
-                            "Task name": "Both",
-                            "kanban_column": "done",
-                            "Task Status": "To Do"
-                        }
-                    }],
-                    "has_more": false,
-                    "page_token": ""
-                }
-            })))
-            .mount(&server)
-            .await;
-        let provider = make_provider(&server.uri());
-        let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
-        assert_eq!(tasks[0].column, KanbanColumn::Done);
-    }
-
-    #[test]
-    fn find_kanban_value_canonical_field_wins() {
-        let fields: serde_json::Map<String, serde_json::Value> = serde_json::from_value(
-            serde_json::json!({"kanban_column": "todo", "Status": "Delivered"}),
-        )
-        .unwrap();
-        assert_eq!(find_kanban_value(&fields), Some("todo"));
-    }
-
-    #[test]
-    fn find_kanban_value_falls_back_to_task_status() {
-        let fields: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_value(serde_json::json!({"Task Status": "In Progress"})).unwrap();
-        assert_eq!(find_kanban_value(&fields), Some("In Progress"));
-    }
-
-    #[test]
-    fn find_kanban_value_falls_back_to_workflow_status() {
-        let fields: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_value(serde_json::json!({"Workflow Status": "Done"})).unwrap();
-        assert_eq!(find_kanban_value(&fields), Some("Done"));
-    }
-
-    #[test]
-    fn find_kanban_value_falls_back_to_stage() {
-        let fields: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_value(serde_json::json!({"Stage": "Review"})).unwrap();
-        assert_eq!(find_kanban_value(&fields), Some("Review"));
-    }
-
-    #[test]
-    fn find_kanban_value_returns_none_when_no_match() {
-        let fields: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_value(serde_json::json!({"Priority": "High", "Owner": "alice"}))
-                .unwrap();
-        assert_eq!(find_kanban_value(&fields), None);
-    }
-
-    #[test]
-    fn find_kanban_value_ignores_empty_string_values() {
-        let fields: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_value(serde_json::json!({"kanban_column": "", "Task Status": "Done"}))
-                .unwrap();
-        assert_eq!(find_kanban_value(&fields), Some("Done"));
     }
 
     #[tokio::test]
@@ -802,7 +830,6 @@ mod tests {
                     "title": "New task",
                     "description": "desc",
                     "kanban_column": "todo",
-                    "repo_id": "repo_a",
                     "order_within_column": 0
                 }
             })))
@@ -838,7 +865,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lark_provider_move_sends_kanban_column_and_order_only() {
+    async fn lark_provider_move_sends_mapped_status_and_order() {
         let server = MockServer::start().await;
         mount_token(&server).await;
         Mock::given(method("PUT"))
@@ -879,6 +906,116 @@ mod tests {
             .mount(&server)
             .await;
         let provider = make_provider(&server.uri());
+        let task = provider
+            .move_task("rec_x", KanbanColumn::Done, 256)
+            .await
+            .unwrap();
+        assert_eq!(task.column, KanbanColumn::Done);
+        assert_eq!(task.order, 256);
+    }
+
+    #[tokio::test]
+    async fn lark_provider_move_sends_option_name_for_single_select_status() {
+        // Regression for `1254062 SingleSelectFieldConvFail`: when the
+        // mapped status is a single-select field, the WRITE payload must
+        // be the option's NAME as a plain string. The `{"id": "opt_..."}`
+        // shape is read-only and Lark rejects it on write.
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        // Mount fields so resolve_status_name can find the option name.
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/fields",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "field_id": "fld_s",
+                            "field_name": "Task Status",
+                            "type": 3,
+                            "is_primary": false,
+                            "property": {
+                                "options": [
+                                    {"id": "optTodo", "name": "To Do"},
+                                    {"id": "optDone", "name": "Selesai"}
+                                ]
+                            }
+                        }
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+        // The payload must contain `"Task Status": "Selesai"` — plain
+        // string, NOT `{"id": "optDone"}`.
+        Mock::given(method("PUT"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records/rec_x",
+            ))
+            .and(body_json(serde_json::json!({
+                "fields": {
+                    "Task Status": "Selesai",
+                    "order_within_column": 256
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "msg": "ok"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records/rec_x",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "record": {
+                        "record_id": "rec_x",
+                        "fields": {
+                            "title": "t",
+                            "Task Status": {"id": "optDone", "text": "Selesai"},
+                            "order_within_column": 256
+                        }
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = std::sync::Arc::new(LarkClient::new(make_config(&server.uri())));
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("optTodo".to_string(), KanbanColumn::Todo);
+        entries.insert("optDone".to_string(), KanbanColumn::Done);
+        let values = StatusValueMapping {
+            entries,
+            default_column: KanbanColumn::Todo,
+        };
+        let mapping = FieldMapping {
+            title: crate::state::FieldRef {
+                field_id: "fld_t".into(),
+                field_name: "title".into(),
+            },
+            description: None,
+            status: Some(crate::state::FieldRef {
+                field_id: "fld_s".into(),
+                field_name: "Task Status".into(),
+            }),
+            order: Some(crate::state::FieldRef {
+                field_id: "fld_o".into(),
+                field_name: "order_within_column".into(),
+            }),
+        };
+        let provider = LarkProvider::new(
+            client,
+            "bascntest".into(),
+            "tbltest".into(),
+            mapping,
+            values,
+        );
         let task = provider
             .move_task("rec_x", KanbanColumn::Done, 256)
             .await
@@ -1001,7 +1138,7 @@ mod tests {
         assert_eq!(tasks[0].id, "rec_ok");
     }
 
-    /// When a record's `title` field is absent or empty, the provider should
+    /// When a record's mapped title field is absent or empty, the provider should
     /// fall back to the Bitable primary column (auto-detected via
     /// `is_primary` on the field schema). This lets users point Ansambel at
     /// existing Bitables whose data lives in the locked primary column
@@ -1289,5 +1426,63 @@ mod tests {
         let provider = make_provider(&server.uri());
         let tasks = provider.list_tasks(Some("repo_a")).await.unwrap();
         assert_eq!(tasks[0].title, "Explicit Title");
+    }
+
+    #[tokio::test]
+    async fn lark_provider_from_binding_constructs_provider() {
+        // Smoke test: from_binding should produce a working provider.
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [{
+                        "record_id": "rec_b1",
+                        "fields": {"title": "T", "kanban_column": "todo"}
+                    }],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+        let client = Arc::new(LarkClient::new(make_config(&server.uri())));
+        let binding = BitableBinding {
+            app_token: "bascntest".into(),
+            table_id: "tbltest".into(),
+            field_mapping: canonical_mapping(),
+            status_value_mapping: canonical_values(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let provider = LarkProvider::from_binding(client, binding);
+        let tasks = provider.list_tasks(Some("x")).await.unwrap();
+        // repo_id defaults to filter "x"; record has no repo_id field
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "rec_b1");
+    }
+
+    #[test]
+    fn reverse_lookup_finds_matching_column() {
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("opt_todo".into(), KanbanColumn::Todo);
+        entries.insert("opt_done".into(), KanbanColumn::Done);
+        let values = StatusValueMapping {
+            entries,
+            default_column: KanbanColumn::Todo,
+        };
+        let id = reverse_lookup_option(&values, KanbanColumn::Done);
+        assert_eq!(id, Some("opt_done".into()));
+    }
+
+    #[test]
+    fn reverse_lookup_returns_none_when_no_match() {
+        let values = StatusValueMapping::default();
+        let id = reverse_lookup_option(&values, KanbanColumn::Review);
+        assert_eq!(id, None);
     }
 }

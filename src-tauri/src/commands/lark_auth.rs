@@ -1,10 +1,14 @@
 // Phase 3a-1 — Tauri command surface for managing Lark credentials.
 //
-// Splits the four fields across two stores:
-//   * `app_id`, `app_token`, `table_id`, `base_url`  → JSON on disk
+// Splits the credential fields across two stores:
+//   * `app_id`, `base_url`  → JSON on disk
 //     (`lark_settings.json` in the Tauri app data dir).
-//   * `app_secret`                                   → OS keyring under
+//   * `app_secret`          → OS keyring under
 //     service `ansambel.lark`, account `default`.
+//
+// `app_token` and `table_id` are now per-repo concerns stored via
+// `commands::lark_repo_binding` — they were removed from global settings in
+// Phase 3a-3 Task 9.
 //
 // Hard rule (project): NEVER log the secret or the resulting
 // `tenant_access_token`. The status returned to the frontend reports
@@ -35,17 +39,11 @@ pub const LARK_KEYRING_SERVICE: &str = "ansambel.lark";
 /// here. Pinning to "default" keeps the lookup deterministic.
 pub const LARK_KEYRING_ACCOUNT: &str = "default";
 
-/// Persisted (non-secret) part of the Lark credential set.
+/// Persisted (non-secret) global part of the Lark credential set.
+/// `app_token` and `table_id` are per-repo and live in lark_repo_bindings.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct LarkSettings {
-    #[serde(default = "default_schema_version")]
-    pub schema_version: u32,
-    #[serde(default)]
-    pub app_id: Option<String>,
-    #[serde(default)]
-    pub app_token: Option<String>,
-    #[serde(default)]
-    pub table_id: Option<String>,
+    pub app_id: String,
     #[serde(default = "default_base_url_string")]
     pub base_url: String,
 }
@@ -53,17 +51,10 @@ pub struct LarkSettings {
 impl Default for LarkSettings {
     fn default() -> Self {
         Self {
-            schema_version: default_schema_version(),
-            app_id: None,
-            app_token: None,
-            table_id: None,
+            app_id: String::new(),
             base_url: default_base_url_string(),
         }
     }
-}
-
-fn default_schema_version() -> u32 {
-    1
 }
 
 fn default_base_url_string() -> String {
@@ -72,14 +63,12 @@ fn default_base_url_string() -> String {
 
 /// What the frontend sees when it asks "are we configured?". The
 /// secret is never returned — only a boolean for whether one is in the
-/// keyring. `configured` is true only when all four required fields are
-/// populated (the three plain-text fields plus the secret).
+/// keyring. `configured` is true only when `app_id` is populated and
+/// the secret is present.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct LarkStatus {
     pub configured: bool,
     pub app_id: Option<String>,
-    pub app_token: Option<String>,
-    pub table_id: Option<String>,
     pub base_url: String,
     pub has_secret: bool,
 }
@@ -90,59 +79,8 @@ pub struct LarkStatus {
 pub struct SetLarkCredentialsArgs {
     pub app_id: String,
     pub app_secret: String,
-    pub app_token: String,
-    pub table_id: String,
     #[serde(default)]
     pub base_url: Option<String>,
-}
-
-/// Optional credentials passed by the frontend when the user clicks
-/// Test Connection BEFORE Save — so they can verify form input without
-/// committing to keyring/disk. When any required field is missing or
-/// empty, we fall back to the stored config; that way the saved-state
-/// "click Test on the loaded form" UX keeps working unchanged.
-#[derive(Deserialize, Debug, Clone, Default)]
-pub struct TestConnectionOverride {
-    #[serde(default)]
-    pub app_id: Option<String>,
-    #[serde(default)]
-    pub app_secret: Option<String>,
-    #[serde(default)]
-    pub app_token: Option<String>,
-    #[serde(default)]
-    pub table_id: Option<String>,
-    #[serde(default)]
-    pub base_url: Option<String>,
-}
-
-impl TestConnectionOverride {
-    /// Build a `LarkConfig` from override fields when all four required
-    /// values are present and non-empty. Returns `None` to signal "fall
-    /// back to stored credentials".
-    pub fn to_config(&self) -> Option<LarkConfig> {
-        let app_id = self.app_id.as_deref()?.trim();
-        let app_secret = self.app_secret.as_deref()?.trim();
-        let app_token = self.app_token.as_deref()?.trim();
-        let table_id = self.table_id.as_deref()?.trim();
-        if app_id.is_empty() || app_secret.is_empty() || app_token.is_empty() || table_id.is_empty()
-        {
-            return None;
-        }
-        let base_url = self
-            .base_url
-            .as_deref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .unwrap_or_else(default_base_url_string);
-        Some(LarkConfig {
-            app_id: app_id.to_string(),
-            app_secret: app_secret.to_string(),
-            app_token: app_token.to_string(),
-            table_id: table_id.to_string(),
-            base_url,
-        })
-    }
 }
 
 /// Pluggable secret store so unit tests can run without a real OS
@@ -254,8 +192,6 @@ pub fn set_lark_credentials_inner(
 ) -> Result<LarkStatus> {
     require_nonempty("app_id", &args.app_id)?;
     require_nonempty("app_secret", &args.app_secret)?;
-    require_nonempty("app_token", &args.app_token)?;
-    require_nonempty("table_id", &args.table_id)?;
     let base_url = args
         .base_url
         .as_deref()
@@ -264,10 +200,7 @@ pub fn set_lark_credentials_inner(
         .unwrap_or_else(default_base_url_string);
 
     let settings = LarkSettings {
-        schema_version: default_schema_version(),
-        app_id: Some(args.app_id),
-        app_token: Some(args.app_token),
-        table_id: Some(args.table_id),
+        app_id: args.app_id,
         base_url,
     };
     write_atomic(&lark_settings_file(data_dir), &settings)?;
@@ -294,60 +227,40 @@ pub fn clear_lark_credentials_inner(data_dir: &Path, store: &dyn SecretStore) ->
     Ok(())
 }
 
-/// Load the full config (settings + secret) into a `LarkConfig` ready
-/// to construct a `LarkClient`. Returns `NotFound` if any required
-/// field is missing — callers should surface this as "not configured"
-/// in the UI, not as a hard error.
+/// Load the global config (settings + secret) into a `LarkConfig` ready
+/// to construct a `LarkClient`. The returned config has `app_token` and
+/// `table_id` left empty — callers (e.g. `test_lark_connection`) must
+/// inject those from the per-repo binding. Returns an error if `app_id`
+/// or `app_secret` are missing — callers should surface this as "not
+/// configured" in the UI.
 pub fn load_lark_config_inner(data_dir: &Path, store: &dyn SecretStore) -> Result<LarkConfig> {
     let settings: LarkSettings = load_or_default(&lark_settings_file(data_dir))?;
     let secret = store
         .get(LARK_KEYRING_SERVICE, LARK_KEYRING_ACCOUNT)?
-        .ok_or_else(|| AppError::NotFound("Lark app_secret".into()))?;
-    let app_id = settings
-        .app_id
-        .ok_or_else(|| AppError::NotFound("Lark app_id".into()))?;
-    let app_token = settings
-        .app_token
-        .ok_or_else(|| AppError::NotFound("Lark app_token".into()))?;
-    let table_id = settings
-        .table_id
-        .ok_or_else(|| AppError::NotFound("Lark table_id".into()))?;
+        .ok_or_else(|| AppError::InvalidState("Lark app_secret missing".into()))?;
+    if settings.app_id.trim().is_empty() {
+        return Err(AppError::InvalidState("Lark app_id missing".into()));
+    }
     Ok(LarkConfig {
-        app_id,
+        app_id: settings.app_id,
         app_secret: secret,
-        app_token,
-        table_id,
+        // Per-binding values must be injected by caller.
+        app_token: String::new(),
+        table_id: String::new(),
         base_url: settings.base_url,
     })
 }
 
-pub async fn test_lark_connection_inner(
-    override_cfg: TestConnectionOverride,
-    data_dir: &Path,
-    store: &dyn SecretStore,
-) -> Result<()> {
-    let cfg = match override_cfg.to_config() {
-        Some(c) => c,
-        None => load_lark_config_inner(data_dir, store)?,
-    };
-    let client = LarkClient::new(cfg);
-    // tenant_access_token() round-trips the credentials against the
-    // real Lark API. Discarding the returned String here is deliberate
-    // — we never log or surface it.
-    let _token = client.tenant_access_token().await?;
-    Ok(())
-}
-
 fn status_from_settings(s: &LarkSettings, has_secret: bool) -> LarkStatus {
-    let configured = has_secret
-        && s.app_id.as_deref().is_some_and(|v| !v.is_empty())
-        && s.app_token.as_deref().is_some_and(|v| !v.is_empty())
-        && s.table_id.as_deref().is_some_and(|v| !v.is_empty());
+    let app_id_nonempty = !s.app_id.trim().is_empty();
+    let configured = has_secret && app_id_nonempty;
     LarkStatus {
         configured,
-        app_id: s.app_id.clone(),
-        app_token: s.app_token.clone(),
-        table_id: s.table_id.clone(),
+        app_id: if app_id_nonempty {
+            Some(s.app_id.clone())
+        } else {
+            None
+        },
         base_url: s.base_url.clone(),
         has_secret,
     }
@@ -359,8 +272,6 @@ fn status_from_settings(s: &LarkSettings, has_secret: bool) -> LarkStatus {
 pub async fn set_lark_credentials(
     app_id: String,
     app_secret: String,
-    app_token: String,
-    table_id: String,
     base_url: Option<String>,
     app: tauri::AppHandle,
 ) -> std::result::Result<LarkStatus, String> {
@@ -369,8 +280,6 @@ pub async fn set_lark_credentials(
     let args = SetLarkCredentialsArgs {
         app_id,
         app_secret,
-        app_token,
-        table_id,
         base_url,
     };
     set_lark_credentials_inner(args, &data_dir, &store).map_err(|e| e.to_string())
@@ -383,26 +292,29 @@ pub async fn get_lark_status(app: tauri::AppHandle) -> std::result::Result<LarkS
     get_lark_status_inner(&data_dir, &store).map_err(|e| e.to_string())
 }
 
+/// Test the global Lark credentials against the given `app_token` and
+/// `table_id` (which come from the per-repo binding form in the UI).
+/// Verifies that a `tenant_access_token` can be obtained — a successful
+/// auth round-trip signals that `app_id` + `app_secret` are valid.
 #[tauri::command]
 pub async fn test_lark_connection(
-    app_id: Option<String>,
-    app_secret: Option<String>,
-    app_token: Option<String>,
-    table_id: Option<String>,
-    base_url: Option<String>,
-    app: tauri::AppHandle,
+    app_token: String,
+    table_id: String,
+    app_handle: tauri::AppHandle,
 ) -> std::result::Result<(), String> {
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?;
     let store = KeyringStore;
-    let override_cfg = TestConnectionOverride {
-        app_id,
-        app_secret,
-        app_token,
-        table_id,
-        base_url,
-    };
-    test_lark_connection_inner(override_cfg, &data_dir, &store)
+    let mut cfg = load_lark_config_inner(&data_dir, &store).map_err(|e| e.to_string())?;
+    cfg.app_token = app_token;
+    cfg.table_id = table_id;
+    let client = LarkClient::new(cfg);
+    client
+        .tenant_access_token()
         .await
+        .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
@@ -411,34 +323,6 @@ pub async fn clear_lark_credentials(app: tauri::AppHandle) -> std::result::Resul
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let store = KeyringStore;
     clear_lark_credentials_inner(&data_dir, &store).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn verify_lark_schema(
-    app: tauri::AppHandle,
-) -> std::result::Result<crate::task_provider::schema::SchemaCheckResult, String> {
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let store = KeyringStore;
-    verify_lark_schema_inner(&data_dir, &store)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-pub async fn verify_lark_schema_inner(
-    data_dir: &std::path::Path,
-    store: &dyn SecretStore,
-) -> crate::error::Result<crate::task_provider::schema::SchemaCheckResult> {
-    let cfg = load_lark_config_inner(data_dir, store)?;
-    let app_token = cfg.app_token.clone();
-    let table_id = cfg.table_id.clone();
-    let client = crate::platform::lark_client::LarkClient::new(cfg);
-    crate::task_provider::schema::verify_schema(
-        &client,
-        &app_token,
-        &table_id,
-        &crate::task_provider::schema::required_fields_phase_3a2(),
-    )
-    .await
 }
 
 #[cfg(test)]
@@ -451,8 +335,6 @@ mod tests {
         SetLarkCredentialsArgs {
             app_id: "cli_test".into(),
             app_secret: "shh_secret".into(),
-            app_token: "bascntest".into(),
-            table_id: "tbltest".into(),
             base_url: None,
         }
     }
@@ -460,20 +342,14 @@ mod tests {
     #[test]
     fn lark_settings_default_uses_international_base_url() {
         let s = LarkSettings::default();
-        assert_eq!(s.schema_version, 1);
         assert_eq!(s.base_url, DEFAULT_BASE_URL);
-        assert!(s.app_id.is_none());
-        assert!(s.app_token.is_none());
-        assert!(s.table_id.is_none());
+        assert!(s.app_id.is_empty());
     }
 
     #[test]
     fn lark_settings_round_trips_json_without_secret_field() {
         let s = LarkSettings {
-            schema_version: 1,
-            app_id: Some("cli_x".into()),
-            app_token: Some("bascn_y".into()),
-            table_id: Some("tbl_z".into()),
+            app_id: "cli_x".into(),
             base_url: "https://open.feishu.cn".into(),
         };
         let j = serde_json::to_string(&s).unwrap();
@@ -571,26 +447,6 @@ mod tests {
     }
 
     #[test]
-    fn set_rejects_empty_app_token() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = InMemorySecretStore::new();
-        let mut args = make_args();
-        args.app_token = "".into();
-        let err = set_lark_credentials_inner(args, tmp.path(), &store).unwrap_err();
-        assert!(err.to_string().contains("app_token"), "{err}");
-    }
-
-    #[test]
-    fn set_rejects_empty_table_id() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = InMemorySecretStore::new();
-        let mut args = make_args();
-        args.table_id = "".into();
-        let err = set_lark_credentials_inner(args, tmp.path(), &store).unwrap_err();
-        assert!(err.to_string().contains("table_id"), "{err}");
-    }
-
-    #[test]
     fn get_status_when_nothing_configured() {
         let tmp = tempfile::tempdir().unwrap();
         let store = InMemorySecretStore::new();
@@ -656,10 +512,7 @@ mod tests {
         let store = InMemorySecretStore::new();
         // Write a settings file but skip the secret.
         let s = LarkSettings {
-            schema_version: 1,
-            app_id: Some("cli".into()),
-            app_token: Some("bascn".into()),
-            table_id: Some("tbl".into()),
+            app_id: "cli".into(),
             base_url: DEFAULT_BASE_URL.to_string(),
         };
         write_atomic(&lark_settings_file(tmp.path()), &s).unwrap();
@@ -674,12 +527,9 @@ mod tests {
         store
             .set(LARK_KEYRING_SERVICE, LARK_KEYRING_ACCOUNT, "shh")
             .unwrap();
-        // Settings file missing app_id but present for others.
+        // Settings file with empty app_id.
         let s = LarkSettings {
-            schema_version: 1,
-            app_id: None,
-            app_token: Some("bascn".into()),
-            table_id: Some("tbl".into()),
+            app_id: String::new(),
             base_url: DEFAULT_BASE_URL.to_string(),
         };
         write_atomic(&lark_settings_file(tmp.path()), &s).unwrap();
@@ -688,53 +538,16 @@ mod tests {
     }
 
     #[test]
-    fn load_lark_config_errors_when_app_token_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = InMemorySecretStore::new();
-        store
-            .set(LARK_KEYRING_SERVICE, LARK_KEYRING_ACCOUNT, "shh")
-            .unwrap();
-        let s = LarkSettings {
-            schema_version: 1,
-            app_id: Some("cli".into()),
-            app_token: None,
-            table_id: Some("tbl".into()),
-            base_url: DEFAULT_BASE_URL.to_string(),
-        };
-        write_atomic(&lark_settings_file(tmp.path()), &s).unwrap();
-        let err = load_lark_config_inner(tmp.path(), &store).unwrap_err();
-        assert!(err.to_string().contains("app_token"), "{err}");
-    }
-
-    #[test]
-    fn load_lark_config_errors_when_table_id_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = InMemorySecretStore::new();
-        store
-            .set(LARK_KEYRING_SERVICE, LARK_KEYRING_ACCOUNT, "shh")
-            .unwrap();
-        let s = LarkSettings {
-            schema_version: 1,
-            app_id: Some("cli".into()),
-            app_token: Some("bascn".into()),
-            table_id: None,
-            base_url: DEFAULT_BASE_URL.to_string(),
-        };
-        write_atomic(&lark_settings_file(tmp.path()), &s).unwrap();
-        let err = load_lark_config_inner(tmp.path(), &store).unwrap_err();
-        assert!(err.to_string().contains("table_id"), "{err}");
-    }
-
-    #[test]
-    fn load_lark_config_returns_full_config_when_present() {
+    fn load_lark_config_returns_config_with_empty_binding_fields() {
         let tmp = tempfile::tempdir().unwrap();
         let store = InMemorySecretStore::new();
         set_lark_credentials_inner(make_args(), tmp.path(), &store).unwrap();
         let cfg = load_lark_config_inner(tmp.path(), &store).unwrap();
         assert_eq!(cfg.app_id, "cli_test");
         assert_eq!(cfg.app_secret, "shh_secret");
-        assert_eq!(cfg.app_token, "bascntest");
-        assert_eq!(cfg.table_id, "tbltest");
+        // app_token and table_id are injected by per-repo callers.
+        assert_eq!(cfg.app_token, "");
+        assert_eq!(cfg.table_id, "");
         assert_eq!(cfg.base_url, DEFAULT_BASE_URL);
     }
 
@@ -756,18 +569,19 @@ mod tests {
         let mut args = make_args();
         args.base_url = Some(server.uri());
         set_lark_credentials_inner(args, tmp.path(), &store).unwrap();
-        test_lark_connection_inner(TestConnectionOverride::default(), tmp.path(), &store)
-            .await
-            .unwrap();
+        // Simulate the inner logic of test_lark_connection.
+        let mut cfg = load_lark_config_inner(tmp.path(), &store).unwrap();
+        cfg.app_token = "bascntest".into();
+        cfg.table_id = "tbltest".into();
+        let client = LarkClient::new(cfg);
+        client.tenant_access_token().await.unwrap();
     }
 
-    #[tokio::test]
-    async fn test_connection_surfaces_error_when_unconfigured() {
+    #[test]
+    fn test_connection_surfaces_error_when_unconfigured() {
         let tmp = tempfile::tempdir().unwrap();
         let store = InMemorySecretStore::new();
-        let err = test_lark_connection_inner(TestConnectionOverride::default(), tmp.path(), &store)
-            .await
-            .unwrap_err();
+        let err = load_lark_config_inner(tmp.path(), &store).unwrap_err();
         assert!(err.to_string().contains("app_secret"), "{err}");
     }
 
@@ -787,112 +601,12 @@ mod tests {
         let mut args = make_args();
         args.base_url = Some(server.uri());
         set_lark_credentials_inner(args, tmp.path(), &store).unwrap();
-        let err = test_lark_connection_inner(TestConnectionOverride::default(), tmp.path(), &store)
-            .await
-            .unwrap_err();
+        let mut cfg = load_lark_config_inner(tmp.path(), &store).unwrap();
+        cfg.app_token = "bascntest".into();
+        cfg.table_id = "tbltest".into();
+        let client = LarkClient::new(cfg);
+        let err = client.tenant_access_token().await.unwrap_err();
         assert!(err.to_string().contains("app not found"), "{err}");
-    }
-
-    #[tokio::test]
-    async fn test_connection_uses_override_when_provided() {
-        // Nothing in keyring/disk. Override passed in directly succeeds.
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "code": 0,
-                "tenant_access_token": "t_override",
-                "expire": 7200,
-            })))
-            .mount(&server)
-            .await;
-        let tmp = tempfile::tempdir().unwrap();
-        let store = InMemorySecretStore::new();
-        let override_cfg = TestConnectionOverride {
-            app_id: Some("cli_override".into()),
-            app_secret: Some("secret_override".into()),
-            app_token: Some("bascn_override".into()),
-            table_id: Some("tbl_override".into()),
-            base_url: Some(server.uri()),
-        };
-        test_lark_connection_inner(override_cfg, tmp.path(), &store)
-            .await
-            .unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_connection_falls_back_to_stored_when_override_incomplete() {
-        // Partial override (missing app_secret) → fall back to stored.
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "code": 0,
-                "tenant_access_token": "t_stored",
-                "expire": 7200,
-            })))
-            .mount(&server)
-            .await;
-        let tmp = tempfile::tempdir().unwrap();
-        let store = InMemorySecretStore::new();
-        let mut args = make_args();
-        args.base_url = Some(server.uri());
-        set_lark_credentials_inner(args, tmp.path(), &store).unwrap();
-        let partial = TestConnectionOverride {
-            app_id: Some("cli_x".into()),
-            app_secret: None,
-            app_token: Some("bascn".into()),
-            table_id: Some("tbl".into()),
-            base_url: None,
-        };
-        test_lark_connection_inner(partial, tmp.path(), &store)
-            .await
-            .unwrap();
-    }
-
-    #[test]
-    fn test_connection_override_to_config_returns_none_when_any_field_missing() {
-        let mut o = TestConnectionOverride {
-            app_id: Some("cli".into()),
-            app_secret: Some("s".into()),
-            app_token: Some("b".into()),
-            table_id: Some("t".into()),
-            base_url: None,
-        };
-        assert!(o.to_config().is_some());
-        for clear in [
-            |o: &mut TestConnectionOverride| o.app_id = None,
-            |o: &mut TestConnectionOverride| o.app_secret = None,
-            |o: &mut TestConnectionOverride| o.app_token = None,
-            |o: &mut TestConnectionOverride| o.table_id = None,
-        ] {
-            let mut snapshot = o.clone();
-            clear(&mut snapshot);
-            assert!(
-                snapshot.to_config().is_none(),
-                "expected None: {snapshot:?}"
-            );
-        }
-        // Blank string for any field also counts as missing.
-        o.app_id = Some("   ".into());
-        assert!(o.to_config().is_none());
-    }
-
-    #[test]
-    fn test_connection_override_to_config_trims_and_defaults_base_url() {
-        let o = TestConnectionOverride {
-            app_id: Some("  cli  ".into()),
-            app_secret: Some("  s  ".into()),
-            app_token: Some(" b ".into()),
-            table_id: Some(" t ".into()),
-            base_url: Some("   ".into()),
-        };
-        let cfg = o.to_config().unwrap();
-        assert_eq!(cfg.app_id, "cli");
-        assert_eq!(cfg.app_secret, "s");
-        assert_eq!(cfg.app_token, "b");
-        assert_eq!(cfg.table_id, "t");
-        assert_eq!(cfg.base_url, DEFAULT_BASE_URL);
     }
 
     #[test]
@@ -900,8 +614,6 @@ mod tests {
         let s = LarkStatus {
             configured: true,
             app_id: Some("cli".into()),
-            app_token: Some("bascn".into()),
-            table_id: Some("tbl".into()),
             base_url: DEFAULT_BASE_URL.to_string(),
             has_secret: true,
         };
@@ -914,10 +626,7 @@ mod tests {
     #[test]
     fn status_from_settings_marks_unconfigured_when_app_id_blank() {
         let s = LarkSettings {
-            schema_version: 1,
-            app_id: Some(String::new()),
-            app_token: Some("bascn".into()),
-            table_id: Some("tbl".into()),
+            app_id: String::new(),
             base_url: DEFAULT_BASE_URL.to_string(),
         };
         let status = status_from_settings(&s, true);

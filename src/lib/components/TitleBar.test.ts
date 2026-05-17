@@ -233,6 +233,54 @@ describe('TitleBar mode toggle', () => {
   });
 });
 
+describe('TitleBar repo context menu', () => {
+  beforeEach(() => {
+    vi.mocked(repos.getSelected).mockReturnValue({
+      id: 'repo_abc123',
+      name: 'my-project',
+      path: '/home/user/my-project',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 1776000000,
+      updated_at: 1776000000,
+    });
+  });
+
+  it('right-click on the repo name opens RepoSettingsDialog', async () => {
+    render(TitleBar);
+    const repoRow = screen.getByTestId('repo-row-repo_abc123');
+    await fireEvent.contextMenu(repoRow);
+    expect(screen.getByTestId('binding-empty')).toBeInTheDocument();
+  });
+
+  it('closing RepoSettingsDialog via close button hides it', async () => {
+    render(TitleBar);
+    const repoRow = screen.getByTestId('repo-row-repo_abc123');
+    await fireEvent.contextMenu(repoRow);
+    expect(screen.getByTestId('binding-empty')).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('repo-settings-close'));
+    expect(screen.queryByTestId('binding-empty')).toBeNull();
+  });
+
+  it('does not render the repo-row testid when no repo is selected', () => {
+    vi.mocked(repos.getSelected).mockReturnValue(null);
+    render(TitleBar);
+    expect(screen.queryByTestId(/^repo-row-/)).toBeNull();
+  });
+
+  it('clicking the gear icon opens RepoSettingsDialog', async () => {
+    render(TitleBar);
+    await fireEvent.click(screen.getByTestId('open-repo-settings'));
+    expect(screen.getByTestId('binding-empty')).toBeInTheDocument();
+  });
+
+  it('does not render the gear icon when no repo is selected', () => {
+    vi.mocked(repos.getSelected).mockReturnValue(null);
+    render(TitleBar);
+    expect(screen.queryByTestId('open-repo-settings')).toBeNull();
+  });
+});
+
 describe('TitleBar settings button', () => {
   it('renders a settings button', () => {
     render(TitleBar);

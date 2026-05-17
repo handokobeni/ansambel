@@ -12,7 +12,7 @@ pub enum WorkspaceStatus {
     Error,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum KanbanColumn {
     #[default]
@@ -22,15 +22,74 @@ pub enum KanbanColumn {
     Done,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum TaskSource {
-    Local,
-    Lark,
+/// A reference to a Bitable field. `field_id` is the stable lookup key
+/// (survives renames). `field_name` is cached for UI display; refreshed
+/// lazily whenever we re-fetch the Bitable schema.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct FieldRef {
+    pub field_id: String,
+    pub field_name: String,
 }
 
-fn default_task_source() -> TaskSource {
-    TaskSource::Local
+/// Field mapping for one Bitable. Only `title` is required; everything
+/// else has a runtime fallback so a partially-populated mapping still
+/// produces usable tasks.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct FieldMapping {
+    pub title: FieldRef,
+    #[serde(default)]
+    pub description: Option<FieldRef>,
+    #[serde(default)]
+    pub status: Option<FieldRef>,
+    #[serde(default)]
+    pub order: Option<FieldRef>,
+}
+
+/// Maps Bitable status field values to kanban columns. Keys are
+/// `option_id` for single-select fields or lowercased text values for
+/// Text fields. `default_column` covers values not in `entries`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StatusValueMapping {
+    #[serde(default)]
+    pub entries: std::collections::HashMap<String, KanbanColumn>,
+    #[serde(default)]
+    pub default_column: KanbanColumn,
+}
+
+impl Default for StatusValueMapping {
+    fn default() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            default_column: KanbanColumn::Todo,
+        }
+    }
+}
+
+/// One repo's binding to a Bitable: which table, plus how to map its
+/// fields and status options to Ansambel's task model.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct BitableBinding {
+    pub app_token: String,
+    pub table_id: String,
+    pub field_mapping: FieldMapping,
+    #[serde(default)]
+    pub status_value_mapping: StatusValueMapping,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+/// What `BitableSchemaDetector::propose_mapping` returns to the wizard.
+/// Carries the raw field list (for dropdown population), an auto-detected
+/// initial guess at the mapping, and (when status is single-select) the
+/// option list with a fuzzy-parsed initial value mapping.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ProposedMapping {
+    pub fields: Vec<crate::platform::lark_client::BitableField>,
+    pub suggested: FieldMapping,
+    #[serde(default)]
+    pub status_options: Option<Vec<crate::platform::lark_client::BitableOption>>,
+    #[serde(default)]
+    pub suggested_status_values: StatusValueMapping,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -46,10 +105,6 @@ pub struct AppSettings {
     /// User-configured path to the Claude CLI binary; overrides PATH lookup when set.
     #[serde(default)]
     pub claude_binary_override: Option<PathBuf>,
-    /// Source for kanban data. `Local` reads/writes tasks.json;
-    /// `Lark` reads/writes a Lark Bitable table via `LarkProvider`.
-    #[serde(default = "default_task_source")]
-    pub task_source: TaskSource,
 }
 
 impl Default for AppSettings {
@@ -64,7 +119,6 @@ impl Default for AppSettings {
             window_height: 900,
             onboarding_completed: false,
             claude_binary_override: None,
-            task_source: default_task_source(),
         }
     }
 }
@@ -142,12 +196,28 @@ pub struct AgentHandle {
     pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
-/// Tauri-managed handle to the active task provider. Lives separately
+/// Tauri-managed handle to the per-repo task providers. Lives separately
 /// from AppState so async provider calls don't hold the AppState lock.
-/// Inner Arc is swap-able via write lock when the user changes the
-/// task source in Settings.
-pub type TaskProviderHandle =
-    std::sync::Arc<tokio::sync::RwLock<std::sync::Arc<dyn crate::task_provider::TaskProvider>>>;
+/// Keyed by repo_id; entries are inserted when a binding is activated
+/// (Task 10). Repos without an entry fall back to LocalProvider at
+/// call sites via `provider_for_repo`.
+pub type RepoId = String;
+
+pub type TaskProviderHandle = std::sync::Arc<
+    tokio::sync::RwLock<
+        std::collections::HashMap<RepoId, std::sync::Arc<dyn crate::task_provider::TaskProvider>>,
+    >,
+>;
+
+/// Build a LocalProvider for `data_dir`. Used as the fallback when a
+/// repo has no explicit entry in `TaskProviderHandle`.
+pub fn make_default_local_provider(
+    data_dir: &std::path::Path,
+) -> std::sync::Arc<dyn crate::task_provider::TaskProvider> {
+    std::sync::Arc::new(crate::task_provider::local::LocalProvider::new(
+        data_dir.to_path_buf(),
+    ))
+}
 
 #[derive(Default, Debug)]
 pub struct AppState {
@@ -973,45 +1043,36 @@ mod tests {
     }
 
     #[test]
-    fn task_source_serializes_snake_case() {
-        let local = serde_json::to_string(&TaskSource::Local).unwrap();
-        let lark = serde_json::to_string(&TaskSource::Lark).unwrap();
-        assert_eq!(local, "\"local\"");
-        assert_eq!(lark, "\"lark\"");
-    }
-
-    #[test]
-    fn app_settings_task_source_defaults_to_local() {
-        let s = AppSettings::default();
-        assert_eq!(s.task_source, TaskSource::Local);
-    }
-
-    #[test]
-    fn app_settings_round_trips_with_task_source() {
-        let s = AppSettings {
-            task_source: TaskSource::Lark,
-            ..AppSettings::default()
+    fn binding_serde_round_trip_preserves_fields() {
+        let b = BitableBinding {
+            app_token: "bascntest".into(),
+            table_id: "tbltest".into(),
+            field_mapping: FieldMapping {
+                title: FieldRef {
+                    field_id: "fld_pri".into(),
+                    field_name: "Task name".into(),
+                },
+                description: None,
+                status: Some(FieldRef {
+                    field_id: "fld_status".into(),
+                    field_name: "Task Status".into(),
+                }),
+                order: None,
+            },
+            status_value_mapping: StatusValueMapping {
+                entries: {
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("opt_a".into(), KanbanColumn::Todo);
+                    m.insert("opt_b".into(), KanbanColumn::Done);
+                    m
+                },
+                default_column: KanbanColumn::Todo,
+            },
+            created_at: 1747200000,
+            updated_at: 1747200000,
         };
-        let json = serde_json::to_string(&s).unwrap();
-        let back: AppSettings = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.task_source, TaskSource::Lark);
-    }
-
-    #[test]
-    fn app_settings_loads_legacy_file_without_task_source_field() {
-        // Older app_settings.json files don't have task_source. Verify we
-        // deserialize them with the default.
-        let legacy = serde_json::json!({
-            "schema_version": 1,
-            "theme": "warm-dark",
-            "selected_repo_id": null,
-            "selected_workspace_id": null,
-            "recent_repos": [],
-            "window_width": 1400,
-            "window_height": 900,
-            "onboarding_completed": false
-        });
-        let s: AppSettings = serde_json::from_value(legacy).unwrap();
-        assert_eq!(s.task_source, TaskSource::Local);
+        let json = serde_json::to_string(&b).unwrap();
+        let parsed: BitableBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, b);
     }
 }

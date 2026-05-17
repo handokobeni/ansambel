@@ -1,5 +1,6 @@
 pub mod atomic;
 pub mod debounce;
+pub mod lark_repo_bindings;
 pub mod message_writer;
 pub mod messages;
 pub mod repos;

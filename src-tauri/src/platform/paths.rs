@@ -49,6 +49,9 @@ pub fn app_settings_file(data_dir: &Path) -> PathBuf {
 pub fn lark_settings_file(data_dir: &Path) -> PathBuf {
     data_dir.join("lark_settings.json")
 }
+pub fn lark_repo_bindings_file(data_dir: &Path) -> PathBuf {
+    data_dir.join("lark_repo_bindings.json")
+}
 pub fn context_meta_file(data_dir: &Path) -> PathBuf {
     data_dir.join("context_meta.json")
 }
@@ -212,5 +215,12 @@ mod tests {
         let data = PathBuf::from("/tmp/ansambel");
         let p = crash_dir(&data);
         assert_eq!(p, PathBuf::from("/tmp/ansambel/logs/crashes"));
+    }
+
+    #[test]
+    fn lark_repo_bindings_file_is_at_data_dir_root() {
+        let data = PathBuf::from("/tmp/ansambel");
+        let p = lark_repo_bindings_file(&data);
+        assert_eq!(p, PathBuf::from("/tmp/ansambel/lark_repo_bindings.json"));
     }
 }

@@ -153,6 +153,24 @@ describe('parseUnifiedDiff', () => {
     expect(out.files[0].path).toBe('foo');
   });
 
+  it('sets newPath to null for deleted file (+++ /dev/null)', () => {
+    const text = [
+      'diff --git a/deleted.txt b/deleted.txt',
+      'deleted file mode 100644',
+      '--- a/deleted.txt',
+      '+++ /dev/null',
+      '@@ -1,2 +0,0 @@',
+      '-hello',
+      '-world',
+      '',
+    ].join('\n');
+    const out = parseUnifiedDiff(text);
+    expect(out.files).toHaveLength(1);
+    expect(out.files[0].newPath).toBeNull();
+    expect(out.files[0].oldPath).toBe('deleted.txt');
+    expect(out.files[0].path).toBe('deleted.txt');
+  });
+
   it('omits oldLines/newLines defaults of 1 when shorthand is used', () => {
     const text = [
       'diff --git a/foo b/foo',
