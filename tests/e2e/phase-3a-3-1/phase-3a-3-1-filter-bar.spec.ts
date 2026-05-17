@@ -17,6 +17,7 @@
 
 import { test, expect } from '../helpers/fixtures';
 import { installTauriShim } from '../helpers/tauri-shim';
+import type { Task } from '$lib/types';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -39,7 +40,7 @@ const TASK_DONE = {
   order: 0,
   created_at: 1_700_000_000,
   updated_at: 1_700_000_000,
-};
+} satisfies Task;
 
 const TASK_TODO = {
   id: 'tk_todo',
@@ -51,7 +52,7 @@ const TASK_TODO = {
   order: 0,
   created_at: 1_700_000_000,
   updated_at: 1_700_000_000,
-};
+} satisfies Task;
 
 const LARK_BINDING = {
   app_token: APP_TOKEN,
@@ -109,9 +110,9 @@ test.afterAll(() => {
 
 // ── Spec ─────────────────────────────────────────────────────────────────────
 
-test.describe.configure({ mode: 'serial' });
-
 test.describe('Phase 3a-3.1 — Filter bar narrows kanban', () => {
+  test.describe.configure({ mode: 'serial' });
+
   // Test 1: Add filter → kanban narrows to Done task only
   test('filter bar adds Status=Done and kanban narrows to one task', async ({ page, harness }) => {
     void harness; // ensure worker-scoped harness starts dev server
