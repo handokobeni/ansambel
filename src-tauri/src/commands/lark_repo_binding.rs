@@ -146,6 +146,33 @@ pub async fn detect_lark_schema(
         .map_err(|e| e.to_string())
 }
 
+pub(crate) async fn list_lark_fields_inner(
+    app_token: &str,
+    table_id: &str,
+    data_dir: &std::path::Path,
+    store: &dyn crate::commands::lark_auth::SecretStore,
+) -> Result<Vec<crate::platform::lark_client::BitableField>> {
+    let mut cfg = crate::commands::lark_auth::load_lark_config_inner(data_dir, store)
+        .map_err(|e| AppError::InvalidState(format!("global Lark credentials missing: {e}")))?;
+    cfg.app_token = app_token.to_string();
+    cfg.table_id = table_id.to_string();
+    let client = Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
+    client.bitable_list_fields(app_token, table_id).await
+}
+
+#[tauri::command]
+pub async fn list_lark_fields(
+    app_token: String,
+    table_id: String,
+    app_handle: tauri::AppHandle,
+) -> std::result::Result<Vec<crate::platform::lark_client::BitableField>, String> {
+    let data_dir = data_dir_from(&app_handle)?;
+    let store = crate::commands::lark_auth::KeyringStore;
+    list_lark_fields_inner(&app_token, &table_id, &data_dir, &store)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 fn data_dir_from(app_handle: &tauri::AppHandle) -> std::result::Result<PathBuf, String> {
     use tauri::Manager;
     app_handle
@@ -270,6 +297,74 @@ mod tests {
             .await
             .unwrap();
         assert!(!removed);
+    }
+
+    #[tokio::test]
+    async fn list_lark_fields_inner_returns_fields_via_lark_client() {
+        use wiremock::matchers::{method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Token endpoint.
+        Mock::given(method("POST"))
+            .and(wm_path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "tenant_access_token": "t_test", "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(wm_path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblA/fields",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": { "items": [
+                    { "field_id": "fld1", "field_name": "Title", "type": 1,
+                      "is_primary": true, "property": null },
+                    { "field_id": "fld2", "field_name": "Status", "type": 3,
+                      "is_primary": false, "property": {
+                        "options": [{"id":"o1","name":"Todo"},{"id":"o2","name":"Done"}]
+                      }
+                    }
+                ], "has_more": false, "page_token": null }
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp = tempdir().unwrap();
+        let store = crate::commands::lark_auth::InMemorySecretStore::new();
+        let args = crate::commands::lark_auth::SetLarkCredentialsArgs {
+            app_id: "cli_test".into(),
+            app_secret: "sec".into(),
+            base_url: Some(server.uri()),
+        };
+        crate::commands::lark_auth::set_lark_credentials_inner(args, tmp.path(), &store).unwrap();
+
+        let fields = list_lark_fields_inner("appA", "tblA", tmp.path(), &store)
+            .await
+            .expect("ok");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].field_name, "Title");
+        assert_eq!(fields[1].field_name, "Status");
+    }
+
+    #[tokio::test]
+    async fn list_lark_fields_inner_errors_when_creds_missing() {
+        let tmp = tempdir().unwrap();
+        let store = crate::commands::lark_auth::InMemorySecretStore::new();
+        // No settings file + empty store → load_lark_config_inner fails.
+        let err = list_lark_fields_inner("appA", "tblA", tmp.path(), &store)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.to_lowercase().contains("config")
+                || err.to_lowercase().contains("creds")
+                || err.contains("global Lark credentials missing"),
+            "expected creds/config error, got: {err}"
+        );
     }
 
     #[tokio::test]
