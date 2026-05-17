@@ -22,6 +22,10 @@ pub struct LarkProvider {
     client: Arc<LarkClient>,
     app_token: String,
     table_id: String,
+    /// Optional Bitable view id. When `Some`, list_tasks passes
+    /// `view_id=...` to Lark so the view's server-side filter applies.
+    /// Writes ignore this field — they always target the table directly.
+    view_id: Option<String>,
     field_mapping: FieldMapping,
     status_value_mapping: StatusValueMapping,
     /// Lazy-loaded Bitable primary-column field name. Fetched once per
@@ -44,6 +48,7 @@ impl LarkProvider {
         client: Arc<LarkClient>,
         app_token: String,
         table_id: String,
+        view_id: Option<String>,
         field_mapping: FieldMapping,
         status_value_mapping: StatusValueMapping,
     ) -> Self {
@@ -51,6 +56,7 @@ impl LarkProvider {
             client,
             app_token,
             table_id,
+            view_id,
             field_mapping,
             status_value_mapping,
             primary_field_name: OnceCell::new(),
@@ -63,6 +69,7 @@ impl LarkProvider {
             client,
             binding.app_token,
             binding.table_id,
+            binding.view_id,
             binding.field_mapping,
             binding.status_value_mapping,
         )
@@ -281,7 +288,12 @@ impl TaskProvider for LarkProvider {
         // filter expression would silently drop those rows.
         let records = self
             .client
-            .bitable_list_records(&self.app_token, &self.table_id, None, None)
+            .bitable_list_records(
+                &self.app_token,
+                &self.table_id,
+                None,
+                self.view_id.as_deref(),
+            )
             .await?;
         let primary = self.primary_field_name().await;
         let total = records.len();
@@ -525,9 +537,26 @@ mod tests {
             client,
             "bascntest".into(),
             "tbltest".into(),
+            None,
             canonical_mapping(),
             canonical_values(),
         )
+    }
+
+    fn make_client(uri: &str) -> LarkClient {
+        LarkClient::new(make_config(uri))
+    }
+
+    fn sample_binding() -> BitableBinding {
+        BitableBinding {
+            app_token: "bascntest".into(),
+            table_id: "tbltest".into(),
+            view_id: None,
+            field_mapping: canonical_mapping(),
+            status_value_mapping: canonical_values(),
+            created_at: 0,
+            updated_at: 0,
+        }
     }
 
     #[tokio::test]
@@ -768,6 +797,7 @@ mod tests {
             client,
             "bascntest".into(),
             "tbltest".into(),
+            None,
             mapping,
             canonical_values(),
         );
@@ -1013,6 +1043,7 @@ mod tests {
             client,
             "bascntest".into(),
             "tbltest".into(),
+            None,
             mapping,
             values,
         );
@@ -1465,6 +1496,55 @@ mod tests {
         // repo_id defaults to filter "x"; record has no repo_id field
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, "rec_b1");
+    }
+
+    #[tokio::test]
+    async fn lark_provider_list_tasks_passes_view_id_when_set() {
+        use wiremock::matchers::{method, path, query_param};
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .and(query_param("view_id", "vw_sprint"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "items": [], "has_more": false, "page_token": "" }
+            })))
+            .mount(&server)
+            .await;
+        let mut binding = sample_binding();
+        binding.view_id = Some("vw_sprint".into());
+        let client = Arc::new(make_client(&server.uri()));
+        let provider = LarkProvider::from_binding(client, binding);
+        let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
+        assert!(tasks.is_empty());
+        // wiremock server panics if the mock didn't match — reaching this
+        // assert proves the view_id query was sent.
+    }
+
+    #[tokio::test]
+    async fn lark_provider_list_tasks_omits_view_id_when_none() {
+        use wiremock::matchers::{method, path, query_param_is_missing};
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .and(query_param_is_missing("view_id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "items": [], "has_more": false, "page_token": "" }
+            })))
+            .mount(&server)
+            .await;
+        let binding = sample_binding(); // view_id is None
+        let client = Arc::new(make_client(&server.uri()));
+        let provider = LarkProvider::from_binding(client, binding);
+        let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
+        assert!(tasks.is_empty());
     }
 
     #[test]
