@@ -118,6 +118,21 @@ pub async fn list_lark_repo_bindings(
     list_lark_repo_bindings_inner(&data_dir).map_err(|e| e.to_string())
 }
 
+pub(crate) async fn detect_lark_schema_inner(
+    app_token: &str,
+    table_id: &str,
+    data_dir: &std::path::Path,
+    store: &dyn crate::commands::lark_auth::SecretStore,
+) -> Result<ProposedMapping> {
+    let mut cfg = crate::commands::lark_auth::load_lark_config_inner(data_dir, store)
+        .map_err(|e| AppError::InvalidState(format!("global Lark credentials missing: {e}")))?;
+    cfg.app_token = app_token.to_string();
+    cfg.table_id = table_id.to_string();
+    let client = Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
+    let detector = crate::task_provider::lark_field_resolver::BitableSchemaDetector::new(client);
+    detector.propose_mapping(app_token, table_id).await
+}
+
 #[tauri::command]
 pub async fn detect_lark_schema(
     app_token: String,
@@ -126,14 +141,7 @@ pub async fn detect_lark_schema(
 ) -> std::result::Result<ProposedMapping, String> {
     let data_dir = data_dir_from(&app_handle)?;
     let store = crate::commands::lark_auth::KeyringStore;
-    let mut cfg = crate::commands::lark_auth::load_lark_config_inner(&data_dir, &store)
-        .map_err(|e| format!("global Lark credentials missing: {e}"))?;
-    cfg.app_token = app_token.clone();
-    cfg.table_id = table_id.clone();
-    let client = Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
-    let detector = crate::task_provider::lark_field_resolver::BitableSchemaDetector::new(client);
-    detector
-        .propose_mapping(&app_token, &table_id)
+    detect_lark_schema_inner(&app_token, &table_id, &data_dir, &store)
         .await
         .map_err(|e| e.to_string())
 }
@@ -261,5 +269,74 @@ mod tests {
             .await
             .unwrap();
         assert!(!removed);
+    }
+
+    #[tokio::test]
+    async fn detect_lark_schema_inner_errors_when_creds_missing() {
+        let tmp = tempdir().unwrap();
+        let store = crate::commands::lark_auth::InMemorySecretStore::new();
+        // No settings file + empty store → load_lark_config_inner fails;
+        // detect_lark_schema_inner must wrap that as InvalidState with
+        // the "global Lark credentials missing" prefix the wizard expects.
+        let err = detect_lark_schema_inner("bascntest", "tbltest", tmp.path(), &store)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("global Lark credentials missing"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_lark_schema_inner_injects_app_token_and_table_id_into_request() {
+        use wiremock::matchers::{method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Token endpoint — required before any Bitable call.
+        Mock::given(method("POST"))
+            .and(wm_path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "tenant_access_token": "t_test", "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        // bitable_list_fields path — wiremock URL match proves the inner
+        // wired the caller's `app_token` + `table_id` into the request,
+        // not some leftover from the persisted LarkConfig.
+        Mock::given(method("GET"))
+            .and(wm_path(
+                "/open-apis/bitable/v1/apps/bascn_wizard_token/tables/tbl_wizard_table/fields",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "items": [
+                    { "field_id": "fld_p", "field_name": "Task name",
+                      "type": 1, "is_primary": true }
+                ] }
+            })))
+            .mount(&server)
+            .await;
+
+        // Persist creds with a DIFFERENT app_token/table_id than what
+        // detect_lark_schema_inner will be called with — proves the
+        // override path is exercised.
+        let tmp = tempdir().unwrap();
+        let store = crate::commands::lark_auth::InMemorySecretStore::new();
+        let args = crate::commands::lark_auth::SetLarkCredentialsArgs {
+            app_id: "cli_test".into(),
+            app_secret: "shh".into(),
+            base_url: Some(server.uri()),
+        };
+        crate::commands::lark_auth::set_lark_credentials_inner(args, tmp.path(), &store).unwrap();
+
+        let proposed =
+            detect_lark_schema_inner("bascn_wizard_token", "tbl_wizard_table", tmp.path(), &store)
+                .await
+                .unwrap();
+        assert_eq!(proposed.fields.len(), 1);
+        assert_eq!(proposed.suggested.title.field_id, "fld_p");
     }
 }
