@@ -65,6 +65,37 @@ impl Default for StatusValueMapping {
     }
 }
 
+/// Operator for a Bitable filter condition. Serializes to Lark's
+/// `records/search` operator string (camelCase).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FilterOperator {
+    Is,
+    IsNot,
+    Contains,
+    DoesNotContain,
+    IsEmpty,
+    IsNotEmpty,
+    IsGreater,
+    IsGreaterEqual,
+    IsLess,
+    IsLessEqual,
+}
+
+/// Conjunction joining multiple filter conditions (AND / OR).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FilterConjunction {
+    And,
+    Or,
+}
+
+impl Default for FilterConjunction {
+    fn default() -> Self {
+        Self::And
+    }
+}
+
 /// One repo's binding to a Bitable: which table, plus how to map its
 /// fields and status options to Ansambel's task model.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -1040,6 +1071,65 @@ mod tests {
         .unwrap();
         assert!(sub_a.try_recv().is_ok());
         assert!(sub_b.try_recv().is_ok());
+    }
+
+    #[test]
+    fn filter_operator_serializes_as_lark_camel_case() {
+        use serde_json::json;
+        assert_eq!(
+            serde_json::to_value(FilterOperator::Is).unwrap(),
+            json!("is")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::IsNot).unwrap(),
+            json!("isNot")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::Contains).unwrap(),
+            json!("contains")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::DoesNotContain).unwrap(),
+            json!("doesNotContain")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::IsEmpty).unwrap(),
+            json!("isEmpty")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::IsNotEmpty).unwrap(),
+            json!("isNotEmpty")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::IsGreater).unwrap(),
+            json!("isGreater")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::IsGreaterEqual).unwrap(),
+            json!("isGreaterEqual")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::IsLess).unwrap(),
+            json!("isLess")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::IsLessEqual).unwrap(),
+            json!("isLessEqual")
+        );
+    }
+
+    #[test]
+    fn filter_conjunction_default_is_and_lowercase() {
+        use serde_json::json;
+        assert_eq!(FilterConjunction::default(), FilterConjunction::And);
+        assert_eq!(
+            serde_json::to_value(FilterConjunction::And).unwrap(),
+            json!("and")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterConjunction::Or).unwrap(),
+            json!("or")
+        );
     }
 
     #[test]
