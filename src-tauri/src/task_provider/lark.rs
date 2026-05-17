@@ -17,6 +17,23 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
+/// Notification sink for "the bound Bitable view no longer exists".
+/// Implemented by the Tauri-emitter wrapper in `lib.rs` so the provider
+/// stays testable without an `AppHandle`. The default `NoopSink` is used
+/// in unit tests that don't care about banner emission.
+pub trait ViewMissingSink: Send + Sync + std::fmt::Debug {
+    fn emit_view_missing(&self, repo_id: &str, view_id: &str);
+}
+
+/// Default no-op sink used when no event emitter has been wired in.
+/// Production code paths swap this out via `from_binding_with_sink` (Task 7).
+#[allow(dead_code)] // wired in Task 7 by Tauri-backed adapter
+#[derive(Debug, Default)]
+pub struct NoopSink;
+impl ViewMissingSink for NoopSink {
+    fn emit_view_missing(&self, _repo_id: &str, _view_id: &str) {}
+}
+
 #[derive(Debug)]
 pub struct LarkProvider {
     client: Arc<LarkClient>,
@@ -26,6 +43,14 @@ pub struct LarkProvider {
     /// `view_id=...` to Lark so the view's server-side filter applies.
     /// Writes ignore this field — they always target the table directly.
     view_id: Option<String>,
+    /// Repo id this provider serves — used for view-missing event
+    /// payload only. Set by `from_binding_with_sink`; defaults to empty
+    /// string when constructed via `from_binding` (no events emitted).
+    repo_id: String,
+    /// Receives "view missing" notifications when a 404 falls back.
+    /// Defaults to NoopSink for binding-less code paths and tests that
+    /// don't care.
+    sink: Arc<dyn ViewMissingSink>,
     field_mapping: FieldMapping,
     status_value_mapping: StatusValueMapping,
     /// Lazy-loaded Bitable primary-column field name. Fetched once per
@@ -57,6 +82,8 @@ impl LarkProvider {
             app_token,
             table_id,
             view_id,
+            repo_id: String::new(),
+            sink: Arc::new(NoopSink),
             field_mapping,
             status_value_mapping,
             primary_field_name: OnceCell::new(),
@@ -73,6 +100,23 @@ impl LarkProvider {
             binding.field_mapping,
             binding.status_value_mapping,
         )
+    }
+
+    /// Production constructor that attaches a `repo_id` + sink so the
+    /// view-missing event fires when fallback kicks in. The two-arg
+    /// `from_binding` is kept for tests and other call sites that don't
+    /// need event emission.
+    #[allow(dead_code)] // wired in Task 7 by Tauri-backed adapter
+    pub fn from_binding_with_sink(
+        client: Arc<LarkClient>,
+        binding: BitableBinding,
+        repo_id: String,
+        sink: Arc<dyn ViewMissingSink>,
+    ) -> Self {
+        let mut p = Self::from_binding(client, binding);
+        p.repo_id = repo_id;
+        p.sink = sink;
+        p
     }
 
     /// Returns the Bitable primary column's field name, or `None` if the
@@ -286,7 +330,7 @@ impl TaskProvider for LarkProvider {
         // Fetch all records and filter client-side so rows with missing
         // repo_id can fall back to the caller's filter value. The Lark-side
         // filter expression would silently drop those rows.
-        let records = self
+        let records = match self
             .client
             .bitable_list_records(
                 &self.app_token,
@@ -294,7 +338,23 @@ impl TaskProvider for LarkProvider {
                 None,
                 self.view_id.as_deref(),
             )
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            Err(e) if is_view_missing_error(&e) && self.view_id.is_some() => {
+                let missing_view = self.view_id.clone().unwrap_or_default();
+                tracing::warn!(
+                    repo_id = %self.repo_id,
+                    view_id = %missing_view,
+                    "Lark view missing; falling back to all records"
+                );
+                self.sink.emit_view_missing(&self.repo_id, &missing_view);
+                self.client
+                    .bitable_list_records(&self.app_token, &self.table_id, None, None)
+                    .await?
+            }
+            Err(e) => return Err(e),
+        };
         let primary = self.primary_field_name().await;
         let total = records.len();
         let mut skipped = 0usize;
@@ -474,6 +534,15 @@ impl TaskProvider for LarkProvider {
             .bitable_delete_record(&self.app_token, &self.table_id, id)
             .await
     }
+}
+
+/// Returns true when the given error came from a Lark Bitable
+/// "view not found" response (code 1254045). LarkClient surfaces Lark
+/// error codes by stringifying them into the AppError message, so a
+/// substring match on the code is sufficient and avoids leaking an
+/// enum across the client boundary.
+fn is_view_missing_error(err: &crate::error::AppError) -> bool {
+    err.to_string().contains("1254045")
 }
 
 #[cfg(test)]
@@ -1545,6 +1614,109 @@ mod tests {
         let provider = LarkProvider::from_binding(client, binding);
         let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
         assert!(tasks.is_empty());
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct ViewMissingEvent {
+        pub repo_id: String,
+        pub view_id: String,
+    }
+
+    #[derive(Debug, Default)]
+    pub struct InMemorySink {
+        events: std::sync::Mutex<Vec<ViewMissingEvent>>,
+    }
+
+    impl InMemorySink {
+        pub fn events(&self) -> Vec<ViewMissingEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::task_provider::lark::ViewMissingSink for InMemorySink {
+        fn emit_view_missing(&self, repo_id: &str, view_id: &str) {
+            self.events.lock().unwrap().push(ViewMissingEvent {
+                repo_id: repo_id.into(),
+                view_id: view_id.into(),
+            });
+        }
+    }
+
+    #[tokio::test]
+    async fn lark_provider_falls_back_when_view_not_found() {
+        use wiremock::matchers::{method, path, query_param, query_param_is_missing};
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        // First call: with view_id → returns Lark view-not-found error.
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .and(query_param("view_id", "vw_gone"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 1254045,
+                "msg": "ViewNotFound"
+            })))
+            .mount(&server)
+            .await;
+        // Second call: without view_id → returns one record.
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .and(query_param_is_missing("view_id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [
+                        { "record_id": "rec1", "fields": { "title": "Alpha" } }
+                    ],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let mut binding = sample_binding();
+        binding.view_id = Some("vw_gone".into());
+        let client = Arc::new(make_client(&server.uri()));
+        let sink = Arc::new(InMemorySink::default());
+        let provider =
+            LarkProvider::from_binding_with_sink(client, binding, "repo_x".into(), sink.clone());
+        let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Alpha");
+        let events = sink.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].repo_id, "repo_x");
+        assert_eq!(events[0].view_id, "vw_gone");
+    }
+
+    #[tokio::test]
+    async fn lark_provider_view_unrelated_error_propagates() {
+        use wiremock::matchers::{method, path};
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 1254000,
+                "msg": "app_token invalid"
+            })))
+            .mount(&server)
+            .await;
+        let mut binding = sample_binding();
+        binding.view_id = Some("vw_ok".into());
+        let client = Arc::new(make_client(&server.uri()));
+        let sink = Arc::new(InMemorySink::default());
+        let provider =
+            LarkProvider::from_binding_with_sink(client, binding, "repo_x".into(), sink.clone());
+        let err = provider.list_tasks(Some("repo_x")).await.unwrap_err();
+        assert!(err.to_string().contains("1254000"));
+        assert!(sink.events().is_empty(), "no fallback event for non-404");
     }
 
     #[test]
