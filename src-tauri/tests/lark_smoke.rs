@@ -122,7 +122,7 @@ async fn smoke_bitable_list_records() {
     let table_id = cfg.table_id.clone();
     let client = LarkClient::new(cfg);
     let records = client
-        .bitable_list_records(&app_token, &table_id, None)
+        .bitable_list_records(&app_token, &table_id, None, None)
         .await
         .expect("bitable_list_records should succeed against real Lark");
     eprintln!("bitable_list_records returned {} record(s)", records.len());

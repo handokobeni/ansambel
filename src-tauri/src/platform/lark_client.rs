@@ -499,15 +499,17 @@ struct BitableViewListData {
 }
 
 impl LarkClient {
-    /// List every record in a Bitable table, optionally filtered. The
-    /// filter is passed through verbatim — see Lark Bitable docs for
-    /// the expression grammar (`CurrentValue.[field]=value`).
+    /// List every record in a Bitable table, optionally filtered and/or
+    /// scoped to one view. `filter` is the Lark expression grammar
+    /// (`CurrentValue.[field]=value`). `view_id` applies the view's
+    /// server-side filter — pass `None` to fetch the unfiltered table.
     /// Auto-paginates up to `MAX_LIST_PAGES` pages.
     pub async fn bitable_list_records(
         &self,
         app_token: &str,
         table_id: &str,
         filter: Option<&str>,
+        view_id: Option<&str>,
     ) -> Result<Vec<BitableRecord>> {
         let token = self.tenant_access_token().await?;
         let mut out: Vec<BitableRecord> = Vec::new();
@@ -526,6 +528,9 @@ impl LarkClient {
                         .query(&[("page_size", DEFAULT_PAGE_SIZE.to_string())]);
                     if let Some(f) = filter {
                         req = req.query(&[("filter", f)]);
+                    }
+                    if let Some(v) = view_id {
+                        req = req.query(&[("view_id", v)]);
                     }
                     if let Some(pt) = page_token.as_ref() {
                         req = req.query(&[("page_token", pt.as_str())]);
@@ -1309,7 +1314,7 @@ mod tests {
             .await;
         let client = LarkClient::new(make_config(&server.uri()));
         let records = client
-            .bitable_list_records("bascntest", "tbltest", None)
+            .bitable_list_records("bascntest", "tbltest", None, None)
             .await
             .unwrap();
         assert_eq!(records.len(), 2);
@@ -1359,7 +1364,7 @@ mod tests {
             .await;
         let client = LarkClient::new(make_config(&server.uri()));
         let records = client
-            .bitable_list_records("bascntest", "tbltest", None)
+            .bitable_list_records("bascntest", "tbltest", None, None)
             .await
             .unwrap();
         assert_eq!(records.len(), 2);
@@ -1388,6 +1393,7 @@ mod tests {
                 "bascntest",
                 "tbltest",
                 Some("CurrentValue.[repo_id]=repo_abc"),
+                None,
             )
             .await
             .unwrap();
@@ -1410,7 +1416,7 @@ mod tests {
             .await;
         let client = LarkClient::new(make_config(&server.uri()));
         let err = client
-            .bitable_list_records("bascntest", "tbltest", None)
+            .bitable_list_records("bascntest", "tbltest", None, None)
             .await
             .unwrap_err();
         let s = err.to_string();
@@ -1418,6 +1424,53 @@ mod tests {
             s.contains("1254000") && s.contains("app_token invalid"),
             "{s}"
         );
+    }
+
+    #[tokio::test]
+    async fn bitable_list_records_with_view_id_passes_query_param() {
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .and(query_param("view_id", "vw_sprint"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "items": [], "has_more": false, "page_token": "" }
+            })))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let records = client
+            .bitable_list_records("bascntest", "tbltest", None, Some("vw_sprint"))
+            .await
+            .unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bitable_list_records_with_no_view_id_omits_query_param() {
+        use wiremock::matchers::query_param_is_missing;
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/bascntest/tables/tbltest/records",
+            ))
+            .and(query_param_is_missing("view_id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "items": [], "has_more": false, "page_token": "" }
+            })))
+            .mount(&server)
+            .await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let records = client
+            .bitable_list_records("bascntest", "tbltest", None, None)
+            .await
+            .unwrap();
+        assert!(records.is_empty());
     }
 
     // ── bitable create ───────────────────────────────────────────

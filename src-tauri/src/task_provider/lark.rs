@@ -281,7 +281,7 @@ impl TaskProvider for LarkProvider {
         // filter expression would silently drop those rows.
         let records = self
             .client
-            .bitable_list_records(&self.app_token, &self.table_id, None)
+            .bitable_list_records(&self.app_token, &self.table_id, None, None)
             .await?;
         let primary = self.primary_field_name().await;
         let total = records.len();
