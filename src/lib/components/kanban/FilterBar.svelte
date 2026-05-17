@@ -199,9 +199,9 @@
   </button>
 
   {#if open}
-    <!-- Backdrop: captures outside clicks -->
+    <!-- Backdrop: transparent overlay that captures outside clicks -->
     <div
-      class="fixed inset-0 z-40"
+      class="fixed inset-0 z-40 bg-black/0"
       data-testid="filter-backdrop"
       onclick={closePopover}
       onkeydown={() => {}}
@@ -212,21 +212,21 @@
     <div
       role="dialog"
       aria-label="Filter records"
-      class="absolute left-0 top-full mt-1 z-50 w-[640px] max-h-96 overflow-y-auto rounded-lg border border-[var(--border)] bg-white dark:bg-slate-800 shadow-xl"
+      class="absolute left-0 top-full mt-1 z-50 w-[640px] max-h-96 overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-800 shadow-xl"
       onwheel={(e) => e.stopPropagation()}
     >
       <!-- Header row -->
       <div
-        class="flex items-center justify-between px-4 py-3 border-b border-[var(--border)] text-sm"
+        class="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-600 text-sm"
       >
-        <span class="font-medium text-[var(--text-primary)]">Filter records</span>
-        <div class="flex items-center gap-1.5 text-[var(--text-dim)]">
+        <span class="font-medium text-slate-900 dark:text-slate-100">Filter records</span>
+        <div class="flex items-center gap-1.5 text-slate-700 dark:text-slate-300">
           <span>Meeting</span>
           <select
             aria-label="conjunction"
             value={filters.conjunction}
             onchange={(e) => setConjunction(e.currentTarget.value as 'and' | 'or')}
-            class="px-1.5 py-0.5 text-xs rounded border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] cursor-pointer"
+            class="px-2 py-1 text-xs rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
           >
             <option value="and">all</option>
             <option value="or">any</option>
@@ -236,7 +236,7 @@
       </div>
 
       <!-- Conditions list -->
-      <div class="flex flex-col divide-y divide-[var(--border)]">
+      <div class="flex flex-col divide-y divide-slate-200 dark:divide-slate-600">
         {#each filters.conditions as cond, idx (cond.field_id + idx)}
           {@const fieldType = fieldTypeForCondition(cond)}
           {@const opsForRow =
@@ -249,7 +249,7 @@
               aria-label="field"
               value={cond.field_id}
               onchange={(e) => changeField(idx, e.currentTarget.value)}
-              class="flex-1 min-w-0 px-2 py-1 text-xs rounded border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] cursor-pointer"
+              class="flex-1 min-w-0 px-2 py-1 text-xs rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
             >
               {#if fields.length === 0}
                 <!-- No fields loaded yet — show current name as placeholder -->
@@ -266,7 +266,7 @@
               aria-label="operator"
               value={cond.operator}
               onchange={(e) => changeOperator(idx, e.currentTarget.value as FilterOperator)}
-              class="flex-1 min-w-0 px-2 py-1 text-xs rounded border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] cursor-pointer"
+              class="flex-1 min-w-0 px-2 py-1 text-xs rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
             >
               {#each opsForRow as op (op)}
                 <option value={op}>{op}</option>
@@ -283,7 +283,7 @@
                   aria-label="value"
                   value={cond.value[0] ?? ''}
                   onchange={(e) => changeValue(idx, e.currentTarget.value)}
-                  class="flex-1 min-w-0 px-2 py-1 text-xs rounded border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] cursor-pointer"
+                  class="flex-1 min-w-0 px-2 py-1 text-xs rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer"
                 >
                   {#each opts as opt (opt.id)}
                     <option value={opt.name}>{opt.name}</option>
@@ -296,7 +296,7 @@
                   aria-label="value"
                   value={cond.value[0] ?? ''}
                   onchange={(e) => changeValue(idx, e.currentTarget.value)}
-                  class="flex-1 min-w-0 px-2 py-1 text-xs rounded border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                  class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               {:else if fieldType === 2}
                 <!-- Number -->
@@ -305,7 +305,7 @@
                   aria-label="value"
                   value={cond.value[0] ?? ''}
                   onchange={(e) => changeValue(idx, e.currentTarget.value)}
-                  class="flex-1 min-w-0 px-2 py-1 text-xs rounded border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                  class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               {:else}
                 <!-- Text (type 1) or Person (type 11) or unknown -->
@@ -314,7 +314,7 @@
                   aria-label="value"
                   value={cond.value[0] ?? ''}
                   onchange={(e) => changeValue(idx, e.currentTarget.value)}
-                  class="flex-1 min-w-0 px-2 py-1 text-xs rounded border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                  class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               {/if}
             {:else}
@@ -327,7 +327,7 @@
               type="button"
               aria-label="remove condition"
               onclick={() => removeCondition(idx)}
-              class="flex-none text-[var(--text-dim)] hover:text-red-500 transition-colors cursor-pointer text-base leading-none px-1"
+              class="flex-none text-slate-400 dark:text-slate-500 hover:text-red-500 transition-colors cursor-pointer text-base leading-none px-1"
             >
               ×
             </button>
@@ -336,7 +336,7 @@
       </div>
 
       <!-- Footer -->
-      <div class="px-4 py-2.5 border-t border-[var(--border)]">
+      <div class="px-4 py-2.5 border-t border-slate-200 dark:border-slate-600">
         <button
           type="button"
           onclick={addCondition}
