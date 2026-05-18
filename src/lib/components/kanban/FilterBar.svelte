@@ -34,7 +34,7 @@
   let personOptionsFailed = new SvelteSet<string>();
 
   const OPS_BY_TYPE: Record<number, FilterOperator[]> = {
-    1: ['is', 'isNot', 'contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
+    1: ['contains', 'doesNotContain', 'is', 'isNot', 'isEmpty', 'isNotEmpty'],
     2: [
       'is',
       'isNot',
@@ -57,7 +57,7 @@
       'isEmpty',
       'isNotEmpty',
     ],
-    11: ['is', 'isNot', 'contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
+    11: ['contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
   };
 
   const SUPPORTED_TYPES = new Set(Object.keys(OPS_BY_TYPE).map(Number));

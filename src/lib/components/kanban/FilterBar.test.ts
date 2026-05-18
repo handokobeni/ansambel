@@ -511,7 +511,153 @@ describe('FilterBar Person field value picker', () => {
   });
 });
 
-// ─── 9. Fields loaded lazily on popover open ───────────────────────────────
+// ─── 9. OPS_BY_TYPE operator ordering ─────────────────────────────────────
+
+describe('FilterBar operator list by field type', () => {
+  it('Text (type 1) shows contains/doesNotContain/is/isNot/isEmpty/isNotEmpty', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fldT', field_name: 'Title', type: 1, is_primary: true, property: null },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            { field_id: 'fldT', field_name: 'Title', operator: 'contains' as const, value: ['x'] },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    // Find the operator select by aria-label
+    const operatorSelects = screen.getAllByRole('combobox', { name: /operator/i });
+    expect(operatorSelects.length).toBeGreaterThan(0);
+    const opSel = operatorSelects[0] as HTMLSelectElement;
+    const opValues = Array.from(opSel.options).map((o) => o.value);
+    expect(opValues).toEqual([
+      'contains',
+      'doesNotContain',
+      'is',
+      'isNot',
+      'isEmpty',
+      'isNotEmpty',
+    ]);
+  });
+
+  it('Person (type 11) shows only contains/doesNotContain/isEmpty/isNotEmpty (no is/isNot)', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fldPIC', field_name: 'PIC', type: 11, is_primary: false, property: null },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fldPIC',
+              field_name: 'PIC',
+              operator: 'contains' as const,
+              value: ['Alice'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const operatorSelects = screen.getAllByRole('combobox', { name: /operator/i });
+    expect(operatorSelects.length).toBeGreaterThan(0);
+    const opSel = operatorSelects[0] as HTMLSelectElement;
+    const opValues = Array.from(opSel.options).map((o) => o.value);
+    expect(opValues).toEqual(['contains', 'doesNotContain', 'isEmpty', 'isNotEmpty']);
+    // Ensure is/isNot are NOT present
+    expect(opValues).not.toContain('is');
+    expect(opValues).not.toContain('isNot');
+  });
+
+  it('Person field defaults to contains operator when added', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fldPIC', field_name: 'PIC', type: 11, is_primary: false, property: null },
+    ]);
+    render(FilterBar, { props: defaultProps });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    await fireEvent.click(screen.getByRole('button', { name: /add condition/i }));
+    await tick();
+    expect(filterStore.update).toHaveBeenCalledWith(
+      'repo-1',
+      expect.objectContaining({
+        conditions: expect.arrayContaining([
+          expect.objectContaining({ field_id: 'fldPIC', operator: 'contains' }),
+        ]),
+      })
+    );
+  });
+
+  it('Text field defaults to contains operator when added', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fldT', field_name: 'Title', type: 1, is_primary: true, property: null },
+    ]);
+    render(FilterBar, { props: defaultProps });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    await fireEvent.click(screen.getByRole('button', { name: /add condition/i }));
+    await tick();
+    expect(filterStore.update).toHaveBeenCalledWith(
+      'repo-1',
+      expect.objectContaining({
+        conditions: expect.arrayContaining([
+          expect.objectContaining({ field_id: 'fldT', operator: 'contains' }),
+        ]),
+      })
+    );
+  });
+
+  it('Changing field from Text to Person resets operator to contains', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fldT', field_name: 'Title', type: 1, is_primary: true, property: null },
+      { field_id: 'fldPIC', field_name: 'PIC', type: 11, is_primary: false, property: null },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fldT',
+              field_name: 'Title',
+              operator: 'is' as const,
+              value: ['exact match'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    // Change field from Title (Text, type 1) to PIC (Person, type 11)
+    const fieldSelect = screen.getAllByRole('combobox', { name: /field/i })[0] as HTMLSelectElement;
+    expect(fieldSelect).toBeTruthy();
+    await fireEvent.change(fieldSelect, { target: { value: 'fldPIC' } });
+    expect(filterStore.update).toHaveBeenCalledWith(
+      'repo-1',
+      expect.objectContaining({
+        conditions: [expect.objectContaining({ field_id: 'fldPIC', operator: 'contains' })],
+      })
+    );
+  });
+});
+
+// ─── 10. Fields loaded lazily on popover open ─────────────────────────────
 
 describe('FilterBar field loading', () => {
   it('fetches fields when popover is opened for the first time', async () => {
