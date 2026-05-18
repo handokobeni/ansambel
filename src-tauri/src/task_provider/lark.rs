@@ -10,8 +10,8 @@ use super::{CreateTaskArgs, TaskPatch, TaskProvider};
 use crate::error::Result;
 use crate::platform::lark_client::{BitableOption, BitableRecord, LarkClient};
 use crate::state::{
-    BitableBinding, FieldMapping, FilterCondition, FilterSpec, KanbanColumn, StatusValueMapping,
-    Task,
+    BitableBinding, FieldMapping, FilterCondition, FilterOperator, FilterSpec, KanbanColumn,
+    StatusValueMapping, Task,
 };
 use crate::task_provider::lark_field_resolver::{
     resolve_description, resolve_order, resolve_status, resolve_title,
@@ -20,6 +20,30 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+
+/// Drop conditions whose value is empty / whitespace-only for non-unary operators.
+/// Lark's search endpoint rejects such conditions (code 1254018 InvalidFilter) — and
+/// an empty value almost always means "the user just added a condition and hasn't typed
+/// anything yet". Strip them so the filter is a no-op until the user provides a value.
+pub(crate) fn strip_empty_conditions(spec: &FilterSpec) -> FilterSpec {
+    const UNARY: &[FilterOperator] = &[FilterOperator::IsEmpty, FilterOperator::IsNotEmpty];
+    let conditions = spec
+        .conditions
+        .iter()
+        .filter(|c| {
+            if UNARY.contains(&c.operator) {
+                true
+            } else {
+                c.value.iter().any(|v| !v.trim().is_empty())
+            }
+        })
+        .cloned()
+        .collect();
+    FilterSpec {
+        conjunction: spec.conjunction.clone(),
+        conditions,
+    }
+}
 
 /// Rebuild a FilterSpec with each condition's `field_name` overwritten
 /// from a canonical `field_id → field_name` map. Missing ids fall through
@@ -342,16 +366,17 @@ fn column_rank(c: &KanbanColumn) -> u8 {
 #[async_trait]
 impl TaskProvider for LarkProvider {
     async fn list_tasks(&self, repo_filter: Option<&str>) -> Result<Vec<Task>> {
-        // Route to the search endpoint when filters are active so Lark
-        // applies server-side filtering; fall back to list when no filters
-        // are set so we avoid an unnecessary schema fetch.
-        let records: Vec<BitableRecord> = if self.filters.is_empty() {
+        // Strip conditions with empty/whitespace-only values before routing.
+        // An empty value almost always means "just added, not filled in yet";
+        // Lark rejects them on non-Text fields (code 1254018 InvalidFilter).
+        let effective = strip_empty_conditions(&self.filters);
+        let records: Vec<BitableRecord> = if effective.is_empty() {
             self.client
                 .bitable_list_records(&self.app_token, &self.table_id, None)
                 .await?
         } else {
             let canonical = self.field_name_by_id().await?;
-            let refreshed = refresh_field_names(&self.filters, canonical);
+            let refreshed = refresh_field_names(&effective, canonical);
             self.client
                 .bitable_search_records(&self.app_token, &self.table_id, &refreshed)
                 .await?
@@ -1541,6 +1566,133 @@ mod tests {
         // repo_id defaults to filter "x"; record has no repo_id field
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].id, "rec_b1");
+    }
+
+    // ── strip_empty_conditions ─────────────────────────────────────────────
+
+    #[test]
+    fn strip_empty_conditions_removes_text_with_empty_value() {
+        use crate::state::{FilterCondition, FilterConjunction, FilterOperator, FilterSpec};
+
+        let spec = FilterSpec {
+            conjunction: FilterConjunction::And,
+            conditions: vec![FilterCondition {
+                field_id: "fld1".into(),
+                field_name: "Task name".into(),
+                operator: FilterOperator::Is,
+                value: vec!["".into()],
+            }],
+        };
+        let stripped = strip_empty_conditions(&spec);
+        assert!(
+            stripped.conditions.is_empty(),
+            "non-unary condition with empty value should be dropped"
+        );
+    }
+
+    #[test]
+    fn strip_empty_conditions_removes_whitespace_only_value() {
+        use crate::state::{FilterCondition, FilterConjunction, FilterOperator, FilterSpec};
+
+        let spec = FilterSpec {
+            conjunction: FilterConjunction::And,
+            conditions: vec![FilterCondition {
+                field_id: "fld1".into(),
+                field_name: "Task name".into(),
+                operator: FilterOperator::Contains,
+                value: vec!["   ".into()],
+            }],
+        };
+        let stripped = strip_empty_conditions(&spec);
+        assert!(
+            stripped.conditions.is_empty(),
+            "whitespace-only value should be treated as empty and dropped"
+        );
+    }
+
+    #[test]
+    fn strip_empty_conditions_keeps_unary_with_empty_value() {
+        use crate::state::{FilterCondition, FilterConjunction, FilterOperator, FilterSpec};
+
+        let spec = FilterSpec {
+            conjunction: FilterConjunction::And,
+            conditions: vec![FilterCondition {
+                field_id: "fld1".into(),
+                field_name: "Owner".into(),
+                operator: FilterOperator::IsEmpty,
+                value: vec![],
+            }],
+        };
+        let stripped = strip_empty_conditions(&spec);
+        assert_eq!(
+            stripped.conditions.len(),
+            1,
+            "IsEmpty (unary) with empty value array must be kept"
+        );
+    }
+
+    #[test]
+    fn strip_empty_conditions_keeps_non_empty() {
+        use crate::state::{FilterCondition, FilterConjunction, FilterOperator, FilterSpec};
+
+        let spec = FilterSpec {
+            conjunction: FilterConjunction::And,
+            conditions: vec![FilterCondition {
+                field_id: "fld1".into(),
+                field_name: "Status".into(),
+                operator: FilterOperator::Is,
+                value: vec!["Done".into()],
+            }],
+        };
+        let stripped = strip_empty_conditions(&spec);
+        assert_eq!(
+            stripped.conditions.len(),
+            1,
+            "non-empty value should be kept"
+        );
+        assert_eq!(stripped.conditions[0].value, vec!["Done".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn lark_provider_routes_to_list_when_all_conditions_have_empty_values() {
+        use crate::state::{FilterCondition, FilterConjunction, FilterOperator, FilterSpec};
+
+        let mock = MockServer::start().await;
+        mount_token(&mock).await;
+        // List endpoint MUST be called.
+        Mock::given(method("GET"))
+            .and(path("/open-apis/bitable/v1/apps/appA/tables/tblA/records"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": { "items": [], "has_more": false, "page_token": "", "total": 0 }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+        // Search endpoint must NOT be called.
+        Mock::given(method("POST"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
+            ))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let provider = build_provider_with_filter(
+            &mock,
+            FilterSpec {
+                conjunction: FilterConjunction::And,
+                conditions: vec![FilterCondition {
+                    field_id: "fld1".into(),
+                    field_name: "PIC".into(),
+                    operator: FilterOperator::Is,
+                    // Empty value — user just added the condition, hasn't selected anyone yet
+                    value: vec!["".into()],
+                }],
+            },
+        );
+        let _ = provider.list_tasks(Some("repo-1")).await.unwrap();
     }
 
     #[test]
