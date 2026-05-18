@@ -265,17 +265,35 @@ pub(crate) async fn list_lark_lookup_options_inner(
     let fields = client.bitable_list_fields(app_token, table_id).await?;
     let lookup_field = match fields.iter().find(|f| f.field_id == field_id) {
         Some(f) => f,
-        None => return Ok(vec![]),
+        None => {
+            tracing::warn!(
+                field_id = %field_id,
+                table_id = %table_id,
+                "Phase 3a-3.1 lookup chain: field not found in table"
+            );
+            return Ok(vec![]);
+        }
     };
     // Bitable type 19 = Lookup.
     if lookup_field.field_type != 19 {
+        tracing::warn!(
+            field_id = %field_id,
+            field_type = lookup_field.field_type,
+            "Phase 3a-3.1 lookup chain: field is not a Lookup (type 19)"
+        );
         return Ok(vec![]);
     }
 
     // Step 2: extract source table_id and source field_id from property.
     let prop = match &lookup_field.property {
         Some(p) => p,
-        None => return Ok(vec![]),
+        None => {
+            tracing::warn!(
+                field_id = %field_id,
+                "Phase 3a-3.1 lookup chain: Lookup field has no property"
+            );
+            return Ok(vec![]);
+        }
     };
     // Accept both property key spellings.
     let src_table_id = prop
@@ -289,6 +307,11 @@ pub(crate) async fn list_lark_lookup_options_inner(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if src_table_id.is_empty() || src_field_id.is_empty() {
+        tracing::warn!(
+            field_id = %field_id,
+            property = ?prop,
+            "Phase 3a-3.1 lookup chain: could not extract src_table_id/src_field_id from property; check property keys"
+        );
         return Ok(vec![]);
     }
 
@@ -296,15 +319,33 @@ pub(crate) async fn list_lark_lookup_options_inner(
     let src_fields = client.bitable_list_fields(app_token, src_table_id).await?;
     let src_field = match src_fields.iter().find(|f| f.field_id == src_field_id) {
         Some(f) => f,
-        None => return Ok(vec![]),
+        None => {
+            tracing::warn!(
+                src_table_id = %src_table_id,
+                src_field_id = %src_field_id,
+                "Phase 3a-3.1 lookup chain: source field not found in source table"
+            );
+            return Ok(vec![]);
+        }
     };
     // Source must be a SingleSelect (type 3).
     if src_field.field_type != 3 {
+        tracing::warn!(
+            src_field_id = %src_field_id,
+            field_type = src_field.field_type,
+            "Phase 3a-3.1 lookup chain: source field is not a SingleSelect (type 3)"
+        );
         return Ok(vec![]);
     }
 
     // Step 4: read options from the source field's property.
     let options = src_field.options();
+    if options.is_empty() {
+        tracing::warn!(
+            src_field_id = %src_field_id,
+            "Phase 3a-3.1 lookup chain: source SingleSelect field has no options"
+        );
+    }
     let result = options
         .into_iter()
         .map(|opt| crate::state::SingleSelectOption {
