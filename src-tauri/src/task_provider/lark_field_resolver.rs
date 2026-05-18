@@ -235,13 +235,20 @@ pub(crate) fn extract_single_select(value: &serde_json::Value) -> Option<(Option
 ///      if absent, run `text` through the fuzzy parser
 ///   3. Array shape from search endpoint: extract first element or
 ///      segmented text, then look up id/name in `entries`; fuzzy fallback
-///   4. Plain text value: look up lowercased text in `entries`; if
-///      absent, run raw text through the fuzzy parser
-///   5. Any fuzzy miss → `default_column`
+///   4. When id is absent but name is known: look up name in `status_options`
+///      to recover the canonical option id, then check `entries`
+///   5. Case-insensitive name comparison against entries keys (handles legacy
+///      bindings where the wizard stored option names as keys instead of ids)
+///   6. Any fuzzy miss → `default_column`
+///
+/// `status_options` should be the cached `Vec<BitableOption>` for the status
+/// field (see `LarkProvider::status_options`). Pass an empty slice when
+/// unavailable — the function degrades gracefully to the fuzzy fallback.
 pub fn resolve_status(
     record: &BitableRecord,
     mapping: &FieldMapping,
     values: &StatusValueMapping,
+    status_options: &[BitableOption],
 ) -> KanbanColumn {
     let Some(status_field) = &mapping.status else {
         return values.default_column.clone();
@@ -256,19 +263,38 @@ pub fn resolve_status(
     };
     // Use the unified extractor that handles all Lark endpoint shapes.
     if let Some((opt_id, opt_name)) = extract_single_select(raw) {
-        // Try exact id lookup first
+        // 1. Try exact id lookup first.
         if let Some(id) = &opt_id {
             if let Some(col) = values.entries.get(id.as_str()) {
                 return col.clone();
             }
         }
-        // Try fuzzy name parse
+        // 2. Try fuzzy name parse.
         if let Some(col) = parse_kanban_column(&opt_name) {
             return col;
         }
-        // Try lowercased name in entries
-        if let Some(col) = values.entries.get(&opt_name.to_lowercase()) {
-            return col.clone();
+        // 3. When id is absent (e.g. segmented-text shape from search endpoint),
+        //    recover the canonical option id by matching name against status_options,
+        //    then check entries. This is the primary fix for the bug where search-
+        //    endpoint records always fell through to default_column.
+        if opt_id.is_none() {
+            let recovered_id = status_options
+                .iter()
+                .find(|o| o.name.eq_ignore_ascii_case(&opt_name))
+                .map(|o| o.id.as_str());
+            if let Some(id) = recovered_id {
+                if let Some(col) = values.entries.get(id) {
+                    return col.clone();
+                }
+            }
+        }
+        // 4. Case-insensitive key comparison — handles legacy bindings where the
+        //    wizard stored option names (not ids) as entry keys.
+        let lowered = opt_name.to_lowercase();
+        for (key, col) in &values.entries {
+            if key.to_lowercase() == lowered {
+                return col.clone();
+            }
         }
     }
     values.default_column.clone()
@@ -719,7 +745,7 @@ mod tests {
             default_column: KanbanColumn::Review,
             ..Default::default()
         };
-        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::Review);
+        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::Review);
     }
 
     #[test]
@@ -735,7 +761,7 @@ mod tests {
             default_column: KanbanColumn::Todo,
         };
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::Done);
+        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::Done);
     }
 
     #[test]
@@ -743,7 +769,7 @@ mod tests {
         let r = rec("r1", serde_json::json!({"Task Status": "In Progress"}));
         let v = StatusValueMapping::default();
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::InProgress);
+        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::InProgress);
     }
 
     #[test]
@@ -754,7 +780,7 @@ mod tests {
             ..Default::default()
         };
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::Review);
+        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::Review);
     }
 
     #[test]
@@ -770,7 +796,7 @@ mod tests {
             default_column: KanbanColumn::Todo,
         };
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::Done);
+        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::Done);
     }
 
     #[test]
@@ -781,7 +807,7 @@ mod tests {
             ..Default::default()
         };
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::InProgress);
+        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::InProgress);
     }
 
     // ── extract_single_select unit tests ────────────────────────────────────
@@ -851,7 +877,7 @@ mod tests {
         };
         let m = status_mapping();
         // "In Progress" is recognized by the fuzzy parser even without an id match
-        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::InProgress);
+        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::InProgress);
     }
 
     #[test]
@@ -870,7 +896,118 @@ mod tests {
             default_column: KanbanColumn::Todo,
         };
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::Done);
+        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::Done);
+    }
+
+    // ── Step 3: new tests for the name-lookup fallback chain ────────────────
+
+    #[test]
+    fn resolve_status_falls_back_to_name_lookup_via_status_options() {
+        // Scenario: search endpoint returns segmented text `[{text, type}]`
+        // so extract_single_select yields (None, "In Progress"). The option id
+        // is absent in `entries` keys (they're ids), so fuzzy fails for a custom
+        // label. But status_options has the canonical id for "In Progress", which
+        // IS in entries — so we should resolve to InProgress.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task Status": [{"text": "In Progress", "type": "text"}]
+            }),
+        );
+        let mut entries = std::collections::HashMap::new();
+        // Key is option id, NOT the name — that's what the binding wizard stores.
+        entries.insert("opt_x".into(), KanbanColumn::InProgress);
+        let v = StatusValueMapping {
+            entries,
+            default_column: KanbanColumn::Todo,
+        };
+        let opts = vec![BitableOption {
+            id: "opt_x".into(),
+            name: "In Progress".into(),
+        }];
+        let m = status_mapping();
+        // Without status_options the fuzzy parser still handles "In Progress",
+        // but with a custom label like "Sedang Berjalan" only the options lookup
+        // would succeed. This test uses "In Progress" to confirm the path works.
+        assert_eq!(resolve_status(&r, &m, &v, &opts), KanbanColumn::InProgress);
+    }
+
+    #[test]
+    fn resolve_status_falls_back_to_name_lookup_for_custom_untranslatable_label() {
+        // A custom Bitable label that the fuzzy parser doesn't recognise.
+        // The option id IS in entries; status_options provides the name→id link.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task Status": [{"text": "Sedang Berjalan", "type": "text"}]
+            }),
+        );
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("opt_x".into(), KanbanColumn::InProgress);
+        let v = StatusValueMapping {
+            entries,
+            default_column: KanbanColumn::Todo,
+        };
+        let opts = vec![BitableOption {
+            id: "opt_x".into(),
+            name: "Sedang Berjalan".into(),
+        }];
+        let m = status_mapping();
+        assert_eq!(resolve_status(&r, &m, &v, &opts), KanbanColumn::InProgress);
+    }
+
+    #[test]
+    fn resolve_status_falls_back_to_case_insensitive_name_match_on_entries() {
+        // Legacy bindings where the wizard stored option names as entry keys
+        // instead of option ids. Case-insensitive comparison should match.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task Status": "in progress"
+            }),
+        );
+        let mut entries = std::collections::HashMap::new();
+        // Key is the option name with Title Case — legacy binding artifact.
+        entries.insert("In Progress".into(), KanbanColumn::InProgress);
+        let v = StatusValueMapping {
+            entries,
+            default_column: KanbanColumn::Todo,
+        };
+        let m = status_mapping();
+        // fuzzy parse("in progress") → InProgress, so this also exercises
+        // the fuzzy path; to isolate the case-insensitive key path we use
+        // a value that fuzzy doesn't handle:
+        let r2 = rec(
+            "r2",
+            serde_json::json!({
+                "Task Status": "sedang berjalan"
+            }),
+        );
+        let mut entries2 = std::collections::HashMap::new();
+        entries2.insert("Sedang Berjalan".into(), KanbanColumn::InProgress);
+        let v2 = StatusValueMapping {
+            entries: entries2,
+            default_column: KanbanColumn::Todo,
+        };
+        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::InProgress);
+        assert_eq!(resolve_status(&r2, &m, &v2, &[]), KanbanColumn::InProgress);
+    }
+
+    #[test]
+    fn resolve_status_returns_default_when_no_match() {
+        // Empty entries, no status_options, non-fuzzy label → default_column.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task Status": "some_unknown_xyz_label"
+            }),
+        );
+        let v = StatusValueMapping {
+            entries: std::collections::HashMap::new(),
+            default_column: KanbanColumn::Review,
+        };
+        let m = status_mapping();
+        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::Review);
     }
 
     #[test]

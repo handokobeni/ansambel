@@ -321,16 +321,20 @@ fn reverse_lookup_option(values: &StatusValueMapping, target: KanbanColumn) -> O
 /// `default_repo_id` is used when there is no repo_id field in the mapping —
 /// typically passed as the current repo filter so existing Bitables without a
 /// per-row repo concept still hydrate into Ansambel's active repo.
+///
+/// `status_options` is the cached option list for the status field; pass an
+/// empty slice when unavailable — `resolve_status` degrades gracefully.
 fn record_to_task(
     rec: &BitableRecord,
     mapping: &FieldMapping,
     status_values: &StatusValueMapping,
+    status_options: &[BitableOption],
     primary_field_name: Option<&str>,
     default_repo_id: Option<&str>,
 ) -> Result<Task> {
     let title = resolve_title(rec, mapping, primary_field_name)?;
     let description = resolve_description(rec, mapping);
-    let column = resolve_status(rec, mapping, status_values);
+    let column = resolve_status(rec, mapping, status_values, status_options);
     let order = resolve_order(rec, mapping);
     let repo_id = default_repo_id.unwrap_or("").to_string();
     let created_at = rec
@@ -382,15 +386,71 @@ impl TaskProvider for LarkProvider {
                 .await?
         };
         let primary = self.primary_field_name().await;
+        // Eagerly hydrate status_options so resolve_status can recover option ids
+        // from names when records arrive in segmented-text shape (search endpoint).
+        let status_opts = self
+            .status_options
+            .get_or_init(|| async {
+                let Some(status_ref) = self.field_mapping.status.as_ref() else {
+                    return Vec::new();
+                };
+                let Ok(fields) = self
+                    .client
+                    .bitable_list_fields(&self.app_token, &self.table_id)
+                    .await
+                else {
+                    return Vec::new();
+                };
+                fields
+                    .into_iter()
+                    .find(|f| f.field_id == status_ref.field_id)
+                    .map(|f| f.options())
+                    .unwrap_or_default()
+            })
+            .await;
         let total = records.len();
         let mut skipped = 0usize;
+        let mut logged_status_sample = false;
         let mut tasks: Vec<Task> = records
             .iter()
             .filter_map(|r| {
+                // Emit one debug sample per list_tasks call so the developer can
+                // inspect the raw status field value, extracted pair, and resolved
+                // column without log spam. Set RUST_LOG=debug to see it.
+                if !logged_status_sample {
+                    logged_status_sample = true;
+                    if let Some(status_ref) = self.field_mapping.status.as_ref() {
+                        let raw = r
+                            .fields
+                            .as_object()
+                            .and_then(|o| o.get(&status_ref.field_name))
+                            .cloned();
+                        let extracted = raw
+                            .as_ref()
+                            .and_then(crate::task_provider::lark_field_resolver::extract_single_select);
+                        let resolved = crate::task_provider::lark_field_resolver::resolve_status(
+                            r,
+                            &self.field_mapping,
+                            &self.status_value_mapping,
+                            status_opts,
+                        );
+                        tracing::debug!(
+                            record_id = %r.record_id,
+                            field_name = %status_ref.field_name,
+                            raw = ?raw,
+                            extracted = ?extracted,
+                            resolved = ?resolved,
+                            entries_sample = ?self.status_value_mapping.entries.iter().take(5).collect::<Vec<_>>(),
+                            default_column = ?self.status_value_mapping.default_column,
+                            "Phase 3a-3.1: status resolution sample"
+                        );
+                    }
+                }
                 match record_to_task(
                     r,
                     &self.field_mapping,
                     &self.status_value_mapping,
+                    status_opts,
                     primary.as_deref(),
                     repo_filter,
                 ) {
@@ -464,10 +524,12 @@ impl TaskProvider for LarkProvider {
             )
             .await?;
         let primary = self.primary_field_name().await;
+        let status_opts = self.status_options.get().map(Vec::as_slice).unwrap_or(&[]);
         record_to_task(
             &record,
             &self.field_mapping,
             &self.status_value_mapping,
+            status_opts,
             primary.as_deref(),
             Some(args.repo_id.as_str()),
         )
@@ -509,10 +571,12 @@ impl TaskProvider for LarkProvider {
             .bitable_get_record(&self.app_token, &self.table_id, id)
             .await?;
         let primary = self.primary_field_name().await;
+        let status_opts = self.status_options.get().map(Vec::as_slice).unwrap_or(&[]);
         record_to_task(
             &rec,
             &self.field_mapping,
             &self.status_value_mapping,
+            status_opts,
             primary.as_deref(),
             None,
         )
@@ -546,10 +610,12 @@ impl TaskProvider for LarkProvider {
             .bitable_get_record(&self.app_token, &self.table_id, id)
             .await?;
         let primary = self.primary_field_name().await;
+        let status_opts = self.status_options.get().map(Vec::as_slice).unwrap_or(&[]);
         record_to_task(
             &rec,
             &self.field_mapping,
             &self.status_value_mapping,
+            status_opts,
             primary.as_deref(),
             None,
         )
