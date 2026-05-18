@@ -845,3 +845,121 @@ describe('FilterBar value reset on field/operator change', () => {
     );
   });
 });
+
+// ─── 12. mappedFieldIds prop hides bound fields (Bug 2 regression) ──────────
+
+describe('FilterBar mappedFieldIds prop', () => {
+  it('Field picker hides fields whose IDs are in mappedFieldIds', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_status',
+        field_name: 'Task Status',
+        type: 3,
+        is_primary: false,
+        property: { options: [] },
+      },
+      { field_id: 'fld_title', field_name: 'Task name', type: 1, is_primary: true, property: null },
+      {
+        field_id: 'fld_assignee',
+        field_name: 'Assignee',
+        type: 11,
+        is_primary: false,
+        property: null,
+      },
+      {
+        field_id: 'fld_sprint',
+        field_name: 'Sprint Status',
+        type: 3,
+        is_primary: false,
+        property: { options: [] },
+      },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        mappedFieldIds: new Set(['fld_status', 'fld_title']),
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_assignee',
+              field_name: 'Assignee',
+              operator: 'contains' as const,
+              value: [''],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    // Find the field picker <select>
+    const fieldSelects = screen.getAllByRole('combobox', { name: /field/i });
+    expect(fieldSelects.length).toBeGreaterThan(0);
+    const fieldSelect = fieldSelects[0] as HTMLSelectElement;
+    const optionValues = Array.from(fieldSelect.options).map((o) => o.value);
+    // Mapped fields must NOT appear
+    expect(optionValues).not.toContain('fld_status');
+    expect(optionValues).not.toContain('fld_title');
+    // Non-mapped supported fields must appear
+    expect(optionValues).toContain('fld_assignee');
+    expect(optionValues).toContain('fld_sprint');
+  });
+
+  it('Field picker shows all supported fields when mappedFieldIds is empty', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_status',
+        field_name: 'Task Status',
+        type: 3,
+        is_primary: false,
+        property: { options: [] },
+      },
+      { field_id: 'fld_title', field_name: 'Task name', type: 1, is_primary: true, property: null },
+      {
+        field_id: 'fld_assignee',
+        field_name: 'Assignee',
+        type: 11,
+        is_primary: false,
+        property: null,
+      },
+      {
+        field_id: 'fld_sprint',
+        field_name: 'Sprint Status',
+        type: 3,
+        is_primary: false,
+        property: { options: [] },
+      },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        // mappedFieldIds omitted — defaults to empty Set
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_title',
+              field_name: 'Task name',
+              operator: 'contains' as const,
+              value: [''],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const fieldSelects = screen.getAllByRole('combobox', { name: /field/i });
+    expect(fieldSelects.length).toBeGreaterThan(0);
+    const fieldSelect = fieldSelects[0] as HTMLSelectElement;
+    const optionValues = Array.from(fieldSelect.options).map((o) => o.value);
+    // All 4 supported fields must appear when no IDs are excluded
+    expect(optionValues).toContain('fld_status');
+    expect(optionValues).toContain('fld_title');
+    expect(optionValues).toContain('fld_assignee');
+    expect(optionValues).toContain('fld_sprint');
+  });
+});

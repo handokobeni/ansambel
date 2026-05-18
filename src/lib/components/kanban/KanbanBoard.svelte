@@ -143,11 +143,20 @@
 
 {#if larkBindings.get(repoId)}
   {@const binding = larkBindings.get(repoId)!}
+  {@const mappedFieldIds = new Set(
+    [
+      binding.field_mapping.title.field_id,
+      binding.field_mapping.description?.field_id,
+      binding.field_mapping.status?.field_id,
+      binding.field_mapping.order?.field_id,
+    ].filter((id): id is string => !!id)
+  )}
   <FilterBar
     {repoId}
     appToken={binding.app_token}
     tableId={binding.table_id}
     filters={binding.filters}
+    {mappedFieldIds}
   />
 {/if}
 

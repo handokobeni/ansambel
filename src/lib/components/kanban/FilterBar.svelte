@@ -16,8 +16,9 @@
     appToken: string;
     tableId: string;
     filters: FilterSpec;
+    mappedFieldIds?: Set<string>;
   };
-  let { repoId, appToken, tableId, filters }: Props = $props();
+  let { repoId, appToken, tableId, filters, mappedFieldIds = new Set() }: Props = $props();
 
   // Inline type for select/multiselect option property
   type FieldProperty = { options?: { id: string; name: string }[] };
@@ -68,7 +69,7 @@
   }
 
   function supportedFields(): BitableField[] {
-    return fields.filter((f) => isSupported(f.type));
+    return fields.filter((f) => isSupported(f.type) && !mappedFieldIds.has(f.field_id));
   }
 
   function fieldById(fieldId: string): BitableField | undefined {
