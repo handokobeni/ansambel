@@ -327,6 +327,10 @@ export type BitableField = {
 
 export type BitableOption = { id: string; name: string };
 
+/** A person returned by list_lark_person_options. Used by FilterBar to
+ *  populate the value picker for Person-type (type 11) fields. */
+export type PersonOption = { open_id: string; name: string };
+
 export type ProposedMapping = {
   fields: BitableField[];
   suggested: FieldMapping;
