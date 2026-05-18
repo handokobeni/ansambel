@@ -17,8 +17,16 @@
     tableId: string;
     filters: FilterSpec;
     mappedFieldIds?: Set<string>;
+    mappedFieldNames?: Set<string>;
   };
-  let { repoId, appToken, tableId, filters, mappedFieldIds = new Set() }: Props = $props();
+  let {
+    repoId,
+    appToken,
+    tableId,
+    filters,
+    mappedFieldIds = new Set(),
+    mappedFieldNames = new Set(),
+  }: Props = $props();
 
   // Inline type for select/multiselect option property
   type FieldProperty = { options?: { id: string; name: string }[] };
@@ -59,6 +67,36 @@
       'isNotEmpty',
     ],
     11: ['contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
+    // Lookup: value depends on linked field; contains is the safest default
+    19: ['contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
+    // Formula: computed value — treat as stringy
+    20: ['contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
+    // Created Time
+    1001: [
+      'is',
+      'isNot',
+      'isGreater',
+      'isGreaterEqual',
+      'isLess',
+      'isLessEqual',
+      'isEmpty',
+      'isNotEmpty',
+    ],
+    // Last Modified Time
+    1002: [
+      'is',
+      'isNot',
+      'isGreater',
+      'isGreaterEqual',
+      'isLess',
+      'isLessEqual',
+      'isEmpty',
+      'isNotEmpty',
+    ],
+    // Created By
+    1003: ['contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
+    // Last Modified By
+    1004: ['contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
   };
 
   const SUPPORTED_TYPES = new Set(Object.keys(OPS_BY_TYPE).map(Number));
@@ -69,7 +107,12 @@
   }
 
   function supportedFields(): BitableField[] {
-    return fields.filter((f) => isSupported(f.type) && !mappedFieldIds.has(f.field_id));
+    return fields.filter(
+      (f) =>
+        isSupported(f.type) &&
+        !mappedFieldIds.has(f.field_id) &&
+        !mappedFieldNames.has(f.field_name.toLowerCase().trim())
+    );
   }
 
   function fieldById(fieldId: string): BitableField | undefined {
@@ -327,8 +370,8 @@
                     <option value={opt.name}>{opt.name}</option>
                   {/each}
                 </select>
-              {:else if fieldType === 5}
-                <!-- DateTime → date input -->
+              {:else if fieldType === 5 || fieldType === 1001 || fieldType === 1002}
+                <!-- DateTime / Created Time / Last Modified Time → date input -->
                 <input
                   type="date"
                   aria-label="value"
@@ -375,7 +418,7 @@
                   />
                 {/if}
               {:else}
-                <!-- Text (type 1) or unknown -->
+                <!-- Text (type 1), Lookup (19), Formula (20), Created/Modified By (1003/1004), or unknown -->
                 <input
                   type="text"
                   aria-label="value"

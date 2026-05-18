@@ -151,12 +151,23 @@
       binding.field_mapping.order?.field_id,
     ].filter((id): id is string => !!id)
   )}
+  {@const mappedFieldNames = new Set(
+    [
+      binding.field_mapping.title?.field_name,
+      binding.field_mapping.description?.field_name,
+      binding.field_mapping.status?.field_name,
+      binding.field_mapping.order?.field_name,
+    ]
+      .filter((n): n is string => !!n)
+      .map((n) => n.toLowerCase().trim())
+  )}
   <FilterBar
     {repoId}
     appToken={binding.app_token}
     tableId={binding.table_id}
     filters={binding.filters}
     {mappedFieldIds}
+    {mappedFieldNames}
   />
 {/if}
 

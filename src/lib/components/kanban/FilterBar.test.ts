@@ -846,7 +846,7 @@ describe('FilterBar value reset on field/operator change', () => {
   });
 });
 
-// ─── 12. mappedFieldIds prop hides bound fields (Bug 2 regression) ──────────
+// ─── 12. mappedFieldIds / mappedFieldNames prop hides bound fields ───────────
 
 describe('FilterBar mappedFieldIds prop', () => {
   it('Field picker hides fields whose IDs are in mappedFieldIds', async () => {
@@ -961,5 +961,246 @@ describe('FilterBar mappedFieldIds prop', () => {
     expect(optionValues).toContain('fld_title');
     expect(optionValues).toContain('fld_assignee');
     expect(optionValues).toContain('fld_sprint');
+  });
+
+  it('Field picker hides fields whose names match mappedFieldNames (case-insensitive)', async () => {
+    // The field_id for Task Status here (fld_status_different) is NOT in
+    // mappedFieldIds, but the name 'Task Status' IS in mappedFieldNames.
+    // This proves the name-based fallback works when field_ids don't line up.
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_status_different',
+        field_name: 'Task Status',
+        type: 3,
+        is_primary: false,
+        property: { options: [] },
+      },
+      { field_id: 'fld_title', field_name: 'Task name', type: 1, is_primary: true, property: null },
+      {
+        field_id: 'fld_assignee',
+        field_name: 'Assignee',
+        type: 11,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        // fld_status_stale is the STALE id (not in the schema above)
+        mappedFieldIds: new Set(['fld_status_stale']),
+        // But the name 'task status' IS the name of the field above
+        mappedFieldNames: new Set(['task status']),
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_assignee',
+              field_name: 'Assignee',
+              operator: 'contains' as const,
+              value: [''],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const fieldSelects = screen.getAllByRole('combobox', { name: /field/i });
+    expect(fieldSelects.length).toBeGreaterThan(0);
+    const fieldSelect = fieldSelects[0] as HTMLSelectElement;
+    const optionValues = Array.from(fieldSelect.options).map((o) => o.value);
+    // Task Status must be hidden by name even though its ID doesn't match mappedFieldIds
+    expect(optionValues).not.toContain('fld_status_different');
+    // Non-mapped fields must still appear
+    expect(optionValues).toContain('fld_assignee');
+    // fld_title is hidden by mappedFieldNames matching 'task name' — not set here so it shows
+    expect(optionValues).toContain('fld_title');
+  });
+});
+
+// ─── 13. OPS_BY_TYPE new field types ─────────────────────────────────────────
+
+describe('FilterBar new field types (Lookup, Formula, Created/Modified Time/By)', () => {
+  it('Lookup (type 19) shows contains/doesNotContain/isEmpty/isNotEmpty', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_lookup',
+        field_name: 'Sprint Status',
+        type: 19,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_lookup',
+              field_name: 'Sprint Status',
+              operator: 'contains' as const,
+              value: ['Active'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const operatorSelects = screen.getAllByRole('combobox', { name: /operator/i });
+    const opSel = operatorSelects[0] as HTMLSelectElement;
+    const opValues = Array.from(opSel.options).map((o) => o.value);
+    expect(opValues).toEqual(['contains', 'doesNotContain', 'isEmpty', 'isNotEmpty']);
+  });
+
+  it('Created Time (type 1001) shows comparison operators including isGreater', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_created',
+        field_name: 'Created Time',
+        type: 1001,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_created',
+              field_name: 'Created Time',
+              operator: 'isGreater' as const,
+              value: ['2026-01-01'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const operatorSelects = screen.getAllByRole('combobox', { name: /operator/i });
+    const opSel = operatorSelects[0] as HTMLSelectElement;
+    const opValues = Array.from(opSel.options).map((o) => o.value);
+    expect(opValues).toContain('isGreater');
+    expect(opValues).toContain('isGreaterEqual');
+    expect(opValues).toContain('isLess');
+    expect(opValues).toContain('isLessEqual');
+  });
+
+  it('Lookup field (type 19) renders text input as value picker', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_lookup',
+        field_name: 'Sprint Status',
+        type: 19,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_lookup',
+              field_name: 'Sprint Status',
+              operator: 'contains' as const,
+              value: ['Active'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    // Should render a text input, not a <select>
+    const textInput = screen.getByRole('textbox') as HTMLInputElement;
+    expect(textInput).toBeTruthy();
+    expect(textInput.type).toBe('text');
+    // Should NOT render a date input or number input
+    expect(document.querySelector('input[type="date"]')).toBeNull();
+    expect(document.querySelector('input[type="number"]')).toBeNull();
+  });
+
+  it('Created Time (type 1001) renders date input as value picker', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_created',
+        field_name: 'Created Time',
+        type: 1001,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_created',
+              field_name: 'Created Time',
+              operator: 'is' as const,
+              value: ['2026-01-01'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const dateInput = document.querySelector('input[type="date"]') as HTMLInputElement;
+    expect(dateInput).toBeTruthy();
+  });
+
+  it('Lookup (type 19) appears in field picker (not excluded by unsupported type)', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_lookup',
+        field_name: 'Sprint Status',
+        type: 19,
+        is_primary: false,
+        property: null,
+      },
+      { field_id: 'fld_title', field_name: 'Task name', type: 1, is_primary: true, property: null },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_title',
+              field_name: 'Task name',
+              operator: 'contains' as const,
+              value: [''],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const fieldSelects = screen.getAllByRole('combobox', { name: /field/i });
+    const fieldSelect = fieldSelects[0] as HTMLSelectElement;
+    const optionValues = Array.from(fieldSelect.options).map((o) => o.value);
+    // Lookup field must now appear in the picker
+    expect(optionValues).toContain('fld_lookup');
   });
 });
