@@ -244,34 +244,38 @@ pub(crate) fn extract_single_select(value: &serde_json::Value) -> Option<(Option
 /// `status_options` should be the cached `Vec<BitableOption>` for the status
 /// field (see `LarkProvider::status_options`). Pass an empty slice when
 /// unavailable — the function degrades gracefully to the fuzzy fallback.
+///
+/// Returns `(KanbanColumn, path_tag)` where `path_tag` is one of:
+/// `"id-exact"`, `"fuzzy-parse"`, `"options-name-match"`,
+/// `"entries-case-insensitive"`, or `"default"`.
 pub fn resolve_status(
     record: &BitableRecord,
     mapping: &FieldMapping,
     values: &StatusValueMapping,
     status_options: &[BitableOption],
-) -> KanbanColumn {
+) -> (KanbanColumn, &'static str) {
     let Some(status_field) = &mapping.status else {
-        return values.default_column.clone();
+        return (values.default_column.clone(), "default");
     };
     let fields = match record.fields.as_object() {
         Some(o) => o,
-        None => return values.default_column.clone(),
+        None => return (values.default_column.clone(), "default"),
     };
     let raw = fields.get(&status_field.field_name);
     let Some(raw) = raw else {
-        return values.default_column.clone();
+        return (values.default_column.clone(), "default");
     };
     // Use the unified extractor that handles all Lark endpoint shapes.
     if let Some((opt_id, opt_name)) = extract_single_select(raw) {
         // 1. Try exact id lookup first.
         if let Some(id) = &opt_id {
             if let Some(col) = values.entries.get(id.as_str()) {
-                return col.clone();
+                return (col.clone(), "id-exact");
             }
         }
         // 2. Try fuzzy name parse.
         if let Some(col) = parse_kanban_column(&opt_name) {
-            return col;
+            return (col, "fuzzy-parse");
         }
         // 3. When id is absent (e.g. segmented-text shape from search endpoint),
         //    recover the canonical option id by matching name against status_options,
@@ -284,7 +288,7 @@ pub fn resolve_status(
                 .map(|o| o.id.as_str());
             if let Some(id) = recovered_id {
                 if let Some(col) = values.entries.get(id) {
-                    return col.clone();
+                    return (col.clone(), "options-name-match");
                 }
             }
         }
@@ -293,11 +297,11 @@ pub fn resolve_status(
         let lowered = opt_name.to_lowercase();
         for (key, col) in &values.entries {
             if key.to_lowercase() == lowered {
-                return col.clone();
+                return (col.clone(), "entries-case-insensitive");
             }
         }
     }
-    values.default_column.clone()
+    (values.default_column.clone(), "default")
 }
 
 /// Resolves the order value for sorting. Mapped `order` field wins;
@@ -745,7 +749,8 @@ mod tests {
             default_column: KanbanColumn::Review,
             ..Default::default()
         };
-        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::Review);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::Review);
     }
 
     #[test]
@@ -761,7 +766,8 @@ mod tests {
             default_column: KanbanColumn::Todo,
         };
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::Done);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::Done);
     }
 
     #[test]
@@ -769,7 +775,8 @@ mod tests {
         let r = rec("r1", serde_json::json!({"Task Status": "In Progress"}));
         let v = StatusValueMapping::default();
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::InProgress);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::InProgress);
     }
 
     #[test]
@@ -780,7 +787,8 @@ mod tests {
             ..Default::default()
         };
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::Review);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::Review);
     }
 
     #[test]
@@ -796,7 +804,8 @@ mod tests {
             default_column: KanbanColumn::Todo,
         };
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::Done);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::Done);
     }
 
     #[test]
@@ -807,7 +816,8 @@ mod tests {
             ..Default::default()
         };
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::InProgress);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::InProgress);
     }
 
     // ── extract_single_select unit tests ────────────────────────────────────
@@ -877,7 +887,8 @@ mod tests {
         };
         let m = status_mapping();
         // "In Progress" is recognized by the fuzzy parser even without an id match
-        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::InProgress);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::InProgress);
     }
 
     #[test]
@@ -896,7 +907,8 @@ mod tests {
             default_column: KanbanColumn::Todo,
         };
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::Done);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::Done);
     }
 
     // ── Step 3: new tests for the name-lookup fallback chain ────────────────
@@ -929,7 +941,8 @@ mod tests {
         // Without status_options the fuzzy parser still handles "In Progress",
         // but with a custom label like "Sedang Berjalan" only the options lookup
         // would succeed. This test uses "In Progress" to confirm the path works.
-        assert_eq!(resolve_status(&r, &m, &v, &opts), KanbanColumn::InProgress);
+        let (col, _) = resolve_status(&r, &m, &v, &opts);
+        assert_eq!(col, KanbanColumn::InProgress);
     }
 
     #[test]
@@ -953,7 +966,8 @@ mod tests {
             name: "Sedang Berjalan".into(),
         }];
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v, &opts), KanbanColumn::InProgress);
+        let (col, _) = resolve_status(&r, &m, &v, &opts);
+        assert_eq!(col, KanbanColumn::InProgress);
     }
 
     #[test]
@@ -989,8 +1003,10 @@ mod tests {
             entries: entries2,
             default_column: KanbanColumn::Todo,
         };
-        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::InProgress);
-        assert_eq!(resolve_status(&r2, &m, &v2, &[]), KanbanColumn::InProgress);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::InProgress);
+        let (col2, _) = resolve_status(&r2, &m, &v2, &[]);
+        assert_eq!(col2, KanbanColumn::InProgress);
     }
 
     #[test]
@@ -1007,7 +1023,29 @@ mod tests {
             default_column: KanbanColumn::Review,
         };
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v, &[]), KanbanColumn::Review);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::Review);
+    }
+
+    #[test]
+    fn resolve_status_returns_id_exact_path_tag_when_id_matches() {
+        // When the option id from the record is present in entries, the function
+        // must return the "id-exact" path tag — confirming short-circuit on the
+        // fastest resolution path.
+        let r = rec(
+            "r1",
+            serde_json::json!({"Task Status": {"id": "opt_ip", "text": "Anything"}}),
+        );
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("opt_ip".into(), KanbanColumn::InProgress);
+        let v = StatusValueMapping {
+            entries,
+            default_column: KanbanColumn::Todo,
+        };
+        let m = status_mapping();
+        let (col, path) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::InProgress);
+        assert_eq!(path, "id-exact");
     }
 
     #[test]

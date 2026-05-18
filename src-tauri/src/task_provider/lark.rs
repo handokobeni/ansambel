@@ -334,7 +334,7 @@ fn record_to_task(
 ) -> Result<Task> {
     let title = resolve_title(rec, mapping, primary_field_name)?;
     let description = resolve_description(rec, mapping);
-    let column = resolve_status(rec, mapping, status_values, status_options);
+    let (column, _) = resolve_status(rec, mapping, status_values, status_options);
     let order = resolve_order(rec, mapping);
     let repo_id = default_repo_id.unwrap_or("").to_string();
     let created_at = rec
@@ -408,44 +408,73 @@ impl TaskProvider for LarkProvider {
                     .unwrap_or_default()
             })
             .await;
-        let total = records.len();
+        let total_records = records.len();
         let mut skipped = 0usize;
-        let mut logged_status_sample = false;
+        let mut sampled = 0u32;
+
+        // Per-path resolution counters for the end-of-loop summary.
+        struct PathCounts {
+            id_exact: u32,
+            fuzzy_parse: u32,
+            options_name: u32,
+            entries_ci: u32,
+            default_fallback: u32,
+        }
+        let mut path_counts = PathCounts {
+            id_exact: 0,
+            fuzzy_parse: 0,
+            options_name: 0,
+            entries_ci: 0,
+            default_fallback: 0,
+        };
+
         let mut tasks: Vec<Task> = records
             .iter()
             .filter_map(|r| {
-                // Emit one debug sample per list_tasks call so the developer can
-                // inspect the raw status field value, extracted pair, and resolved
-                // column without log spam. Set RUST_LOG=debug to see it.
-                if !logged_status_sample {
-                    logged_status_sample = true;
+                // Resolve status with path tag for diagnostics and counting.
+                let (resolved_column, resolution_path) =
+                    crate::task_provider::lark_field_resolver::resolve_status(
+                        r,
+                        &self.field_mapping,
+                        &self.status_value_mapping,
+                        status_opts,
+                    );
+                match resolution_path {
+                    "id-exact" => path_counts.id_exact += 1,
+                    "fuzzy-parse" => path_counts.fuzzy_parse += 1,
+                    "options-name-match" => path_counts.options_name += 1,
+                    "entries-case-insensitive" => path_counts.entries_ci += 1,
+                    _ => path_counts.default_fallback += 1,
+                }
+
+                // Emit unconditional info log for the first 3 records per call so
+                // the raw status field value and resolution path appear in normal
+                // app logs without requiring RUST_LOG=debug.
+                if sampled < 3 {
+                    sampled += 1;
                     if let Some(status_ref) = self.field_mapping.status.as_ref() {
                         let raw = r
                             .fields
                             .as_object()
                             .and_then(|o| o.get(&status_ref.field_name))
                             .cloned();
-                        let extracted = raw
-                            .as_ref()
-                            .and_then(crate::task_provider::lark_field_resolver::extract_single_select);
-                        let resolved = crate::task_provider::lark_field_resolver::resolve_status(
-                            r,
-                            &self.field_mapping,
-                            &self.status_value_mapping,
-                            status_opts,
+                        let extracted = raw.as_ref().and_then(
+                            crate::task_provider::lark_field_resolver::extract_single_select,
                         );
-                        tracing::debug!(
+                        tracing::info!(
                             record_id = %r.record_id,
                             field_name = %status_ref.field_name,
                             raw = ?raw,
                             extracted = ?extracted,
-                            resolved = ?resolved,
-                            entries_sample = ?self.status_value_mapping.entries.iter().take(5).collect::<Vec<_>>(),
-                            default_column = ?self.status_value_mapping.default_column,
+                            resolved = ?resolved_column,
+                            resolution_path = %resolution_path,
+                            entries_count = self.status_value_mapping.entries.len(),
+                            status_options_count = status_opts.len(),
                             "Phase 3a-3.1: status resolution sample"
                         );
                     }
                 }
+
                 match record_to_task(
                     r,
                     &self.field_mapping,
@@ -467,11 +496,21 @@ impl TaskProvider for LarkProvider {
                 }
             })
             .collect();
+
+        tracing::info!(
+            total = total_records,
+            id_exact = path_counts.id_exact,
+            fuzzy_parse = path_counts.fuzzy_parse,
+            options_name = path_counts.options_name,
+            entries_ci = path_counts.entries_ci,
+            default_fallback = path_counts.default_fallback,
+            "Phase 3a-3.1: status resolution summary"
+        );
         if skipped > 0 {
             tracing::warn!(
                 skipped,
-                total,
-                "skipped {skipped}/{total} Bitable records that could not be parsed (run with RUST_LOG=debug for per-record details)"
+                total = total_records,
+                "skipped {skipped}/{total_records} Bitable records that could not be parsed (run with RUST_LOG=debug for per-record details)"
             );
         }
         // Same ordering convention as LocalProvider: column ASC then order DESC.
