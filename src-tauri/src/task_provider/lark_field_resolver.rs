@@ -170,14 +170,74 @@ pub fn resolve_description(record: &BitableRecord, mapping: &FieldMapping) -> St
         .unwrap_or_default()
 }
 
+/// Extract an `(option_id, option_name)` pair from a Bitable SingleSelect field
+/// value. Accepts all shapes Lark uses across endpoints:
+/// - Plain string: `"In Progress"` (id absent, name = the string)
+/// - Object: `{ "id": "opt_xxx", "text": "In Progress" }` or `{..., "name": "In Progress"}`
+/// - Array: `[{ "id": "opt_xxx", "text": "In Progress" }]` — first element
+/// - Segmented text array: `[{ "text": "...", "type": "text" }]` — concatenate text
+pub(crate) fn extract_single_select(value: &serde_json::Value) -> Option<(Option<String>, String)> {
+    use serde_json::Value;
+    // Plain string
+    if let Some(s) = value.as_str() {
+        if s.is_empty() {
+            return None;
+        }
+        return Some((None, s.to_string()));
+    }
+    // Object
+    if let Some(obj) = value.as_object() {
+        let id = obj.get("id").and_then(Value::as_str).map(str::to_string);
+        let name = obj
+            .get("text")
+            .or_else(|| obj.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_string)?;
+        return Some((id, name));
+    }
+    // Array of objects
+    if let Some(arr) = value.as_array() {
+        // Try first element as option object
+        if let Some(first) = arr.first() {
+            if let Some(obj) = first.as_object() {
+                let id = obj.get("id").and_then(Value::as_str).map(str::to_string);
+                if let Some(name) = obj
+                    .get("text")
+                    .or_else(|| obj.get("name"))
+                    .and_then(Value::as_str)
+                {
+                    // Only treat as option object if id is present OR no "type" key
+                    // (distinguishes option objects from segmented-text segments).
+                    if id.is_some() || !obj.contains_key("type") {
+                        return Some((id, name.to_string()));
+                    }
+                }
+            }
+        }
+        // Segmented text concat (e.g. [{text: "In ", type: "text"}, {text: "Progress", type: "text"}])
+        let mut buf = String::new();
+        for seg in arr {
+            if let Some(t) = seg.get("text").and_then(Value::as_str) {
+                buf.push_str(t);
+            }
+        }
+        if !buf.is_empty() {
+            return Some((None, buf));
+        }
+    }
+    None
+}
+
 /// Resolves the kanban column for a record using the mapped status
 /// field + value mapping. Layered fallback:
 ///   1. If status field unmapped → `default_column`
 ///   2. Single-select object `{id, text}`: look up `id` in `entries`;
 ///      if absent, run `text` through the fuzzy parser
-///   3. Plain text value: look up lowercased text in `entries`; if
+///   3. Array shape from search endpoint: extract first element or
+///      segmented text, then look up id/name in `entries`; fuzzy fallback
+///   4. Plain text value: look up lowercased text in `entries`; if
 ///      absent, run raw text through the fuzzy parser
-///   4. Any fuzzy miss → `default_column`
+///   5. Any fuzzy miss → `default_column`
 pub fn resolve_status(
     record: &BitableRecord,
     mapping: &FieldMapping,
@@ -194,24 +254,21 @@ pub fn resolve_status(
     let Some(raw) = raw else {
         return values.default_column.clone();
     };
-    if let Some(obj) = raw.as_object() {
-        if let Some(id) = obj.get("id").and_then(|v| v.as_str()) {
-            if let Some(col) = values.entries.get(id) {
+    // Use the unified extractor that handles all Lark endpoint shapes.
+    if let Some((opt_id, opt_name)) = extract_single_select(raw) {
+        // Try exact id lookup first
+        if let Some(id) = &opt_id {
+            if let Some(col) = values.entries.get(id.as_str()) {
                 return col.clone();
             }
         }
-        if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
-            if let Some(col) = parse_kanban_column(text) {
-                return col;
-            }
-        }
-    }
-    if let Some(s) = raw.as_str().filter(|s| !s.is_empty()) {
-        if let Some(col) = values.entries.get(&s.to_lowercase()) {
-            return col.clone();
-        }
-        if let Some(col) = parse_kanban_column(s) {
+        // Try fuzzy name parse
+        if let Some(col) = parse_kanban_column(&opt_name) {
             return col;
+        }
+        // Try lowercased name in entries
+        if let Some(col) = values.entries.get(&opt_name.to_lowercase()) {
+            return col.clone();
         }
     }
     values.default_column.clone()
@@ -725,6 +782,95 @@ mod tests {
         };
         let m = status_mapping();
         assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::InProgress);
+    }
+
+    // ── extract_single_select unit tests ────────────────────────────────────
+
+    #[test]
+    fn extract_single_select_plain_string() {
+        let value = serde_json::json!("In Progress");
+        let result = extract_single_select(&value);
+        assert_eq!(result, Some((None, "In Progress".to_string())));
+    }
+
+    #[test]
+    fn extract_single_select_object_with_text_and_id() {
+        let value = serde_json::json!({"id": "opt_abc", "text": "Done"});
+        let result = extract_single_select(&value);
+        assert_eq!(
+            result,
+            Some((Some("opt_abc".to_string()), "Done".to_string()))
+        );
+    }
+
+    #[test]
+    fn extract_single_select_object_with_name_and_id() {
+        let value = serde_json::json!({"id": "opt_xyz", "name": "Review"});
+        let result = extract_single_select(&value);
+        assert_eq!(
+            result,
+            Some((Some("opt_xyz".to_string()), "Review".to_string()))
+        );
+    }
+
+    #[test]
+    fn extract_single_select_array_with_option_object() {
+        let value = serde_json::json!([{"id": "opt_ip", "text": "In Progress"}]);
+        let result = extract_single_select(&value);
+        assert_eq!(
+            result,
+            Some((Some("opt_ip".to_string()), "In Progress".to_string()))
+        );
+    }
+
+    #[test]
+    fn extract_single_select_segmented_text_array() {
+        let value = serde_json::json!([
+            {"text": "In ", "type": "text"},
+            {"text": "Progress", "type": "text"}
+        ]);
+        let result = extract_single_select(&value);
+        assert_eq!(result, Some((None, "In Progress".to_string())));
+    }
+
+    #[test]
+    fn resolve_status_handles_segmented_array_from_search_endpoint() {
+        // The search endpoint returns SingleSelect as a segmented text array.
+        // Before the fix, this would fall through to default_column.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task Status": [{"text": "In Progress", "type": "text"}]
+            }),
+        );
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("opt_ip".into(), KanbanColumn::InProgress);
+        let v = StatusValueMapping {
+            entries,
+            default_column: KanbanColumn::Todo,
+        };
+        let m = status_mapping();
+        // "In Progress" is recognized by the fuzzy parser even without an id match
+        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::InProgress);
+    }
+
+    #[test]
+    fn resolve_status_handles_array_option_object_from_search_endpoint() {
+        // Array of option objects shape: [{id, text}]
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task Status": [{"id": "opt_done", "text": "Done"}]
+            }),
+        );
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("opt_done".into(), KanbanColumn::Done);
+        let v = StatusValueMapping {
+            entries,
+            default_column: KanbanColumn::Todo,
+        };
+        let m = status_mapping();
+        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::Done);
     }
 
     #[test]
