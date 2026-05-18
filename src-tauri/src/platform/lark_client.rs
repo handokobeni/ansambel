@@ -488,11 +488,10 @@ impl LarkClient {
             );
             let resp = self
                 .send_with_retry("bitable_list", || {
-                    let mut req = self
-                        .http
-                        .get(&url)
-                        .bearer_auth(&token)
-                        .query(&[("page_size", DEFAULT_PAGE_SIZE.to_string())]);
+                    let mut req = self.http.get(&url).bearer_auth(&token).query(&[
+                        ("page_size", DEFAULT_PAGE_SIZE.to_string()),
+                        ("user_id_type", "open_id".to_string()),
+                    ]);
                     if let Some(f) = filter {
                         req = req.query(&[("filter", f)]);
                     }
@@ -612,7 +611,10 @@ impl LarkClient {
                         .http
                         .post(&url)
                         .bearer_auth(&token)
-                        .query(&[("page_size", DEFAULT_PAGE_SIZE.to_string())])
+                        .query(&[
+                            ("page_size", DEFAULT_PAGE_SIZE.to_string()),
+                            ("user_id_type", "open_id".to_string()),
+                        ])
                         .json(&body);
                     if let Some(pt) = page_token.as_ref() {
                         req = req.query(&[("page_token", pt.as_str())]);
@@ -638,6 +640,13 @@ impl LarkClient {
                 ))
             })?;
             if parsed.code != 0 {
+                let body_str = serde_json::to_string(&body).unwrap_or_default();
+                tracing::warn!(
+                    code = parsed.code,
+                    msg = %parsed.msg,
+                    body = %body_str,
+                    "Lark records/search returned non-zero code"
+                );
                 return Err(AppError::Lark(format!(
                     "bitable_search_records code {}: {}",
                     parsed.code, parsed.msg
@@ -2188,6 +2197,7 @@ mod tests {
                 "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
             ))
             .and(header_exists("Authorization"))
+            .and(query_param("user_id_type", "open_id"))
             .and(body_json(serde_json::json!({
                 "filter": {
                     "conjunction": "and",
@@ -2240,7 +2250,7 @@ mod tests {
     #[tokio::test]
     async fn bitable_search_records_posts_or_conjunction() {
         use crate::state::{FilterCondition, FilterConjunction, FilterOperator, FilterSpec};
-        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::matchers::{body_partial_json, method, path, query_param};
 
         let mock = MockServer::start().await;
         mount_token(&mock).await;
@@ -2248,6 +2258,7 @@ mod tests {
             .and(path(
                 "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
             ))
+            .and(query_param("user_id_type", "open_id"))
             .and(body_partial_json(serde_json::json!({
                 "filter": { "conjunction": "or" }
             })))
@@ -2297,6 +2308,7 @@ mod tests {
                 "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
             ))
             .and(query_param("page_size", "500"))
+            .and(query_param("user_id_type", "open_id"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "code": 0, "msg": "ok",
                 "data": {
@@ -2314,6 +2326,7 @@ mod tests {
                 "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
             ))
             .and(query_param("page_token", "tok2"))
+            .and(query_param("user_id_type", "open_id"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "code": 0, "msg": "ok",
                 "data": {
@@ -2358,7 +2371,7 @@ mod tests {
         // filter body. `field_id` is used internally for rename-resilient
         // lookups but must be stripped before the request leaves the client.
         use crate::state::{FilterCondition, FilterConjunction, FilterOperator, FilterSpec};
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
         let mock = MockServer::start().await;
@@ -2368,6 +2381,7 @@ mod tests {
             .and(path(
                 "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
             ))
+            .and(query_param("user_id_type", "open_id"))
             .and(move |req: &Request| {
                 // Assertion: the serialised body must not contain the string
                 // "field_id" — Lark returns code 1254018 if it does.
