@@ -294,4 +294,42 @@ describe('TasksStore', () => {
     expect(store.tasks.get('r1')?.has('tk_new_a')).toBe(true);
     expect(store.tasks.get('r2')?.has('tk_new_b')).toBe(true);
   });
+
+  it('refresh sets isLoading(repoId) true while the IPC call is in-flight and false after', async () => {
+    const store = new TasksStore();
+    let resolveRefresh!: (value: ReturnType<typeof makeTask>[]) => void;
+    const pending = new Promise<ReturnType<typeof makeTask>[]>((r) => {
+      resolveRefresh = r;
+    });
+    vi.mocked(api.task.refresh).mockReturnValueOnce(
+      pending as Promise<ReturnType<typeof makeTask>[]>
+    );
+
+    expect(store.isLoading('r')).toBe(false);
+
+    const refreshPromise = store.refresh('r');
+    // Still in-flight — loading must be true
+    expect(store.isLoading('r')).toBe(true);
+
+    resolveRefresh([makeTask({ id: 'tk_1', repo_id: 'r' })]);
+    await refreshPromise;
+
+    expect(store.isLoading('r')).toBe(false);
+  });
+
+  it('refresh sets isLoading(repoId) false even when the IPC call rejects', async () => {
+    const store = new TasksStore();
+    vi.mocked(api.task.refresh).mockRejectedValueOnce(new Error('network error'));
+
+    const refreshPromise = store.refresh('r');
+    expect(store.isLoading('r')).toBe(true);
+
+    await refreshPromise.catch(() => {});
+    expect(store.isLoading('r')).toBe(false);
+  });
+
+  it('isLoading returns false for a repo that has never had a refresh', () => {
+    const store = new TasksStore();
+    expect(store.isLoading('r_unknown')).toBe(false);
+  });
 });

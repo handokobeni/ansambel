@@ -89,10 +89,13 @@
       }
     }
     if (repos.selectedRepoId) {
-      await Promise.all([
-        workspaces.loadForRepo(repos.selectedRepoId),
-        tasks.loadForRepo(repos.selectedRepoId),
-      ]);
+      const repoId = repos.selectedRepoId;
+      // If the repo has a Lark binding, use refresh() so the first paint
+      // reflects the persisted filter (refresh calls the Lark provider which
+      // applies binding.filters server-side). For local-only repos, loadForRepo
+      // reads the AppState mirror which is populated on startup from disk.
+      const taskLoad = larkBindings.has(repoId) ? tasks.refresh(repoId) : tasks.loadForRepo(repoId);
+      await Promise.all([workspaces.loadForRepo(repoId), taskLoad]);
     }
 
     listen<string>('lark-migrated', () => {

@@ -5,6 +5,7 @@
   import TaskCard from './TaskCard.svelte';
   import FilterBar from './FilterBar.svelte';
   import { larkBindings } from '$lib/stores/lark-bindings.svelte';
+  import { tasks as tasksStore } from '$lib/stores/tasks.svelte';
 
   const {
     repoId,
@@ -203,11 +204,17 @@
         onconsider={(e) => handleConsider(col.id, e)}
         onfinalize={(e) => handleFinalize(col.id, e)}
       >
-        {#each itemsFor(col.id) as task (task.id)}
-          <TaskCard {task} onRemove={onRemoveTask} />
+        {#if tasksStore.isLoading(repoId) && (larkBindings.get(repoId)?.filters?.conditions?.length ?? 0) > 0}
+          <p class="text-xs text-[var(--text-muted)] text-center py-4 italic">
+            Loading filtered view…
+          </p>
         {:else}
-          <p class="text-xs text-[var(--text-muted)] text-center py-4 italic">No tasks</p>
-        {/each}
+          {#each itemsFor(col.id) as task (task.id)}
+            <TaskCard {task} onRemove={onRemoveTask} />
+          {:else}
+            <p class="text-xs text-[var(--text-muted)] text-center py-4 italic">No tasks</p>
+          {/each}
+        {/if}
       </div>
 
       {#if col.id === 'todo'}

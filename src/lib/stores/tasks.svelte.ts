@@ -6,7 +6,12 @@ import type { Task, CreateTaskArgs, TaskPatch, KanbanColumn } from '$lib/types';
 
 export class TasksStore {
   readonly tasks = new SvelteMap<string, SvelteMap<string, Task>>();
+  readonly loadingByRepo = new SvelteMap<string, boolean>();
   selectedTaskId = $state<string | null>(null);
+
+  isLoading(repoId: string): boolean {
+    return this.loadingByRepo.get(repoId) === true;
+  }
 
   private getOrCreate(repoId: string): SvelteMap<string, Task> {
     let map = this.tasks.get(repoId);
@@ -79,21 +84,30 @@ export class TasksStore {
   }
 
   async refresh(repoId?: string): Promise<void> {
-    const tasks = await api.task.refresh(repoId);
     if (repoId !== undefined) {
-      // Clear only the entries for this repo then re-populate
-      const map = this.getOrCreate(repoId);
-      map.clear();
-      for (const task of tasks) {
-        this.getOrCreate(task.repo_id).set(task.id, task);
-      }
-    } else {
-      // Global refresh — clear all nested maps then re-populate by repo_id
-      for (const [, map] of this.tasks) {
+      this.loadingByRepo.set(repoId, true);
+    }
+    try {
+      const tasks = await api.task.refresh(repoId);
+      if (repoId !== undefined) {
+        // Clear only the entries for this repo then re-populate
+        const map = this.getOrCreate(repoId);
         map.clear();
+        for (const task of tasks) {
+          this.getOrCreate(task.repo_id).set(task.id, task);
+        }
+      } else {
+        // Global refresh — clear all nested maps then re-populate by repo_id
+        for (const [, map] of this.tasks) {
+          map.clear();
+        }
+        for (const task of tasks) {
+          this.getOrCreate(task.repo_id).set(task.id, task);
+        }
       }
-      for (const task of tasks) {
-        this.getOrCreate(task.repo_id).set(task.id, task);
+    } finally {
+      if (repoId !== undefined) {
+        this.loadingByRepo.set(repoId, false);
       }
     }
   }

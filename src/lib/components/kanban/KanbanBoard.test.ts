@@ -1,13 +1,28 @@
 // src/lib/components/kanban/KanbanBoard.test.ts
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SHADOW_ITEM_MARKER_PROPERTY_NAME } from 'svelte-dnd-action';
 import { render, screen } from '@testing-library/svelte';
 import KanbanBoard from './KanbanBoard.svelte';
-import type { Task } from '$lib/types';
+import type { Task, BitableBinding } from '$lib/types';
 
+// lark-bindings mock — default: no binding (local-only repo).
+// Use vi.fn() directly inside the factory (hoisted-safe pattern).
 vi.mock('$lib/stores/lark-bindings.svelte', () => ({
   larkBindings: { get: vi.fn(() => undefined) },
 }));
+
+// tasks store mock — default: not loading.
+vi.mock('$lib/stores/tasks.svelte', () => ({
+  tasks: { isLoading: vi.fn(() => false) },
+}));
+
+import { larkBindings } from '$lib/stores/lark-bindings.svelte';
+import { tasks as tasksStoreMock } from '$lib/stores/tasks.svelte';
+
+beforeEach(() => {
+  vi.mocked(larkBindings.get).mockReturnValue(undefined);
+  vi.mocked(tasksStoreMock.isLoading).mockReturnValue(false);
+});
 
 const COLUMNS = ['Todo', 'In Progress', 'Review', 'Done'];
 
@@ -228,5 +243,103 @@ describe('KanbanBoard drag behavior', () => {
     // Only 1 Add task button should exist (Todo column only)
     const addBtns = screen.getAllByRole('button', { name: /add task/i });
     expect(addBtns.length).toBe(1);
+  });
+});
+
+describe('KanbanBoard loading state', () => {
+  const makeBinding = (conditionsLength: number): BitableBinding => ({
+    app_token: 'apptoken',
+    table_id: 'tableId',
+    filters: {
+      conjunction: 'and',
+      conditions: Array.from({ length: conditionsLength }, (_, i) => ({
+        field_id: `fld_${i}`,
+        field_name: `Field${i}`,
+        operator: 'is' as const,
+        value: [`val${i}`],
+      })),
+    },
+    field_mapping: {
+      title: { field_id: 'fld_title', field_name: 'Title' },
+      description: null,
+      status: null,
+      order: null,
+    },
+    status_value_mapping: { entries: {}, default_column: 'todo' as const },
+    created_at: 0,
+    updated_at: 0,
+  });
+
+  it('shows "Loading filtered view…" when binding has filters and tasks are loading', () => {
+    vi.mocked(larkBindings.get).mockReturnValue(makeBinding(1));
+    vi.mocked(tasksStoreMock.isLoading).mockReturnValue(true);
+
+    const task = makeTask({ title: 'Should not show', column: 'todo' });
+    render(KanbanBoard, {
+      props: {
+        repoId: 'repo_abc123',
+        tasks: [task],
+        onMove: vi.fn(),
+        onAddTask: vi.fn(),
+        onRemoveTask: vi.fn(),
+      },
+    });
+
+    expect(screen.getAllByText(/loading filtered view/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText('Should not show')).toBeNull();
+  });
+
+  it('shows "No tasks" when binding has filters but tasks finished loading with no matches', () => {
+    vi.mocked(larkBindings.get).mockReturnValue(makeBinding(1));
+    vi.mocked(tasksStoreMock.isLoading).mockReturnValue(false);
+
+    render(KanbanBoard, {
+      props: {
+        repoId: 'repo_abc123',
+        tasks: [],
+        onMove: vi.fn(),
+        onAddTask: vi.fn(),
+        onRemoveTask: vi.fn(),
+      },
+    });
+
+    expect(screen.queryByText(/loading filtered view/i)).toBeNull();
+    expect(screen.getAllByText(/no tasks/i).length).toBeGreaterThan(0);
+  });
+
+  it('does not show loading placeholder when repo has no binding (local mode)', () => {
+    vi.mocked(larkBindings.get).mockReturnValue(undefined);
+    vi.mocked(tasksStoreMock.isLoading).mockReturnValue(true); // loading is true but no binding = should not show placeholder
+
+    render(KanbanBoard, {
+      props: {
+        repoId: 'repo_abc123',
+        tasks: [],
+        onMove: vi.fn(),
+        onAddTask: vi.fn(),
+        onRemoveTask: vi.fn(),
+      },
+    });
+
+    expect(screen.queryByText(/loading filtered view/i)).toBeNull();
+    expect(screen.getAllByText(/no tasks/i).length).toBeGreaterThan(0);
+  });
+
+  it('does not show loading placeholder when binding has no active filters', () => {
+    vi.mocked(larkBindings.get).mockReturnValue(makeBinding(0)); // binding exists but 0 conditions
+    vi.mocked(tasksStoreMock.isLoading).mockReturnValue(true);
+
+    render(KanbanBoard, {
+      props: {
+        repoId: 'repo_abc123',
+        tasks: [],
+        onMove: vi.fn(),
+        onAddTask: vi.fn(),
+        onRemoveTask: vi.fn(),
+      },
+    });
+
+    expect(screen.queryByText(/loading filtered view/i)).toBeNull();
+    expect(screen.getAllByText(/no tasks/i).length).toBeGreaterThan(0);
   });
 });
