@@ -263,7 +263,7 @@
             aria-label="conjunction"
             value={filters.conjunction}
             onchange={(e) => setConjunction(e.currentTarget.value as 'and' | 'or')}
-            class="px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-hover)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] cursor-pointer"
+            class="px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] cursor-pointer"
           >
             <option value="and">all</option>
             <option value="or">any</option>
@@ -286,7 +286,7 @@
               aria-label="field"
               value={cond.field_id}
               onchange={(e) => changeField(idx, e.currentTarget.value)}
-              class="flex-1 min-w-0 px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-hover)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] cursor-pointer"
+              class="flex-1 min-w-0 px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] cursor-pointer"
             >
               {#if fields.length === 0}
                 <!-- No fields loaded yet — show current name as placeholder -->
@@ -303,7 +303,7 @@
               aria-label="operator"
               value={cond.operator}
               onchange={(e) => changeOperator(idx, e.currentTarget.value as FilterOperator)}
-              class="flex-1 min-w-0 px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-hover)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] cursor-pointer"
+              class="flex-1 min-w-0 px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] cursor-pointer"
             >
               {#each opsForRow as op (op)}
                 <option value={op}>{op}</option>
@@ -320,7 +320,7 @@
                   aria-label="value"
                   value={cond.value[0] ?? ''}
                   onchange={(e) => changeValue(idx, e.currentTarget.value)}
-                  class="flex-1 min-w-0 px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-hover)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] cursor-pointer"
+                  class="flex-1 min-w-0 px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] cursor-pointer"
                 >
                   {#each opts as opt (opt.id)}
                     <option value={opt.name}>{opt.name}</option>
@@ -333,7 +333,7 @@
                   aria-label="value"
                   value={cond.value[0] ?? ''}
                   onchange={(e) => changeValue(idx, e.currentTarget.value)}
-                  class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-hover)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                 />
               {:else if fieldType === 2}
                 <!-- Number -->
@@ -342,7 +342,7 @@
                   aria-label="value"
                   value={cond.value[0] ?? ''}
                   onchange={(e) => changeValue(idx, e.currentTarget.value)}
-                  class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-hover)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                 />
               {:else if fieldType === 11}
                 <!-- Person (type 11) → <select> from fetched person options -->
@@ -352,11 +352,15 @@
                     aria-label="value"
                     value={cond.value[0] ?? ''}
                     onchange={(e) => changeValue(idx, e.currentTarget.value)}
-                    class="flex-1 min-w-0 px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-hover)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] cursor-pointer"
+                    class="flex-1 min-w-0 px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] cursor-pointer"
                     data-testid="person-select"
                   >
+                    <!--
+                      Lark's Person filter matches by display name, not open_id.
+                      Two people with identical names would collide — same as Lark's own filter UI.
+                    -->
                     {#each personOpts as opt (opt.open_id)}
-                      <option value={opt.open_id}>{opt.name}</option>
+                      <option value={opt.name}>{opt.name}</option>
                     {/each}
                   </select>
                 {:else}
@@ -366,7 +370,7 @@
                     aria-label="value"
                     value={cond.value[0] ?? ''}
                     onchange={(e) => changeValue(idx, e.currentTarget.value)}
-                    class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-hover)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                    class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                   />
                 {/if}
               {:else}
@@ -376,7 +380,7 @@
                   aria-label="value"
                   value={cond.value[0] ?? ''}
                   onchange={(e) => changeValue(idx, e.currentTarget.value)}
-                  class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-hover)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                 />
               {/if}
             {:else}

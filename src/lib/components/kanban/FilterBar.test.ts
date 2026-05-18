@@ -392,7 +392,9 @@ describe('FilterBar Person field value picker', () => {
               field_id: 'fldPIC',
               field_name: 'PIC',
               operator: 'is' as const,
-              value: ['ou_alice'],
+              // Regression: value must be the person's display name (not open_id)
+              // because Lark's Bitable filter API matches Person fields by name.
+              value: ['Alice'],
             },
           ],
         },
@@ -413,6 +415,67 @@ describe('FilterBar Person field value picker', () => {
     expect(personSelect).toBeTruthy();
     expect(screen.queryByText('Alice')).toBeInTheDocument();
     expect(screen.queryByText('Bob')).toBeInTheDocument();
+
+    // Regression: each <option> must carry the person's NAME as value — not open_id —
+    // because Lark's Bitable records/search filter API matches Person fields by display name.
+    const aliceOption = personSelect.querySelector('option[value="Alice"]') as HTMLOptionElement;
+    expect(aliceOption).toBeTruthy();
+    const bobOption = personSelect.querySelector('option[value="Bob"]') as HTMLOptionElement;
+    expect(bobOption).toBeTruthy();
+    // Ensure open_id is NOT used as the option value
+    expect(personSelect.querySelector('option[value="ou_alice"]')).toBeNull();
+    expect(personSelect.querySelector('option[value="ou_bob"]')).toBeNull();
+  });
+
+  it('sends person NAME (not open_id) to filterStore.update when selection changes', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fldPIC', field_name: 'PIC', type: 11, is_primary: false, property: null },
+    ]);
+    vi.mocked(api.lark.listPersonOptions).mockResolvedValue([
+      { open_id: 'ou_fikri', name: 'Fikri' },
+      { open_id: 'ou_beni', name: 'Beni' },
+    ]);
+
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fldPIC',
+              field_name: 'PIC',
+              operator: 'is' as const,
+              value: [''],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    await tick();
+
+    const personSelect = document.querySelector(
+      '[data-testid="person-select"]'
+    ) as HTMLSelectElement;
+    expect(personSelect).toBeTruthy();
+
+    // Simulate user picking 'Fikri' from the dropdown
+    await fireEvent.change(personSelect, { target: { value: 'Fikri' } });
+
+    // filterStore.update must be called with the person's name, never open_id
+    expect(filterStore.update).toHaveBeenCalledWith(
+      'repo-1',
+      expect.objectContaining({
+        conditions: [expect.objectContaining({ value: ['Fikri'] })],
+      })
+    );
+    // Regression guard: open_id must NOT be sent
+    const lastCall = vi.mocked(filterStore.update).mock.lastCall;
+    const sentValue = lastCall?.[1]?.conditions?.[0]?.value?.[0];
+    expect(sentValue).not.toMatch(/^ou_/);
   });
 
   it('falls back to text input when listPersonOptions errors', async () => {
