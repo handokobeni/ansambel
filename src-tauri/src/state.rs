@@ -148,6 +148,15 @@ pub struct PersonOption {
     pub name: String,
 }
 
+/// One option resolved by following a Lookup field's chain to its source
+/// SingleSelect field. Used by the FilterBar to render a dropdown for
+/// Lookup (type 19) conditions instead of a free-text input.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SingleSelectOption {
+    pub option_id: String,
+    pub name: String,
+}
+
 /// What `BitableSchemaDetector::propose_mapping` returns to the wizard.
 /// Carries the raw field list (for dropdown population), an auto-detected
 /// initial guess at the mapping, and (when status is single-select) the

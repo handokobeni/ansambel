@@ -261,6 +261,7 @@ pub fn run() {
             crate::commands::lark_repo_binding::detect_lark_schema,
             crate::commands::lark_repo_binding::list_lark_fields,
             crate::commands::lark_repo_binding::list_lark_person_options,
+            crate::commands::lark_repo_binding::list_lark_lookup_options,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
