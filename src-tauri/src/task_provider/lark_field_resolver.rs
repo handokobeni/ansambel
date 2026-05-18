@@ -9,17 +9,46 @@ use crate::state::{FieldMapping, FieldRef, KanbanColumn, ProposedMapping, Status
 use crate::task_provider::lark::parse_kanban_column;
 use std::sync::Arc;
 
-/// Reads a field's string value off a record by `field_id`. Bitable
+/// Extract text from a Bitable field value, accepting both shapes:
+/// - Plain string (returned by the list endpoint): `"text content"`
+/// - Segmented array (returned by the search endpoint): `[{"text": "...", "type": "text"}, ...]`
+///
+/// Segments are concatenated in order. Returns None if the value is neither shape
+/// or yields an empty string.
+pub(crate) fn extract_text(value: &serde_json::Value) -> Option<String> {
+    if let Some(s) = value.as_str() {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+        return None;
+    }
+    if let Some(arr) = value.as_array() {
+        let mut buf = String::new();
+        for seg in arr {
+            if let Some(t) = seg.get("text").and_then(serde_json::Value::as_str) {
+                buf.push_str(t);
+            }
+        }
+        let trimmed = buf.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    None
+}
+
+/// Reads a field's string value off a record by field name. Bitable
 /// returns record fields keyed by name in the JSON payload, so we look
 /// it up by name; the resolver passes the `field_name` cached on the
 /// `FieldRef`. Returns `None` if the field is missing/null/empty.
-fn read_string_by_name<'a>(record: &'a BitableRecord, field_name: &str) -> Option<&'a str> {
-    record
-        .fields
-        .as_object()
-        .and_then(|m| m.get(field_name))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
+///
+/// Handles both shapes returned by Lark Bitable:
+/// - Plain string (list endpoint)
+/// - Segmented array `[{"text": "...", "type": "text"}, ...]` (search endpoint)
+fn read_string_by_name(record: &BitableRecord, field_name: &str) -> Option<String> {
+    let value = record.fields.as_object()?.get(field_name)?;
+    extract_text(value)
 }
 
 /// Reads a field as plain text, tolerating the several shapes Lark
@@ -114,11 +143,11 @@ pub fn resolve_title(
     primary_field_name: Option<&str>,
 ) -> Result<String> {
     if let Some(v) = read_string_by_name(record, &mapping.title.field_name) {
-        return Ok(v.to_string());
+        return Ok(v);
     }
     if let Some(p) = primary_field_name {
         if let Some(v) = read_string_by_name(record, p) {
-            return Ok(v.to_string());
+            return Ok(v);
         }
     }
     Err(AppError::Lark(format!(
@@ -346,6 +375,100 @@ mod tests {
         let err = resolve_title(&r, &m, Some("Task name")).unwrap_err();
         assert!(err.to_string().contains("missing title"));
         assert!(err.to_string().contains("r1"));
+    }
+
+    // ── extract_text unit tests ─────────────────────────────────────────────
+
+    #[test]
+    fn extract_text_handles_plain_string_from_list_endpoint() {
+        let value = serde_json::json!("Hello world");
+        assert_eq!(extract_text(&value), Some("Hello world".to_string()));
+    }
+
+    #[test]
+    fn extract_text_handles_segmented_array_from_search_endpoint() {
+        let value = serde_json::json!([
+            { "text": "Hello ", "type": "text" },
+            { "text": "world", "type": "text" }
+        ]);
+        assert_eq!(extract_text(&value), Some("Hello world".to_string()));
+    }
+
+    #[test]
+    fn extract_text_returns_none_for_null() {
+        let value = serde_json::Value::Null;
+        assert_eq!(extract_text(&value), None);
+    }
+
+    #[test]
+    fn extract_text_returns_none_for_empty_array() {
+        let value = serde_json::json!([]);
+        assert_eq!(extract_text(&value), None);
+    }
+
+    #[test]
+    fn extract_text_returns_none_for_array_without_text_keys() {
+        let value = serde_json::json!([{ "type": "user", "id": "ou_x" }]);
+        assert_eq!(extract_text(&value), None);
+    }
+
+    #[test]
+    fn extract_text_returns_none_for_empty_string() {
+        let value = serde_json::json!("   ");
+        assert_eq!(extract_text(&value), None);
+    }
+
+    // ── resolve_title with search-endpoint segmented array shape ────────────
+
+    #[test]
+    fn resolve_title_handles_segmented_array_from_search_endpoint() {
+        // The search endpoint returns text fields as segmented arrays.
+        // Before the fix, read_string_by_name called .as_str() which returned
+        // None for arrays, causing every search-result record to be skipped.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task name": [{ "text": "User bisa filter", "type": "text" }]
+            }),
+        );
+        let m = title_mapping("Task name");
+        assert_eq!(resolve_title(&r, &m, None).unwrap(), "User bisa filter");
+    }
+
+    #[test]
+    fn resolve_title_falls_back_to_segmented_primary_field() {
+        // Primary field also returns segmented shape from search endpoint.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "title": "",
+                "Task name": [
+                    { "text": "User bisa mendapatkan narasi", "type": "text" },
+                    { "text": " lebih lanjut", "type": "text" }
+                ]
+            }),
+        );
+        let m = title_mapping("title");
+        assert_eq!(
+            resolve_title(&r, &m, Some("Task name")).unwrap(),
+            "User bisa mendapatkan narasi lebih lanjut"
+        );
+    }
+
+    #[test]
+    fn resolve_title_handles_both_plain_string_and_segmented_parity() {
+        // Both shapes should yield the same title string — confirming list and
+        // search endpoint records are parsed identically.
+        let plain = rec("r1", serde_json::json!({"Task name": "User bisa filter"}));
+        let segmented = rec(
+            "r2",
+            serde_json::json!({"Task name": [{"text": "User bisa filter", "type": "text"}]}),
+        );
+        let m = title_mapping("Task name");
+        assert_eq!(
+            resolve_title(&plain, &m, None).unwrap(),
+            resolve_title(&segmented, &m, None).unwrap()
+        );
     }
 
     #[test]
