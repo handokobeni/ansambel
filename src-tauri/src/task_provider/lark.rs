@@ -14,7 +14,7 @@ use crate::state::{
     StatusValueMapping, Task,
 };
 use crate::task_provider::lark_field_resolver::{
-    resolve_description, resolve_order, resolve_status, resolve_title,
+    extract_single_select, resolve_description, resolve_order, resolve_status, resolve_title,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -410,6 +410,7 @@ impl TaskProvider for LarkProvider {
             .await;
         let total_records = records.len();
         let mut skipped = 0usize;
+        let mut sampled = 0usize;
 
         // Per-path resolution counters for the end-of-loop summary.
         struct PathCounts {
@@ -431,13 +432,32 @@ impl TaskProvider for LarkProvider {
             .iter()
             .filter_map(|r| {
                 // Resolve status with path tag for diagnostics and counting.
-                let (_, resolution_path) =
+                let (col, resolution_path) =
                     crate::task_provider::lark_field_resolver::resolve_status(
                         r,
                         &self.field_mapping,
                         &self.status_value_mapping,
                         status_opts,
                     );
+                if sampled < 3 {
+                    sampled += 1;
+                    let status_field_name =
+                        self.field_mapping.status.as_ref().map(|f| &f.field_name);
+                    let raw = status_field_name
+                        .and_then(|name| r.fields.get(name).cloned());
+                    let extracted = raw.as_ref().and_then(extract_single_select);
+                    tracing::info!(
+                        record_id = %r.record_id,
+                        field_name = ?status_field_name,
+                        raw = ?raw,
+                        extracted = ?extracted,
+                        resolved = ?col,
+                        resolution_path = %resolution_path,
+                        entries_count = self.status_value_mapping.entries.len(),
+                        status_options_count = self.status_options.get().map(|v| v.len()).unwrap_or(0),
+                        "Phase 3a-3.1: status resolution sample"
+                    );
+                }
                 match resolution_path {
                     "id-exact" => path_counts.id_exact += 1,
                     "fuzzy-parse" => path_counts.fuzzy_parse += 1,
@@ -468,7 +488,7 @@ impl TaskProvider for LarkProvider {
             })
             .collect();
 
-        tracing::debug!(
+        tracing::info!(
             total = total_records,
             id_exact = path_counts.id_exact,
             fuzzy_parse = path_counts.fuzzy_parse,
