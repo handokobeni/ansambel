@@ -331,6 +331,12 @@ export type BitableOption = { id: string; name: string };
  *  populate the value picker for Person-type (type 11) fields. */
 export type PersonOption = { open_id: string; name: string };
 
+/** One option resolved by following a Lookup (type 19) field's chain to its
+ *  source SingleSelect. Used by FilterBar to render a dropdown for Lookup
+ *  conditions. The `option_id` is sent as the filter value — Lark stores
+ *  Lookup values as option_ids in records. */
+export type SingleSelectOption = { option_id: string; name: string };
+
 export type ProposedMapping = {
   fields: BitableField[];
   suggested: FieldMapping;
