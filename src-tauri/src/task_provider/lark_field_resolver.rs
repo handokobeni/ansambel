@@ -175,7 +175,9 @@ pub fn resolve_description(record: &BitableRecord, mapping: &FieldMapping) -> St
 /// - Plain string: `"In Progress"` (id absent, name = the string)
 /// - Object: `{ "id": "opt_xxx", "text": "In Progress" }` or `{..., "name": "In Progress"}`
 /// - Array: `[{ "id": "opt_xxx", "text": "In Progress" }]` — first element
+/// - Plain-string array: `["Done"]` — take first element (Lookup-unwrapped values)
 /// - Segmented text array: `[{ "text": "...", "type": "text" }]` — concatenate text
+/// - Lookup field wrapper: `{ "type": N, "value": [<inner>] }` — unwrap and recurse
 pub(crate) fn extract_single_select(value: &serde_json::Value) -> Option<(Option<String>, String)> {
     use serde_json::Value;
     // Plain string
@@ -185,7 +187,22 @@ pub(crate) fn extract_single_select(value: &serde_json::Value) -> Option<(Option
         }
         return Some((None, s.to_string()));
     }
-    // Object
+    // Lookup field wrapper: { "type": N, "value": [<inner>] }
+    // Lark returns Lookup fields as { type, value } where `value` is an array of the
+    // resolved inner values. Detect by presence of both "type" and "value" keys (but
+    // NOT "id", which distinguishes it from a native SingleSelect object).
+    // Must be checked before the generic object branch below.
+    if let Some(obj) = value.as_object() {
+        if obj.contains_key("type") && obj.contains_key("value") && !obj.contains_key("id") {
+            if let Some(inner) = obj.get("value") {
+                if let Some(result) = extract_single_select(inner) {
+                    return Some(result);
+                }
+            }
+            return None;
+        }
+    }
+    // Object (native SingleSelect: { "id": "opt_xxx", "text": "..." })
     if let Some(obj) = value.as_object() {
         let id = obj.get("id").and_then(Value::as_str).map(str::to_string);
         let name = obj
@@ -195,7 +212,7 @@ pub(crate) fn extract_single_select(value: &serde_json::Value) -> Option<(Option
             .map(str::to_string)?;
         return Some((id, name));
     }
-    // Array of objects
+    // Array of objects or plain strings
     if let Some(arr) = value.as_array() {
         // Try first element as option object
         if let Some(first) = arr.first() {
@@ -211,6 +228,12 @@ pub(crate) fn extract_single_select(value: &serde_json::Value) -> Option<(Option
                     if id.is_some() || !obj.contains_key("type") {
                         return Some((id, name.to_string()));
                     }
+                }
+            }
+            // Plain string element (e.g. Lookup-unwrapped values: ["Done"])
+            if let Some(s) = first.as_str() {
+                if !s.is_empty() {
+                    return Some((None, s.to_string()));
                 }
             }
         }
@@ -867,6 +890,66 @@ mod tests {
         ]);
         let result = extract_single_select(&value);
         assert_eq!(result, Some((None, "In Progress".to_string())));
+    }
+
+    // ── Lookup field wrapper tests ──────────────────────────────────────────
+
+    #[test]
+    fn extract_single_select_unwraps_lookup_wrapper_with_singleselect_inner() {
+        // Lark Lookup field shape: { "type": 3, "value": ["Done"] }
+        let value = serde_json::json!({
+            "type": 3,
+            "value": ["Done"]
+        });
+        let result = extract_single_select(&value);
+        assert_eq!(result, Some((None, "Done".to_string())));
+    }
+
+    #[test]
+    fn extract_single_select_unwraps_lookup_wrapper_with_multi_value() {
+        // Lookup may return multiple resolved values; we take the first.
+        let value = serde_json::json!({
+            "type": 3,
+            "value": ["In Progress", "Done"]
+        });
+        let result = extract_single_select(&value);
+        assert_eq!(result, Some((None, "In Progress".to_string())));
+    }
+
+    #[test]
+    fn extract_single_select_handles_plain_string_array() {
+        // Plain-string array (e.g. after Lookup wrapper is unwrapped)
+        let value = serde_json::json!(["Done"]);
+        let result = extract_single_select(&value);
+        assert_eq!(result, Some((None, "Done".to_string())));
+    }
+
+    #[test]
+    fn extract_single_select_returns_none_for_lookup_wrapper_with_empty_value() {
+        let value = serde_json::json!({ "type": 3, "value": [] });
+        let result = extract_single_select(&value);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn resolve_status_handles_lookup_wrapped_status_field() {
+        // Lark Lookup field returns { "type": 3, "value": ["Done"] }.
+        // With no entries configured (Lookup fields can't populate the wizard),
+        // resolution must fall through to the fuzzy English parser.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task Status": { "type": 3, "value": ["Done"] }
+            }),
+        );
+        let v = StatusValueMapping {
+            entries: std::collections::HashMap::new(),
+            default_column: KanbanColumn::Todo,
+        };
+        let m = status_mapping();
+        let (col, path) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::Done);
+        assert_eq!(path, "fuzzy-parse");
     }
 
     #[test]

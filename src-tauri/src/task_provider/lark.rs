@@ -410,7 +410,6 @@ impl TaskProvider for LarkProvider {
             .await;
         let total_records = records.len();
         let mut skipped = 0usize;
-        let mut sampled = 0u32;
 
         // Per-path resolution counters for the end-of-loop summary.
         struct PathCounts {
@@ -432,7 +431,7 @@ impl TaskProvider for LarkProvider {
             .iter()
             .filter_map(|r| {
                 // Resolve status with path tag for diagnostics and counting.
-                let (resolved_column, resolution_path) =
+                let (_, resolution_path) =
                     crate::task_provider::lark_field_resolver::resolve_status(
                         r,
                         &self.field_mapping,
@@ -445,34 +444,6 @@ impl TaskProvider for LarkProvider {
                     "options-name-match" => path_counts.options_name += 1,
                     "entries-case-insensitive" => path_counts.entries_ci += 1,
                     _ => path_counts.default_fallback += 1,
-                }
-
-                // Emit unconditional info log for the first 3 records per call so
-                // the raw status field value and resolution path appear in normal
-                // app logs without requiring RUST_LOG=debug.
-                if sampled < 3 {
-                    sampled += 1;
-                    if let Some(status_ref) = self.field_mapping.status.as_ref() {
-                        let raw = r
-                            .fields
-                            .as_object()
-                            .and_then(|o| o.get(&status_ref.field_name))
-                            .cloned();
-                        let extracted = raw.as_ref().and_then(
-                            crate::task_provider::lark_field_resolver::extract_single_select,
-                        );
-                        tracing::info!(
-                            record_id = %r.record_id,
-                            field_name = %status_ref.field_name,
-                            raw = ?raw,
-                            extracted = ?extracted,
-                            resolved = ?resolved_column,
-                            resolution_path = %resolution_path,
-                            entries_count = self.status_value_mapping.entries.len(),
-                            status_options_count = status_opts.len(),
-                            "Phase 3a-3.1: status resolution sample"
-                        );
-                    }
                 }
 
                 match record_to_task(
@@ -497,14 +468,14 @@ impl TaskProvider for LarkProvider {
             })
             .collect();
 
-        tracing::info!(
+        tracing::debug!(
             total = total_records,
             id_exact = path_counts.id_exact,
             fuzzy_parse = path_counts.fuzzy_parse,
             options_name = path_counts.options_name,
             entries_ci = path_counts.entries_ci,
             default_fallback = path_counts.default_fallback,
-            "Phase 3a-3.1: status resolution summary"
+            "status resolution summary"
         );
         if skipped > 0 {
             tracing::warn!(
