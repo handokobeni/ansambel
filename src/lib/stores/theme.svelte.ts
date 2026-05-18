@@ -92,6 +92,7 @@ class ThemeStore {
     }
     root.setAttribute('data-theme', this.themeId);
     root.setAttribute('data-mode', mode);
+    root.style.colorScheme = mode; // 'dark' or 'light'
   }
 
   /**
