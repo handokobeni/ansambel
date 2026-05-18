@@ -5,7 +5,12 @@ import { tick } from 'svelte';
 import FilterBar from './FilterBar.svelte';
 
 vi.mock('$lib/ipc', () => ({
-  api: { lark: { listFields: vi.fn(async () => []) } },
+  api: {
+    lark: {
+      listFields: vi.fn(async () => []),
+      listPersonOptions: vi.fn(async () => []),
+    },
+  },
 }));
 
 vi.mock('$lib/stores/lark-binding-filters.svelte', () => ({
@@ -37,6 +42,8 @@ beforeEach(() => {
   vi.mocked(filterStore.update).mockClear();
   vi.mocked(api.lark.listFields).mockClear();
   vi.mocked(api.lark.listFields).mockResolvedValue([]);
+  vi.mocked(api.lark.listPersonOptions).mockClear();
+  vi.mocked(api.lark.listPersonOptions).mockResolvedValue([]);
 });
 
 // ─── 1. Trigger button label ───────────────────────────────────────────────
@@ -363,7 +370,85 @@ describe('FilterBar per-type value pickers', () => {
   });
 });
 
-// ─── 8. Fields loaded lazily on popover open ───────────────────────────────
+// ─── 8. Person (type 11) value picker ─────────────────────────────────────
+
+describe('FilterBar Person field value picker', () => {
+  it('renders <select> populated from listPersonOptions when options are available', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fldPIC', field_name: 'PIC', type: 11, is_primary: false, property: null },
+    ]);
+    vi.mocked(api.lark.listPersonOptions).mockResolvedValue([
+      { open_id: 'ou_alice', name: 'Alice' },
+      { open_id: 'ou_bob', name: 'Bob' },
+    ]);
+
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fldPIC',
+              field_name: 'PIC',
+              operator: 'is' as const,
+              value: ['ou_alice'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    // Wait for fields + person options to load
+    await tick();
+    await tick();
+    await tick();
+
+    // listPersonOptions should have been called with the field name
+    expect(api.lark.listPersonOptions).toHaveBeenCalledWith('appA', 'tblA', 'PIC');
+    // A <select> with person names as options should be rendered
+    const personSelect = document.querySelector(
+      '[data-testid="person-select"]'
+    ) as HTMLSelectElement;
+    expect(personSelect).toBeTruthy();
+    expect(screen.queryByText('Alice')).toBeInTheDocument();
+    expect(screen.queryByText('Bob')).toBeInTheDocument();
+  });
+
+  it('falls back to text input when listPersonOptions errors', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fldPIC', field_name: 'PIC', type: 11, is_primary: false, property: null },
+    ]);
+    vi.mocked(api.lark.listPersonOptions).mockRejectedValueOnce(new Error('network failure'));
+
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fldPIC',
+              field_name: 'PIC',
+              operator: 'is' as const,
+              value: [''],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    await tick();
+
+    // No person-select — should fall back to text input
+    expect(document.querySelector('[data-testid="person-select"]')).not.toBeTruthy();
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+  });
+});
+
+// ─── 9. Fields loaded lazily on popover open ───────────────────────────────
 
 describe('FilterBar field loading', () => {
   it('fetches fields when popover is opened for the first time', async () => {

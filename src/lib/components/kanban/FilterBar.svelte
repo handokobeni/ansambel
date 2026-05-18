@@ -1,6 +1,13 @@
 <!-- src/lib/components/kanban/FilterBar.svelte -->
 <script lang="ts">
-  import type { FilterSpec, FilterCondition, FilterOperator, BitableField } from '$lib/types';
+  import type {
+    FilterSpec,
+    FilterCondition,
+    FilterOperator,
+    BitableField,
+    PersonOption,
+  } from '$lib/types';
+  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import { api } from '$lib/ipc';
   import { filterStore } from '$lib/stores/lark-binding-filters.svelte';
 
@@ -18,6 +25,13 @@
   let fields = $state<BitableField[]>([]);
   let fieldsLoaded = $state(false);
   let open = $state(false);
+
+  // Per-field-id cache of person options for type-11 (Person) fields.
+  // Populated lazily when the user picks a Person field or opens a
+  // condition that already has a Person field selected.
+  let personOptionsCache = new SvelteMap<string, PersonOption[]>();
+  // Track fetch errors so we can fall back to text input gracefully.
+  let personOptionsFailed = new SvelteSet<string>();
 
   const OPS_BY_TYPE: Record<number, FilterOperator[]> = {
     1: ['is', 'isNot', 'contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
@@ -69,6 +83,18 @@
     return (field.property as FieldProperty | null)?.options ?? [];
   }
 
+  /** Lazily load person options for a field. Cached per field_name.
+   *  Silently falls back to text input if the fetch fails. */
+  async function ensurePersonOptions(fieldName: string): Promise<void> {
+    if (personOptionsCache.has(fieldName) || personOptionsFailed.has(fieldName)) return;
+    try {
+      const opts = await api.lark.listPersonOptions(appToken, tableId, fieldName);
+      personOptionsCache.set(fieldName, opts);
+    } catch {
+      personOptionsFailed.add(fieldName);
+    }
+  }
+
   async function openPopover() {
     open = true;
     if (!fieldsLoaded) {
@@ -78,6 +104,13 @@
         fields = [];
       }
       fieldsLoaded = true;
+    }
+    // Pre-load person options for any existing type-11 conditions.
+    for (const cond of filters.conditions) {
+      const ft = fieldTypeForCondition(cond);
+      if (ft === 11) {
+        ensurePersonOptions(cond.field_name);
+      }
     }
   }
 
@@ -145,6 +178,10 @@
       conditions: filters.conditions.map((c, i) => (i === idx ? updated : c)),
     };
     await filterStore.update(repoId, next);
+    // Kick off person options fetch when switching to a Person field.
+    if (field.type === 11) {
+      ensurePersonOptions(field.field_name);
+    }
   }
 
   async function changeOperator(idx: number, op: FilterOperator) {
@@ -307,8 +344,33 @@
                   onchange={(e) => changeValue(idx, e.currentTarget.value)}
                   class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-hover)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                 />
+              {:else if fieldType === 11}
+                <!-- Person (type 11) → <select> from fetched person options -->
+                {@const personOpts = personOptionsCache.get(cond.field_name)}
+                {#if personOpts && personOpts.length > 0}
+                  <select
+                    aria-label="value"
+                    value={cond.value[0] ?? ''}
+                    onchange={(e) => changeValue(idx, e.currentTarget.value)}
+                    class="flex-1 min-w-0 px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-hover)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] cursor-pointer"
+                    data-testid="person-select"
+                  >
+                    {#each personOpts as opt (opt.open_id)}
+                      <option value={opt.open_id}>{opt.name}</option>
+                    {/each}
+                  </select>
+                {:else}
+                  <!-- Fallback: text input while loading or on error -->
+                  <input
+                    type="text"
+                    aria-label="value"
+                    value={cond.value[0] ?? ''}
+                    onchange={(e) => changeValue(idx, e.currentTarget.value)}
+                    class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-hover)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  />
+                {/if}
               {:else}
-                <!-- Text (type 1) or Person (type 11) or unknown -->
+                <!-- Text (type 1) or unknown -->
                 <input
                   type="text"
                   aria-label="value"
