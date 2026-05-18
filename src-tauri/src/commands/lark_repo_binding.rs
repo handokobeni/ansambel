@@ -173,6 +173,71 @@ pub async fn list_lark_fields(
         .map_err(|e| e.to_string())
 }
 
+pub(crate) async fn list_lark_person_options_inner(
+    app_token: &str,
+    table_id: &str,
+    field_name: &str,
+    data_dir: &std::path::Path,
+    store: &dyn crate::commands::lark_auth::SecretStore,
+) -> Result<Vec<crate::state::PersonOption>> {
+    let mut cfg = crate::commands::lark_auth::load_lark_config_inner(data_dir, store)
+        .map_err(|e| AppError::InvalidState(format!("global Lark credentials missing: {e}")))?;
+    cfg.app_token = app_token.to_string();
+    cfg.table_id = table_id.to_string();
+    let client = Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
+
+    // Fetch all records to enumerate person values present in the field.
+    let records = client
+        .bitable_list_records(app_token, table_id, None)
+        .await?;
+
+    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for rec in &records {
+        let Some(arr) = rec.fields.get(field_name).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for person_val in arr {
+            // Lark represents Person values as objects. Accept both
+            // `{"id": "...", "name": "..."}` and `{"open_id": "...", "name": "..."}` shapes.
+            let open_id = person_val
+                .get("open_id")
+                .or_else(|| person_val.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let name = person_val
+                .get("name")
+                .or_else(|| person_val.get("english_name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !open_id.is_empty() && !name.is_empty() {
+                seen.entry(open_id.to_string())
+                    .or_insert_with(|| name.to_string());
+            }
+        }
+    }
+
+    let mut options: Vec<crate::state::PersonOption> = seen
+        .into_iter()
+        .map(|(open_id, name)| crate::state::PersonOption { open_id, name })
+        .collect();
+    options.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(options)
+}
+
+#[tauri::command]
+pub async fn list_lark_person_options(
+    app_token: String,
+    table_id: String,
+    field_name: String,
+    app_handle: tauri::AppHandle,
+) -> std::result::Result<Vec<crate::state::PersonOption>, String> {
+    let data_dir = data_dir_from(&app_handle)?;
+    let store = crate::commands::lark_auth::KeyringStore;
+    list_lark_person_options_inner(&app_token, &table_id, &field_name, &data_dir, &store)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 fn data_dir_from(app_handle: &tauri::AppHandle) -> std::result::Result<PathBuf, String> {
     use tauri::Manager;
     app_handle
@@ -348,6 +413,127 @@ mod tests {
         assert_eq!(fields.len(), 2);
         assert_eq!(fields[0].field_name, "Title");
         assert_eq!(fields[1].field_name, "Status");
+    }
+
+    #[tokio::test]
+    async fn list_lark_person_options_inner_dedupes_persons_by_open_id() {
+        use wiremock::matchers::{method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "tenant_access_token": "t_test", "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        // Three records — person "ou_alice" appears in records 1 and 3; "ou_bob" in records 2 and 3.
+        Mock::given(method("GET"))
+            .and(wm_path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblA/records",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": {
+                    "items": [
+                        {
+                            "record_id": "rec1",
+                            "fields": {
+                                "PIC": [{"id": "ou_alice", "name": "Alice"}]
+                            }
+                        },
+                        {
+                            "record_id": "rec2",
+                            "fields": {
+                                "PIC": [{"id": "ou_bob", "name": "Bob"}]
+                            }
+                        },
+                        {
+                            "record_id": "rec3",
+                            "fields": {
+                                "PIC": [
+                                    {"id": "ou_alice", "name": "Alice"},
+                                    {"id": "ou_bob", "name": "Bob"}
+                                ]
+                            }
+                        }
+                    ],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp = tempdir().unwrap();
+        let store = crate::commands::lark_auth::InMemorySecretStore::new();
+        let args = crate::commands::lark_auth::SetLarkCredentialsArgs {
+            app_id: "cli_test".into(),
+            app_secret: "sec".into(),
+            base_url: Some(server.uri()),
+        };
+        crate::commands::lark_auth::set_lark_credentials_inner(args, tmp.path(), &store).unwrap();
+
+        let options = list_lark_person_options_inner("appA", "tblA", "PIC", tmp.path(), &store)
+            .await
+            .expect("ok");
+
+        // Deduped: only Alice and Bob (sorted by name ascending)
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].name, "Alice");
+        assert_eq!(options[0].open_id, "ou_alice");
+        assert_eq!(options[1].name, "Bob");
+        assert_eq!(options[1].open_id, "ou_bob");
+    }
+
+    #[tokio::test]
+    async fn list_lark_person_options_inner_returns_empty_when_field_absent() {
+        use wiremock::matchers::{method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(wm_path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "tenant_access_token": "t_test", "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        // Records have no PIC field
+        Mock::given(method("GET"))
+            .and(wm_path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblA/records",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": {
+                    "items": [
+                        { "record_id": "rec1", "fields": { "Title": "Task 1" } },
+                        { "record_id": "rec2", "fields": { "Title": "Task 2" } }
+                    ],
+                    "has_more": false,
+                    "page_token": ""
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp = tempdir().unwrap();
+        let store = crate::commands::lark_auth::InMemorySecretStore::new();
+        let args = crate::commands::lark_auth::SetLarkCredentialsArgs {
+            app_id: "cli_test".into(),
+            app_secret: "sec".into(),
+            base_url: Some(server.uri()),
+        };
+        crate::commands::lark_auth::set_lark_credentials_inner(args, tmp.path(), &store).unwrap();
+
+        let options = list_lark_person_options_inner("appA", "tblA", "PIC", tmp.path(), &store)
+            .await
+            .expect("ok");
+        assert!(options.is_empty(), "no PIC field → empty Vec");
     }
 
     #[tokio::test]

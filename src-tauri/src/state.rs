@@ -139,6 +139,15 @@ pub struct BitableBinding {
     pub updated_at: u64,
 }
 
+/// A person that appears in a Bitable Person-type field. Used by the
+/// FilterBar to build a dropdown of real users instead of a free-text
+/// input.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PersonOption {
+    pub open_id: String,
+    pub name: String,
+}
+
 /// What `BitableSchemaDetector::propose_mapping` returns to the wizard.
 /// Carries the raw field list (for dropdown population), an auto-detected
 /// initial guess at the mapping, and (when status is single-select) the
