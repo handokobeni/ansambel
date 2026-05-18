@@ -240,10 +240,13 @@ pub async fn list_lark_person_options(
 
 /// Follow a Lookup field's chain to its source SingleSelect and return its options.
 ///
-/// Lark Lookup fields store their source reference in `property` under two
-/// possible shapes — we accept both spellings:
-///   • `{ "table_id": "tblXXX", "field_id": "fldYYY", ... }` (most common)
-///   • `{ "target_table_id": "tblXXX", "link_field_id": "fldYYY", ... }` (older variant)
+/// Lark Lookup fields store their source reference in `property`. We've seen
+/// these key spellings in the wild:
+///   • `target_table` + `target_field` (formula-based Lookup — what Lark v1 uses
+///     for the property shape that includes `formula`, `filter_info`, `roll_up`)
+///   • `table_id` + `field_id` (simpler Lookup)
+///   • `target_table_id` + `link_field_id` (older variant)
+/// Try them in that priority order. Fall back to `Ok(vec![])` if none match.
 ///
 /// If the chain is broken at any step (field not found, source not a
 /// SingleSelect, options absent) we return `Ok(vec![])` and let the
@@ -295,15 +298,17 @@ pub(crate) async fn list_lark_lookup_options_inner(
             return Ok(vec![]);
         }
     };
-    // Accept both property key spellings.
+    // Accept all known property key spellings, newest/confirmed shape first.
     let src_table_id = prop
-        .get("table_id")
-        .or_else(|| prop.get("target_table_id"))
+        .get("target_table") // formula-based Lookup (confirmed shape)
+        .or_else(|| prop.get("table_id")) // simpler Lookup
+        .or_else(|| prop.get("target_table_id")) // older variant
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let src_field_id = prop
-        .get("field_id")
-        .or_else(|| prop.get("link_field_id"))
+        .get("target_field") // formula-based Lookup (confirmed shape)
+        .or_else(|| prop.get("field_id")) // simpler Lookup
+        .or_else(|| prop.get("link_field_id")) // older variant
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if src_table_id.is_empty() || src_field_id.is_empty() {
@@ -754,6 +759,116 @@ mod tests {
         assert_eq!(options[1].name, "In Progress");
         assert_eq!(options[2].option_id, "optUpcoming");
         assert_eq!(options[2].name, "Upcoming +1");
+    }
+
+    #[tokio::test]
+    async fn list_lark_lookup_options_inner_follows_chain_via_target_table_and_target_field() {
+        // Lookup property uses target_table + target_field (formula-based Lookup shape).
+        // Mocks:
+        //  - bitable_list_fields(app_token, "tblBindings") returns the Lookup field
+        //    with property = { "target_table": "tblSrc", "target_field": "fldSrcStat",
+        //                      "formula": "...", "filter_info": {...}, "roll_up": 0 }
+        //  - bitable_list_fields(app_token, "tblSrc") returns a SingleSelect field
+        //    with id fldSrcStat and 3 options
+        // Asserts: command returns those 3 options.
+        use wiremock::matchers::{method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Token endpoint.
+        Mock::given(method("POST"))
+            .and(wm_path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "tenant_access_token": "t_test", "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        // First call: binding table has a formula-based Lookup field (type 19)
+        // using the confirmed property shape: target_table + target_field.
+        Mock::given(method("GET"))
+            .and(wm_path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblBindings/fields",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": { "items": [
+                    {
+                        "field_id": "fldLookupFormula",
+                        "field_name": "Sprint Status",
+                        "type": 19,
+                        "is_primary": false,
+                        "property": {
+                            "filter_info": {
+                                "conditions": {
+                                    "children": [{ "field_id": "fldtuN4Zou", "field_type": 1, "operator": "is", "value": null }],
+                                    "conjunction": "and"
+                                },
+                                "target_table": "tblSrc"
+                            },
+                            "formatter": "",
+                            "formula": "bitable::$table[tblSrc].FILTER(CurrentValue.$column[fldtuN4Zou]=bitable::$table[tblBindings].$field[fldwZnRp6y]).$column[fldSrcStat].LISTCOMBINE()",
+                            "roll_up": 0,
+                            "target_field": "fldSrcStat",
+                            "target_table": "tblSrc"
+                        }
+                    }
+                ], "has_more": false, "page_token": null }
+            })))
+            .mount(&server)
+            .await;
+        // Second call: source table has a SingleSelect field (type 3) with 3 options.
+        Mock::given(method("GET"))
+            .and(wm_path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblSrc/fields",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": { "items": [
+                    {
+                        "field_id": "fldSrcStat",
+                        "field_name": "Status",
+                        "type": 3,
+                        "is_primary": false,
+                        "property": {
+                            "options": [
+                                {"id": "optNotStarted", "name": "Not Started"},
+                                {"id": "optInProgress", "name": "In Progress"},
+                                {"id": "optDone", "name": "Done"}
+                            ]
+                        }
+                    }
+                ], "has_more": false, "page_token": null }
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp = tempdir().unwrap();
+        let store = crate::commands::lark_auth::InMemorySecretStore::new();
+        let args = crate::commands::lark_auth::SetLarkCredentialsArgs {
+            app_id: "cli_test".into(),
+            app_secret: "sec".into(),
+            base_url: Some(server.uri()),
+        };
+        crate::commands::lark_auth::set_lark_credentials_inner(args, tmp.path(), &store).unwrap();
+
+        let options = list_lark_lookup_options_inner(
+            "appA",
+            "tblBindings",
+            "fldLookupFormula",
+            tmp.path(),
+            &store,
+        )
+        .await
+        .expect("ok");
+
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0].option_id, "optNotStarted");
+        assert_eq!(options[0].name, "Not Started");
+        assert_eq!(options[1].option_id, "optInProgress");
+        assert_eq!(options[1].name, "In Progress");
+        assert_eq!(options[2].option_id, "optDone");
+        assert_eq!(options[2].name, "Done");
     }
 
     #[tokio::test]
