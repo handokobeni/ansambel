@@ -706,3 +706,142 @@ describe('FilterBar field loading', () => {
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 });
+
+// ─── 11. Value reset on field / operator change (Bug 1 regression) ──────────
+
+describe('FilterBar value reset on field/operator change', () => {
+  it('Changing field from Text to Person resets value to empty string placeholder', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fld_title', field_name: 'Task name', type: 1, is_primary: true, property: null },
+      {
+        field_id: 'fld_pic',
+        field_name: 'Assignee (PIC)',
+        type: 11,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_title',
+              field_name: 'Task name',
+              operator: 'contains' as const,
+              value: ['user'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const fieldSelect = screen.getAllByRole('combobox', { name: /field/i })[0] as HTMLSelectElement;
+    expect(fieldSelect).toBeTruthy();
+    await fireEvent.change(fieldSelect, { target: { value: 'fld_pic' } });
+    expect(filterStore.update).toHaveBeenCalledWith(
+      'repo-1',
+      expect.objectContaining({
+        conditions: [
+          expect.objectContaining({
+            field_id: 'fld_pic',
+            // value must be reset — stale 'user' string must NOT carry over
+            value: [''],
+          }),
+        ],
+      })
+    );
+  });
+
+  it('Changing operator to isEmpty resets value to empty array', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fldS',
+        field_name: 'Status',
+        type: 3,
+        is_primary: false,
+        property: { options: [{ id: 'o1', name: 'Done' }] },
+      },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fldS',
+              field_name: 'Status',
+              operator: 'is' as const,
+              value: ['Done'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const operatorSelect = screen.getAllByRole('combobox', {
+      name: /operator/i,
+    })[0] as HTMLSelectElement;
+    expect(operatorSelect).toBeTruthy();
+    await fireEvent.change(operatorSelect, { target: { value: 'isEmpty' } });
+    expect(filterStore.update).toHaveBeenCalledWith(
+      'repo-1',
+      expect.objectContaining({
+        conditions: [
+          expect.objectContaining({
+            operator: 'isEmpty',
+            value: [],
+          }),
+        ],
+      })
+    );
+  });
+
+  it('Changing operator from isEmpty to contains seeds empty string value', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fldT', field_name: 'Title', type: 1, is_primary: true, property: null },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fldT',
+              field_name: 'Title',
+              operator: 'isEmpty' as const,
+              value: [],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const operatorSelect = screen.getAllByRole('combobox', {
+      name: /operator/i,
+    })[0] as HTMLSelectElement;
+    expect(operatorSelect).toBeTruthy();
+    await fireEvent.change(operatorSelect, { target: { value: 'contains' } });
+    expect(filterStore.update).toHaveBeenCalledWith(
+      'repo-1',
+      expect.objectContaining({
+        conditions: [
+          expect.objectContaining({
+            operator: 'contains',
+            value: [''],
+          }),
+        ],
+      })
+    );
+  });
+});
