@@ -392,9 +392,9 @@ describe('FilterBar Person field value picker', () => {
               field_id: 'fldPIC',
               field_name: 'PIC',
               operator: 'is' as const,
-              // Regression: value must be the person's display name (not open_id)
-              // because Lark's Bitable filter API matches Person fields by name.
-              value: ['Alice'],
+              // Value is open_id because Lark's records/search with user_id_type=open_id
+              // and is/isNot operators matches Person fields by open_id.
+              value: ['ou_alice'],
             },
           ],
         },
@@ -416,18 +416,18 @@ describe('FilterBar Person field value picker', () => {
     expect(screen.queryByText('Alice')).toBeInTheDocument();
     expect(screen.queryByText('Bob')).toBeInTheDocument();
 
-    // Regression: each <option> must carry the person's NAME as value — not open_id —
-    // because Lark's Bitable records/search filter API matches Person fields by display name.
-    const aliceOption = personSelect.querySelector('option[value="Alice"]') as HTMLOptionElement;
+    // Each <option> must carry the person's open_id as value because Lark's
+    // records/search filter API with user_id_type=open_id matches Person fields by open_id.
+    const aliceOption = personSelect.querySelector('option[value="ou_alice"]') as HTMLOptionElement;
     expect(aliceOption).toBeTruthy();
-    const bobOption = personSelect.querySelector('option[value="Bob"]') as HTMLOptionElement;
+    const bobOption = personSelect.querySelector('option[value="ou_bob"]') as HTMLOptionElement;
     expect(bobOption).toBeTruthy();
-    // Ensure open_id is NOT used as the option value
-    expect(personSelect.querySelector('option[value="ou_alice"]')).toBeNull();
-    expect(personSelect.querySelector('option[value="ou_bob"]')).toBeNull();
+    // Ensure display name is NOT used as the option value
+    expect(personSelect.querySelector('option[value="Alice"]')).toBeNull();
+    expect(personSelect.querySelector('option[value="Bob"]')).toBeNull();
   });
 
-  it('sends person NAME (not open_id) to filterStore.update when selection changes', async () => {
+  it('Person field with "is" operator sends open_id as condition value', async () => {
     vi.mocked(api.lark.listFields).mockResolvedValue([
       { field_id: 'fldPIC', field_name: 'PIC', type: 11, is_primary: false, property: null },
     ]);
@@ -462,20 +462,20 @@ describe('FilterBar Person field value picker', () => {
     ) as HTMLSelectElement;
     expect(personSelect).toBeTruthy();
 
-    // Simulate user picking 'Fikri' from the dropdown
-    await fireEvent.change(personSelect, { target: { value: 'Fikri' } });
+    // Simulate user picking 'Fikri' from the dropdown (value is open_id)
+    await fireEvent.change(personSelect, { target: { value: 'ou_fikri' } });
 
-    // filterStore.update must be called with the person's name, never open_id
+    // filterStore.update must be called with the person's open_id, not the display name
     expect(filterStore.update).toHaveBeenCalledWith(
       'repo-1',
       expect.objectContaining({
-        conditions: [expect.objectContaining({ value: ['Fikri'] })],
+        conditions: [expect.objectContaining({ value: ['ou_fikri'] })],
       })
     );
-    // Regression guard: open_id must NOT be sent
+    // Regression guard: open_id MUST be sent (not the display name)
     const lastCall = vi.mocked(filterStore.update).mock.lastCall;
     const sentValue = lastCall?.[1]?.conditions?.[0]?.value?.[0];
-    expect(sentValue).not.toMatch(/^ou_/);
+    expect(sentValue).toMatch(/^ou_/);
   });
 
   it('falls back to text input when listPersonOptions errors', async () => {
@@ -547,7 +547,7 @@ describe('FilterBar operator list by field type', () => {
     ]);
   });
 
-  it('Person (type 11) shows only contains/doesNotContain/isEmpty/isNotEmpty (no is/isNot)', async () => {
+  it('Person (type 11) shows is/isNot/contains/doesNotContain/isEmpty/isNotEmpty', async () => {
     vi.mocked(api.lark.listFields).mockResolvedValue([
       { field_id: 'fldPIC', field_name: 'PIC', type: 11, is_primary: false, property: null },
     ]);
@@ -560,8 +560,8 @@ describe('FilterBar operator list by field type', () => {
             {
               field_id: 'fldPIC',
               field_name: 'PIC',
-              operator: 'contains' as const,
-              value: ['Alice'],
+              operator: 'is' as const,
+              value: ['ou_alice'],
             },
           ],
         },
@@ -574,13 +574,20 @@ describe('FilterBar operator list by field type', () => {
     expect(operatorSelects.length).toBeGreaterThan(0);
     const opSel = operatorSelects[0] as HTMLSelectElement;
     const opValues = Array.from(opSel.options).map((o) => o.value);
-    expect(opValues).toEqual(['contains', 'doesNotContain', 'isEmpty', 'isNotEmpty']);
-    // Ensure is/isNot are NOT present
-    expect(opValues).not.toContain('is');
-    expect(opValues).not.toContain('isNot');
+    expect(opValues).toEqual([
+      'is',
+      'isNot',
+      'contains',
+      'doesNotContain',
+      'isEmpty',
+      'isNotEmpty',
+    ]);
+    // Ensure is/isNot ARE present (required by Lark Person filter with open_id)
+    expect(opValues).toContain('is');
+    expect(opValues).toContain('isNot');
   });
 
-  it('Person field defaults to contains operator when added', async () => {
+  it('Person field defaults to is operator when added', async () => {
     vi.mocked(api.lark.listFields).mockResolvedValue([
       { field_id: 'fldPIC', field_name: 'PIC', type: 11, is_primary: false, property: null },
     ]);
@@ -594,7 +601,7 @@ describe('FilterBar operator list by field type', () => {
       'repo-1',
       expect.objectContaining({
         conditions: expect.arrayContaining([
-          expect.objectContaining({ field_id: 'fldPIC', operator: 'contains' }),
+          expect.objectContaining({ field_id: 'fldPIC', operator: 'is' }),
         ]),
       })
     );
@@ -620,7 +627,7 @@ describe('FilterBar operator list by field type', () => {
     );
   });
 
-  it('Changing field from Text to Person resets operator to contains', async () => {
+  it('Changing field from Text to Person resets operator to is', async () => {
     vi.mocked(api.lark.listFields).mockResolvedValue([
       { field_id: 'fldT', field_name: 'Title', type: 1, is_primary: true, property: null },
       { field_id: 'fldPIC', field_name: 'PIC', type: 11, is_primary: false, property: null },
@@ -651,7 +658,7 @@ describe('FilterBar operator list by field type', () => {
     expect(filterStore.update).toHaveBeenCalledWith(
       'repo-1',
       expect.objectContaining({
-        conditions: [expect.objectContaining({ field_id: 'fldPIC', operator: 'contains' })],
+        conditions: [expect.objectContaining({ field_id: 'fldPIC', operator: 'is' })],
       })
     );
   });

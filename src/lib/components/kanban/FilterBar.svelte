@@ -66,7 +66,7 @@
       'isEmpty',
       'isNotEmpty',
     ],
-    11: ['contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
+    11: ['is', 'isNot', 'contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
     // Lookup: value depends on linked field; contains is the safest default
     19: ['contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
     // Formula: computed value — treat as stringy
@@ -400,11 +400,11 @@
                     data-testid="person-select"
                   >
                     <!--
-                      Lark's Person filter matches by display name, not open_id.
-                      Two people with identical names would collide — same as Lark's own filter UI.
+                      Person filters require open_id values + the user_id_type=open_id query param
+                      (set in bitable_search_records). See commit message for context.
                     -->
                     {#each personOpts as opt (opt.open_id)}
-                      <option value={opt.name}>{opt.name}</option>
+                      <option value={opt.open_id}>{opt.name}</option>
                     {/each}
                   </select>
                 {:else}
