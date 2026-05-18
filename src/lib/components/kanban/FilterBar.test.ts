@@ -9,6 +9,7 @@ vi.mock('$lib/ipc', () => ({
     lark: {
       listFields: vi.fn(async () => []),
       listPersonOptions: vi.fn(async () => []),
+      listLookupOptions: vi.fn(async () => []),
     },
   },
 }));
@@ -44,6 +45,8 @@ beforeEach(() => {
   vi.mocked(api.lark.listFields).mockResolvedValue([]);
   vi.mocked(api.lark.listPersonOptions).mockClear();
   vi.mocked(api.lark.listPersonOptions).mockResolvedValue([]);
+  vi.mocked(api.lark.listLookupOptions).mockClear();
+  vi.mocked(api.lark.listLookupOptions).mockResolvedValue([]);
 });
 
 // ─── 1. Trigger button label ───────────────────────────────────────────────
@@ -1030,7 +1033,7 @@ describe('FilterBar mappedFieldIds prop', () => {
 // ─── 13. OPS_BY_TYPE new field types ─────────────────────────────────────────
 
 describe('FilterBar new field types (Lookup, Formula, Created/Modified Time/By)', () => {
-  it('Lookup (type 19) shows contains/doesNotContain/isEmpty/isNotEmpty', async () => {
+  it('Lookup (type 19) shows is/isNot/contains/doesNotContain/isEmpty/isNotEmpty', async () => {
     vi.mocked(api.lark.listFields).mockResolvedValue([
       {
         field_id: 'fld_lookup',
@@ -1049,8 +1052,8 @@ describe('FilterBar new field types (Lookup, Formula, Created/Modified Time/By)'
             {
               field_id: 'fld_lookup',
               field_name: 'Sprint Status',
-              operator: 'contains' as const,
-              value: ['Active'],
+              operator: 'is' as const,
+              value: ['optDone'],
             },
           ],
         },
@@ -1062,7 +1065,14 @@ describe('FilterBar new field types (Lookup, Formula, Created/Modified Time/By)'
     const operatorSelects = screen.getAllByRole('combobox', { name: /operator/i });
     const opSel = operatorSelects[0] as HTMLSelectElement;
     const opValues = Array.from(opSel.options).map((o) => o.value);
-    expect(opValues).toEqual(['contains', 'doesNotContain', 'isEmpty', 'isNotEmpty']);
+    expect(opValues).toEqual([
+      'is',
+      'isNot',
+      'contains',
+      'doesNotContain',
+      'isEmpty',
+      'isNotEmpty',
+    ]);
   });
 
   it('Created Time (type 1001) shows comparison operators including isGreater', async () => {
@@ -1172,6 +1182,129 @@ describe('FilterBar new field types (Lookup, Formula, Created/Modified Time/By)'
     await tick();
     const dateInput = document.querySelector('input[type="date"]') as HTMLInputElement;
     expect(dateInput).toBeTruthy();
+  });
+
+  it('Lookup field defaults to "is" operator when added', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_lookup',
+        field_name: 'Sprint Status',
+        type: 19,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    render(FilterBar, { props: defaultProps });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    await fireEvent.click(screen.getByRole('button', { name: /add condition/i }));
+    await tick();
+    expect(filterStore.update).toHaveBeenCalledWith(
+      'repo-1',
+      expect.objectContaining({
+        conditions: expect.arrayContaining([
+          expect.objectContaining({ field_id: 'fld_lookup', operator: 'is' }),
+        ]),
+      })
+    );
+  });
+
+  it('Lookup field renders <select> with options from listLookupOptions', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_lookup',
+        field_name: 'Sprint Status',
+        type: 19,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    vi.mocked(api.lark.listLookupOptions).mockResolvedValue([
+      { option_id: 'optDone', name: 'Done' },
+      { option_id: 'optInProg', name: 'In Progress' },
+      { option_id: 'optUpcoming', name: 'Upcoming +1' },
+    ]);
+
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_lookup',
+              field_name: 'Sprint Status',
+              operator: 'is' as const,
+              value: ['optDone'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    await tick();
+
+    // listLookupOptions should be called with the field_id
+    expect(api.lark.listLookupOptions).toHaveBeenCalledWith('appA', 'tblA', 'fld_lookup');
+
+    // A <select> with option names should be rendered
+    const lookupSelect = document.querySelector(
+      '[data-testid="lookup-select"]'
+    ) as HTMLSelectElement;
+    expect(lookupSelect).toBeTruthy();
+    expect(screen.queryByText('Done')).toBeInTheDocument();
+    expect(screen.queryByText('In Progress')).toBeInTheDocument();
+    expect(screen.queryByText('Upcoming +1')).toBeInTheDocument();
+
+    // Each <option> must use option_id as value (not name)
+    const doneOption = lookupSelect.querySelector('option[value="optDone"]') as HTMLOptionElement;
+    expect(doneOption).toBeTruthy();
+    const inProgOption = lookupSelect.querySelector(
+      'option[value="optInProg"]'
+    ) as HTMLOptionElement;
+    expect(inProgOption).toBeTruthy();
+    // Name must NOT be used as value
+    expect(lookupSelect.querySelector('option[value="Done"]')).toBeNull();
+  });
+
+  it('Lookup field falls back to text input when listLookupOptions returns empty', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_lookup',
+        field_name: 'Sprint Status',
+        type: 19,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    // Default mock already returns [] for listLookupOptions
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_lookup',
+              field_name: 'Sprint Status',
+              operator: 'contains' as const,
+              value: ['Active'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    await tick();
+
+    // No lookup-select — should fall back to text input
+    expect(document.querySelector('[data-testid="lookup-select"]')).not.toBeTruthy();
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
   });
 
   it('Lookup (type 19) appears in field picker (not excluded by unsupported type)', async () => {

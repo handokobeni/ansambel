@@ -6,6 +6,7 @@
     FilterOperator,
     BitableField,
     PersonOption,
+    SingleSelectOption,
   } from '$lib/types';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import { api } from '$lib/ipc';
@@ -42,6 +43,12 @@
   // Track fetch errors so we can fall back to text input gracefully.
   let personOptionsFailed = new SvelteSet<string>();
 
+  // Per-field-id cache of lookup options for type-19 (Lookup) fields.
+  // Populated lazily when the user picks a Lookup field whose chain
+  // resolves to a SingleSelect. Falls back to text input when empty.
+  let lookupOptionsCache = new SvelteMap<string, SingleSelectOption[]>();
+  let lookupOptionsFailed = new SvelteSet<string>();
+
   const OPS_BY_TYPE: Record<number, FilterOperator[]> = {
     1: ['contains', 'doesNotContain', 'is', 'isNot', 'isEmpty', 'isNotEmpty'],
     2: [
@@ -67,8 +74,9 @@
       'isNotEmpty',
     ],
     11: ['is', 'isNot', 'contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
-    // Lookup: value depends on linked field; contains is the safest default
-    19: ['contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
+    // Lookup: when source is SingleSelect, Lark supports is/isNot with option_id;
+    // also expose contains/doesNotContain for non-resolved chains.
+    19: ['is', 'isNot', 'contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
     // Formula: computed value — treat as stringy
     20: ['contains', 'doesNotContain', 'isEmpty', 'isNotEmpty'],
     // Created Time
@@ -139,6 +147,19 @@
     }
   }
 
+  /** Lazily resolve a Lookup field's chain to a SingleSelect option list.
+   *  Cached per field_id. Returns [] and falls back to text input when the
+   *  chain doesn't resolve to a SingleSelect. */
+  async function ensureLookupOptions(fieldId: string): Promise<void> {
+    if (lookupOptionsCache.has(fieldId) || lookupOptionsFailed.has(fieldId)) return;
+    try {
+      const opts = await api.lark.listLookupOptions(appToken, tableId, fieldId);
+      lookupOptionsCache.set(fieldId, opts);
+    } catch {
+      lookupOptionsFailed.add(fieldId);
+    }
+  }
+
   async function openPopover() {
     open = true;
     if (!fieldsLoaded) {
@@ -150,10 +171,13 @@
       fieldsLoaded = true;
     }
     // Pre-load person options for any existing type-11 conditions.
+    // Pre-load lookup options for any existing type-19 conditions.
     for (const cond of filters.conditions) {
       const ft = fieldTypeForCondition(cond);
       if (ft === 11) {
         ensurePersonOptions(cond.field_name);
+      } else if (ft === 19) {
+        ensureLookupOptions(cond.field_id);
       }
     }
   }
@@ -225,6 +249,10 @@
     // Kick off person options fetch when switching to a Person field.
     if (field.type === 11) {
       ensurePersonOptions(field.field_name);
+    }
+    // Kick off lookup options resolution when switching to a Lookup field.
+    if (field.type === 19) {
+      ensureLookupOptions(field.field_id);
     }
   }
 
@@ -417,8 +445,35 @@
                     class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                   />
                 {/if}
+              {:else if fieldType === 19}
+                <!-- Lookup (type 19) → <select> when chain resolves to SingleSelect;
+                     value is option_id (Lark records store Lookup values as option_ids).
+                     Falls back to text input when options are empty/unresolved. -->
+                {@const lookupOpts = lookupOptionsCache.get(cond.field_id)}
+                {#if lookupOpts && lookupOpts.length > 0}
+                  <select
+                    aria-label="value"
+                    value={cond.value[0] ?? ''}
+                    onchange={(e) => changeValue(idx, e.currentTarget.value)}
+                    class="flex-1 min-w-0 px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)] cursor-pointer"
+                    data-testid="lookup-select"
+                  >
+                    {#each lookupOpts as opt (opt.option_id)}
+                      <option value={opt.option_id}>{opt.name}</option>
+                    {/each}
+                  </select>
+                {:else}
+                  <!-- Fallback: text input while loading or when chain doesn't resolve -->
+                  <input
+                    type="text"
+                    aria-label="value"
+                    value={cond.value[0] ?? ''}
+                    onchange={(e) => changeValue(idx, e.currentTarget.value)}
+                    class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  />
+                {/if}
               {:else}
-                <!-- Text (type 1), Lookup (19), Formula (20), Created/Modified By (1003/1004), or unknown -->
+                <!-- Text (type 1), Formula (20), Created/Modified By (1003/1004), or unknown -->
                 <input
                   type="text"
                   aria-label="value"
