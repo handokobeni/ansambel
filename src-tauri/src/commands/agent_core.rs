@@ -36,6 +36,42 @@ pub(crate) fn truncate_to_chars(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
 }
 
+/// Convenience wrapper that emits a [`WorkspaceEvent::PrCreated`] for the
+/// publisher. Intended to be called from a future `pr_create` /
+/// `gh pr create` Tauri handler — Phase 3a-3 Task 13 leaves the variant
+/// unwired in production code (the app has no PR-creation flow yet) but
+/// ships this helper so the eventual handler is a one-line wiring change.
+///
+/// The publisher consumes `PrCreated`:
+/// - Stores the PR `url` in the `pr_url` column of the team-activity row.
+/// - Bumps `ansambel_status` to `"pr_ready"` (see
+///   `team_activity::AggregatedState::merge`), surfacing the workspace as
+///   "ready for review" on every teammate's dashboard.
+///
+/// Empty `url` is rejected because the publisher would write a blank
+/// hyperlink into Bitable, which presents as a broken link in the UI.
+#[allow(dead_code)] // Wired into tests only until a PR-creation Tauri handler lands.
+pub(crate) fn emit_pr_created(
+    publisher_tx: Option<&WorkspaceEventTx>,
+    workspace_id: &str,
+    url: &str,
+) {
+    if url.is_empty() {
+        tracing::warn!(
+            workspace_id,
+            "emit_pr_created skipped: empty url would publish a broken link"
+        );
+        return;
+    }
+    emit_workspace_event(
+        publisher_tx,
+        WorkspaceEvent::PrCreated {
+            workspace_id: workspace_id.to_string(),
+            url: url.to_string(),
+        },
+    );
+}
+
 /// If `event` is a final assistant `Message` (not a partial stream chunk),
 /// emit a `WorkspaceEvent::MessageAppended` carrying a char-bounded
 /// preview of the assistant text. No-op for tool events, partial
@@ -2595,6 +2631,39 @@ mod tests {
             },
         );
         assert!(rx.try_recv().is_err(), "non-Message variants must not emit");
+    }
+
+    // ── Task 13 — WorkspaceEvent::PrCreated emission helper ─────────────────
+
+    #[test]
+    fn emit_pr_created_emits_with_workspace_id_and_url() {
+        let (tx, mut rx) = make_publisher_tx();
+        emit_pr_created(Some(&tx), "ws_pr", "https://github.com/o/r/pull/42");
+        let ev = rx.try_recv().expect("PrCreated should be emitted");
+        match ev {
+            crate::state::WorkspaceEvent::PrCreated { workspace_id, url } => {
+                assert_eq!(workspace_id, "ws_pr");
+                assert_eq!(url, "https://github.com/o/r/pull/42");
+            }
+            other => panic!("expected PrCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_pr_created_skips_emit_when_url_empty() {
+        // Empty URL would publish a broken hyperlink into Bitable; the
+        // helper must reject it rather than ship telemetry that turns
+        // into a UI rendering bug for every teammate.
+        let (tx, mut rx) = make_publisher_tx();
+        emit_pr_created(Some(&tx), "ws_pr_empty", "");
+        assert!(rx.try_recv().is_err(), "no event expected for empty PR url");
+    }
+
+    #[test]
+    fn emit_pr_created_is_noop_when_no_publisher() {
+        // No publisher (tests / unconfigured installs) → silent no-op,
+        // not a panic.
+        emit_pr_created(None, "ws_pr_none", "https://example.com/pr/1");
     }
 
     #[test]

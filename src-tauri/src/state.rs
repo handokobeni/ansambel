@@ -246,6 +246,13 @@ pub enum WorkspaceEvent {
     FileTouched {
         workspace_id: String,
     },
+    /// Emitted after a successful PR-creation flow (`gh pr create` or
+    /// equivalent). Phase 3a-3 Task 13 ships the
+    /// `emit_pr_created` helper that constructs this variant but leaves
+    /// the call site BLOCKED — no PR-creation Tauri handler exists in
+    /// the app yet. When that handler lands, it should call
+    /// `emit_pr_created(publisher_tx, workspace_id, url)` after the
+    /// `gh pr create` invocation succeeds.
     PrCreated {
         workspace_id: String,
         url: String,
