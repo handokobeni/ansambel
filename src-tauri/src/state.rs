@@ -283,6 +283,19 @@ impl WorkspaceEvent {
 /// `lib.rs::run()` with capacity 256 (well above expected event rate).
 pub type WorkspaceEventTx = std::sync::Arc<tokio::sync::broadcast::Sender<WorkspaceEvent>>;
 
+/// Connection details for the team-activity Bitable (Phase 3a-3 publisher).
+/// Stored in `<data_dir>/team_activity_config.json`. Reuses the global
+/// Lark `app_id`/`app_secret` from `commands::lark_auth`, so this config
+/// is just the table coordinates + machine label.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct TeamActivityConfig {
+    pub app_token: String,
+    pub table_id: String,
+    /// User-editable display label, e.g., "handoko@laptop-1". Auto-filled
+    /// on first launch from `$USER@$(hostname)`.
+    pub machine_label: String,
+}
+
 /// One streamed slice of terminal output. Tagged so the frontend (and
 /// future tests) can pattern-match without an extra discriminator.
 #[derive(Serialize, Clone, Debug)]
