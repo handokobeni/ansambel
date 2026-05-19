@@ -204,10 +204,21 @@ impl LarkClient {
         drop(first);
         tokio::time::sleep(wait).await;
         self.limiter.acquire().await;
-        build()
+        let second = build()
             .send()
             .await
-            .map_err(|e| AppError::Lark(format!("{label} retry request: {e}")))
+            .map_err(|e| AppError::Lark(format!("{label} retry request: {e}")))?;
+        if second.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            // Both attempts exhausted. Surface the rate-limit hint to
+            // upstream callers (e.g. the publisher's `upload_with_retry`)
+            // via the typed `LarkRateLimit` variant rather than a generic
+            // string error, so they can apply their own backoff strategy.
+            let retry_after_secs = parse_retry_after(second.headers())
+                .map(|d| d.as_secs())
+                .unwrap_or(DEFAULT_429_RETRY_SECS);
+            return Err(AppError::LarkRateLimit { retry_after_secs });
+        }
+        Ok(second)
     }
 
     /// Returns a valid tenant_access_token, fetching a new one only
@@ -2065,8 +2076,10 @@ mod tests {
             .await;
         let client = LarkClient::new(make_config(&server.uri()));
         let err = client.tenant_access_token().await.unwrap_err();
-        let s = err.to_string();
-        assert!(s.contains("429"), "{s}");
+        assert!(
+            matches!(err, AppError::LarkRateLimit { .. }),
+            "expected LarkRateLimit, got {err:?}"
+        );
     }
 
     #[tokio::test]

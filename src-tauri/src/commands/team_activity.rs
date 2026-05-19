@@ -17,6 +17,15 @@ use tokio::sync::{broadcast, Mutex};
 use tokio::time::{Duration, Instant};
 
 const MESSAGE_PREVIEW_MAX: usize = 200;
+
+/// Hard ceiling per uploader call. If the underlying Lark HTTP request
+/// hangs (DNS stall, dropped TCP, server wedge) the publisher's
+/// fire-and-forget `tokio::spawn` would leak the task forever — so
+/// every call goes through `tokio::time::timeout` with this budget.
+/// Chosen to comfortably exceed Lark's typical p99 (~2-3s) plus one
+/// 429 backoff while still being short enough that a hung publish
+/// doesn't accumulate spawned tasks under sustained traffic.
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// Soft cap that upstream emitters (Tasks 10-13) should apply before
 /// pushing a message snippet into `WorkspaceEvent::MessageAppended.text_preview`.
 /// The publisher still runs the credential redaction + 200-char trim of its
@@ -204,7 +213,7 @@ impl Publisher {
                         let uploader = self.uploader.clone();
                         let cache = self.row_id_cache.clone();
                         tokio::spawn(async move {
-                            match (uploader)(ws_id.clone(), snap).await {
+                            match upload_with_retry(uploader, ws_id.clone(), snap).await {
                                 Ok(rec_id) => {
                                     cache.lock().await.insert(ws_id, rec_id);
                                 }
@@ -217,6 +226,38 @@ impl Publisher {
                 }
             }
         }
+    }
+}
+
+/// Wraps a single uploader call with:
+/// - one retry if the first call fails with `AppError::LarkRateLimit`,
+///   sleeping for the `retry_after_secs` hinted by Lark before retrying;
+/// - a 30-second hard timeout per call (see [`UPLOAD_TIMEOUT`]),
+///   mapping a hang to `AppError::LarkTimeout` so the publisher's
+///   fire-and-forget `tokio::spawn` cannot leak.
+///
+/// Used by [`Publisher::run`] for every dispatched snapshot.
+pub async fn upload_with_retry(
+    uploader: UploaderFn,
+    ws_id: String,
+    snap: RowSnapshot,
+) -> Result<String> {
+    match call_once(&uploader, &ws_id, &snap).await {
+        Ok(rec_id) => Ok(rec_id),
+        Err(crate::error::AppError::LarkRateLimit { retry_after_secs }) => {
+            tokio::time::sleep(Duration::from_secs(retry_after_secs)).await;
+            call_once(&uploader, &ws_id, &snap).await
+        }
+        Err(e) => Err(e),
+    }
+}
+
+async fn call_once(uploader: &UploaderFn, ws_id: &str, snap: &RowSnapshot) -> Result<String> {
+    match tokio::time::timeout(UPLOAD_TIMEOUT, (uploader)(ws_id.to_string(), snap.clone())).await {
+        Ok(inner) => inner,
+        Err(_) => Err(crate::error::AppError::LarkTimeout {
+            timeout_secs: UPLOAD_TIMEOUT.as_secs(),
+        }),
     }
 }
 
@@ -432,5 +473,80 @@ mod tests {
             Some("running"),
             "status should be re-populated after lock released"
         );
+    }
+
+    // ── upload_with_retry ────────────────────────────────────────
+
+    #[tokio::test(start_paused = true)]
+    async fn upload_with_retry_succeeds_on_first_call() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let attempts = Arc::new(AtomicU32::new(0));
+        let a = attempts.clone();
+        let uploader: UploaderFn = Arc::new(move |_ws_id, _snap| {
+            a.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Ok::<String, crate::error::AppError>("rec1".into()) })
+        });
+        let result = upload_with_retry(uploader, "ws_x".into(), RowSnapshot::default()).await;
+        assert_eq!(result.unwrap(), "rec1");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn upload_with_retry_retries_once_after_429() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let attempts = Arc::new(AtomicU32::new(0));
+        let a = attempts.clone();
+        let uploader: UploaderFn = Arc::new(move |_ws_id, _snap| {
+            let count = a.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                if count == 0 {
+                    Err(crate::error::AppError::LarkRateLimit {
+                        retry_after_secs: 1,
+                    })
+                } else {
+                    Ok::<String, crate::error::AppError>("recOK".into())
+                }
+            })
+        });
+        let result = upload_with_retry(uploader, "ws_y".into(), RowSnapshot::default()).await;
+        assert_eq!(result.unwrap(), "recOK");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn upload_with_retry_surfaces_second_429() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let attempts = Arc::new(AtomicU32::new(0));
+        let a = attempts.clone();
+        let uploader: UploaderFn = Arc::new(move |_ws_id, _snap| {
+            a.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move {
+                Err::<String, crate::error::AppError>(crate::error::AppError::LarkRateLimit {
+                    retry_after_secs: 1,
+                })
+            })
+        });
+        let result = upload_with_retry(uploader, "ws_z".into(), RowSnapshot::default()).await;
+        assert!(matches!(
+            result,
+            Err(crate::error::AppError::LarkRateLimit { .. })
+        ));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn upload_with_retry_times_out_when_uploader_hangs() {
+        let uploader: UploaderFn = Arc::new(|_ws_id, _snap| {
+            Box::pin(async move {
+                // Hang forever
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                Ok::<String, crate::error::AppError>("never".into())
+            })
+        });
+        let result = upload_with_retry(uploader, "ws_q".into(), RowSnapshot::default()).await;
+        assert!(matches!(
+            result,
+            Err(crate::error::AppError::LarkTimeout { .. })
+        ));
     }
 }
