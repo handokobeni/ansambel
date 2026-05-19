@@ -952,6 +952,117 @@ impl LarkClient {
             .and_then(|d| d.field)
             .ok_or_else(|| AppError::Lark("bitable_create_field missing field in response".into()))
     }
+
+    /// Upsert a Bitable row.
+    /// - `record_id` empty → POST `…/records`, returns the new `record_id`.
+    /// - `record_id` non-empty → PUT `…/records/{record_id}`, returns the same id.
+    ///
+    /// Body shape is `{ "fields": <fields> }`. Used by the Phase 3a-3
+    /// team-activity publisher; the publisher caches `workspace_id → record_id`
+    /// so subsequent updates take the PUT path. POST parses
+    /// `data.record.record_id` from the response and errors if missing; PUT
+    /// falls back to the input `record_id` if the response shape ever changes
+    /// (we know the id we asked Lark to update).
+    pub async fn bitable_upsert_row(
+        &self,
+        app_token: &str,
+        table_id: &str,
+        record_id: &str,
+        fields: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<String> {
+        let token = self.tenant_access_token().await?;
+        let body = serde_json::json!({ "fields": fields });
+        if record_id.is_empty() {
+            let url = format!(
+                "{}/open-apis/bitable/v1/apps/{}/tables/{}/records",
+                self.config.base_url, app_token, table_id
+            );
+            let resp = self
+                .send_with_retry("bitable_upsert_row create", || {
+                    self.http.post(&url).bearer_auth(&token).json(&body)
+                })
+                .await?;
+            let status = resp.status();
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| AppError::Lark(format!("bitable_upsert_row create body: {e}")))?;
+            if !status.is_success() {
+                return Err(AppError::Lark(format!(
+                    "bitable_upsert_row create http {status}: {}",
+                    truncate(&text, 200)
+                )));
+            }
+            let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+                AppError::Lark(format!(
+                    "bitable_upsert_row create parse: {e}; body={}",
+                    truncate(&text, 200)
+                ))
+            })?;
+            let code = parsed.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+            if code != 0 {
+                let msg = parsed
+                    .get("msg")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                return Err(AppError::Lark(format!(
+                    "bitable_upsert_row create code {code}: {msg}"
+                )));
+            }
+            let new_id = parsed
+                .pointer("/data/record/record_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    AppError::Lark("bitable_upsert_row create: response missing record_id".into())
+                })?;
+            Ok(new_id.to_string())
+        } else {
+            let url = format!(
+                "{}/open-apis/bitable/v1/apps/{}/tables/{}/records/{}",
+                self.config.base_url, app_token, table_id, record_id
+            );
+            let resp = self
+                .send_with_retry("bitable_upsert_row update", || {
+                    self.http.put(&url).bearer_auth(&token).json(&body)
+                })
+                .await?;
+            let status = resp.status();
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| AppError::Lark(format!("bitable_upsert_row update body: {e}")))?;
+            if !status.is_success() {
+                return Err(AppError::Lark(format!(
+                    "bitable_upsert_row update http {status}: {}",
+                    truncate(&text, 200)
+                )));
+            }
+            let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+                AppError::Lark(format!(
+                    "bitable_upsert_row update parse: {e}; body={}",
+                    truncate(&text, 200)
+                ))
+            })?;
+            let code = parsed.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+            if code != 0 {
+                let msg = parsed
+                    .get("msg")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                return Err(AppError::Lark(format!(
+                    "bitable_upsert_row update code {code}: {msg}"
+                )));
+            }
+            // PUT response includes the same record_id we sent; fall back to
+            // the input if Lark ever changes the response shape — we know
+            // the id we asked the server to update.
+            Ok(parsed
+                .pointer("/data/record/record_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or(record_id)
+                .to_string())
+        }
+    }
 }
 
 // ── Drive: attachment upload + download ─────────────────────────────
@@ -2460,5 +2571,59 @@ mod tests {
             msg.contains("1254100"),
             "expected code in error, got: {msg}"
         );
+    }
+
+    // ── bitable_upsert_row ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn bitable_upsert_row_creates_when_record_id_empty() {
+        use wiremock::matchers::{method, path_regex};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(
+                r"^/open-apis/bitable/v1/apps/[^/]+/tables/[^/]+/records$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "record": { "record_id": "recNEW", "fields": {} } }
+            })))
+            .mount(&server)
+            .await;
+        mount_token(&server).await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let mut fields = serde_json::Map::new();
+        fields.insert("workspace_id".into(), serde_json::json!("ws_x"));
+        let rec_id = client
+            .bitable_upsert_row("bascn", "tbl", "", fields)
+            .await
+            .unwrap();
+        assert_eq!(rec_id, "recNEW");
+    }
+
+    #[tokio::test]
+    async fn bitable_upsert_row_updates_when_record_id_given() {
+        use wiremock::matchers::{method, path_regex};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/open-apis/bitable/v1/apps/[^/]+/tables/[^/]+/records/recABC$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "record": { "record_id": "recABC", "fields": {} } }
+            })))
+            .mount(&server)
+            .await;
+        mount_token(&server).await;
+        let client = LarkClient::new(make_config(&server.uri()));
+        let mut fields = serde_json::Map::new();
+        fields.insert("ansambel_status".into(), serde_json::json!("running"));
+        let rec_id = client
+            .bitable_upsert_row("bascn", "tbl", "recABC", fields)
+            .await
+            .unwrap();
+        assert_eq!(rec_id, "recABC");
     }
 }
