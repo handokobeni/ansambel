@@ -115,6 +115,15 @@ pub fn run() {
 
             app.manage(std::sync::Arc::new(std::sync::Mutex::new(state)));
 
+            // Phase 3a-3: broadcast channel that team-activity state publisher subscribes
+            // to. Capacity 256 — receivers that fall behind by more than this lose
+            // events, which is acceptable for an at-most-once telemetry stream.
+            let (workspace_event_tx, _) =
+                tokio::sync::broadcast::channel::<crate::state::WorkspaceEvent>(256);
+            let workspace_event_tx: crate::state::WorkspaceEventTx =
+                std::sync::Arc::new(workspace_event_tx);
+            app.manage(workspace_event_tx.clone());
+
             // Phase 3a-3 Task 6: TaskProviderHandle is now a per-repo HashMap.
             // Task 10 will populate it from persisted bindings; start empty.
             // provider_for_repo() falls back to LocalProvider for repos with
