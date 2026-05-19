@@ -77,6 +77,7 @@ import WorkspaceView from './WorkspaceView.svelte';
 import { messages } from '$lib/stores/messages.svelte';
 import { editorTabs } from '$lib/stores/editor-tabs.svelte';
 import { workspaceTabs } from '$lib/stores/workspace-tabs.svelte';
+import { workspaces } from '$lib/stores/workspaces.svelte';
 import { getToasts, removeToast } from '$lib/stores/toasts.svelte';
 import type { WorkspaceInfo } from '$lib/types';
 
@@ -104,6 +105,11 @@ beforeEach(() => {
   messages.reset();
   editorTabs.reset();
   workspaceTabs.reset();
+  // No public reset on the workspaces store; clear it in place so the
+  // optimistic-toggle test starts from a clean slate.
+  for (const repoMap of workspaces.byRepo.values()) repoMap.clear();
+  workspaces.byRepo.clear();
+  workspaces.selectedWorkspaceId = null;
   clearToasts();
   vi.mocked(invoke).mockReset();
   vi.mocked(invoke).mockResolvedValue(undefined);
@@ -186,6 +192,106 @@ describe('WorkspaceView', () => {
     render(WorkspaceView, { props: { workspace: ws({ status: 'running' }) } });
     await waitFor(() => {
       expect(messages.errorFor('ws_a')).toBe('no agent for workspace ws_a');
+    });
+  });
+
+  // ── Phase 3a-3 Task 18: team-activity privacy toggle ─────────────
+  describe('team-activity privacy toggle', () => {
+    it('renders the toggle in the header with the public label by default', async () => {
+      const { findByTestId } = render(WorkspaceView, { props: { workspace: ws() } });
+      const btn = await findByTestId('team-activity-privacy-toggle');
+      expect(btn).toBeTruthy();
+      expect(btn.getAttribute('data-private')).toBe('false');
+      expect(btn.textContent).toMatch(/Public/);
+    });
+
+    it('reflects the workspace prop when no store entry exists', async () => {
+      const { findByTestId } = render(WorkspaceView, {
+        props: { workspace: ws({ team_activity_private: true }) },
+      });
+      const btn = await findByTestId('team-activity-privacy-toggle');
+      expect(btn.getAttribute('data-private')).toBe('true');
+      expect(btn.textContent).toMatch(/Private/);
+    });
+
+    it('clicking the toggle invokes set_workspace_team_activity_private with isPrivate=true', async () => {
+      // The store's optimistic-toggle path only fires the IPC when the
+      // workspace is registered in the SvelteMap — mirror the real
+      // workflow by seeding it before render.
+      (workspaces.byRepo as unknown as Map<string, Map<string, WorkspaceInfo>>).set(
+        'repo_a',
+        new Map([['ws_a', ws({ team_activity_private: false })]])
+      );
+      const { findByTestId } = render(WorkspaceView, { props: { workspace: ws() } });
+      const btn = await findByTestId('team-activity-privacy-toggle');
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(btn);
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith(
+          'set_workspace_team_activity_private',
+          expect.objectContaining({ workspaceId: 'ws_a', isPrivate: true })
+        );
+      });
+    });
+
+    it('optimistically flips the button label before the IPC settles', async () => {
+      // Seed the store with the workspace so the optimistic update has
+      // somewhere to land.
+      const repoMap = new (workspaces.byRepo.constructor as new () => Map<string, WorkspaceInfo>)();
+      const seeded = ws({ team_activity_private: false });
+      // svelte/reactivity SvelteMap accepts .set the same way.
+      (workspaces.byRepo as unknown as Map<string, Map<string, WorkspaceInfo>>).set(
+        'repo_a',
+        repoMap as unknown as Map<string, WorkspaceInfo>
+      );
+      (repoMap as unknown as Map<string, WorkspaceInfo>).set('ws_a', seeded);
+
+      let resolve!: () => void;
+      vi.mocked(invoke).mockImplementation(async (cmd) => {
+        if (cmd === 'set_workspace_team_activity_private') {
+          return new Promise<void>((r) => {
+            resolve = r;
+          });
+        }
+        if (cmd === 'list_messages') return [];
+        return undefined;
+      });
+
+      const { findByTestId } = render(WorkspaceView, { props: { workspace: seeded } });
+      const btn = await findByTestId('team-activity-privacy-toggle');
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(btn);
+      // While the IPC is in flight, the label should already read "Private".
+      await waitFor(() => {
+        expect(btn.getAttribute('data-private')).toBe('true');
+      });
+      resolve();
+    });
+
+    it('reverts label and shows a toast when the IPC rejects', async () => {
+      // Seed the store first.
+      (workspaces.byRepo as unknown as Map<string, Map<string, WorkspaceInfo>>).set(
+        'repo_a',
+        new Map([['ws_a', ws({ team_activity_private: false })]])
+      );
+
+      vi.mocked(invoke).mockImplementation(async (cmd) => {
+        if (cmd === 'set_workspace_team_activity_private') throw 'write fail';
+        if (cmd === 'list_messages') return [];
+        return undefined;
+      });
+
+      const { findByTestId } = render(WorkspaceView, {
+        props: { workspace: ws({ team_activity_private: false }) },
+      });
+      const btn = await findByTestId('team-activity-privacy-toggle');
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(btn);
+      await waitFor(() => {
+        const toasts = Array.from(getToasts().values());
+        expect(toasts.some((t) => t.message.includes('write fail'))).toBe(true);
+      });
+      expect(btn.getAttribute('data-private')).toBe('false');
     });
   });
 

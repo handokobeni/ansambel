@@ -166,6 +166,76 @@ pub async fn remove_workspace(
         })
 }
 
+/// Task 18 — flip the per-workspace privacy flag.
+///
+/// On `is_private = true`, the team-activity publisher's `private_lock`
+/// kicks in (see `commands::team_activity::AggregatedState`) and the
+/// sensitive columns are cleared on the next flush. On `false`, the
+/// publisher resumes normal field population.
+///
+/// The new value is persisted to `workspaces.json` so the toggle survives
+/// app restart, and `WorkspaceEvent::PrivacyChanged` is broadcast to the
+/// publisher AFTER the state lock is released — per the Mutex-discipline
+/// rule, we never hold the AppState lock across a broadcast send.
+#[tauri::command]
+pub async fn set_workspace_team_activity_private(
+    workspace_id: String,
+    is_private: bool,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Mutex<AppState>>>,
+    event_tx: State<'_, WorkspaceEventTx>,
+) -> std::result::Result<(), String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let publisher_tx: WorkspaceEventTx = event_tx.inner().clone();
+    set_workspace_team_activity_private_inner(
+        workspace_id,
+        is_private,
+        data_dir,
+        state.inner().clone(),
+        Some(&publisher_tx),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "set_workspace_team_activity_private failed");
+        e.to_string()
+    })
+}
+
+pub(crate) async fn set_workspace_team_activity_private_inner(
+    ws_id: String,
+    is_private: bool,
+    data_dir: PathBuf,
+    state: Arc<Mutex<AppState>>,
+    publisher_tx: Option<&WorkspaceEventTx>,
+) -> Result<()> {
+    {
+        let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        let ws = st
+            .workspaces
+            .get_mut(&ws_id)
+            .ok_or_else(|| AppError::NotFound(format!("workspace '{}'", ws_id)))?;
+        if ws.team_activity_private == is_private {
+            // Idempotent — still persist + emit so the publisher gets a
+            // refresh event (cheap, and avoids subtle bugs where a UI
+            // double-click yields no broadcast).
+        }
+        ws.team_activity_private = is_private;
+        save_workspaces(&data_dir, &st.workspaces)?;
+        tracing::info!(
+            workspace_id = %ws_id,
+            is_private,
+            "Updated workspace team_activity_private"
+        );
+    } // lock dropped before broadcasting
+    if let Some(tx) = publisher_tx {
+        let _ = tx.send(WorkspaceEvent::PrivacyChanged {
+            workspace_id: ws_id,
+            is_private,
+        });
+    }
+    Ok(())
+}
+
 // ── Inner implementations ────────────────────────────────────────────
 
 pub(crate) async fn create_workspace_inner(
@@ -288,6 +358,7 @@ pub(crate) async fn create_workspace_inner_with_publisher(
         created_at: now,
         updated_at: now,
         worktree_dir: worktree_path.clone(),
+        team_activity_private: false,
     };
 
     {
@@ -943,6 +1014,205 @@ mod tests {
                 );
             }
             other => panic!("expected BranchChanged, got {other:?}"),
+        }
+    }
+
+    // ── Task 18 — per-workspace privacy toggle ───────────────────────────────
+
+    #[tokio::test]
+    async fn set_team_activity_private_toggles_flag_and_emits_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repo = crate::commands::repo::add_repo_inner(
+            local.to_str().unwrap().to_string(),
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+
+        let ws = create_workspace_inner(
+            repo.id,
+            "Privacy toggle".into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        assert!(!ws.team_activity_private);
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<crate::state::WorkspaceEvent>(8);
+        let publisher_tx: crate::state::WorkspaceEventTx = std::sync::Arc::new(tx);
+
+        set_workspace_team_activity_private_inner(
+            ws.id.clone(),
+            true,
+            data.clone(),
+            Arc::clone(&state),
+            Some(&publisher_tx),
+        )
+        .await
+        .unwrap();
+
+        {
+            let st = state.lock().unwrap();
+            assert!(
+                st.workspaces.get(&ws.id).unwrap().team_activity_private,
+                "flag should be true after toggle"
+            );
+        }
+
+        let ev = rx.try_recv().expect("PrivacyChanged should be emitted");
+        match ev {
+            crate::state::WorkspaceEvent::PrivacyChanged {
+                workspace_id,
+                is_private,
+            } => {
+                assert_eq!(workspace_id, ws.id);
+                assert!(is_private);
+            }
+            other => panic!("expected PrivacyChanged, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_team_activity_private_returns_err_when_workspace_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+
+        let err = set_workspace_team_activity_private_inner(
+            "ws_does_not_exist".into(),
+            true,
+            data,
+            state,
+            None,
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("not found") || msg.contains("ws_does_not_exist"),
+            "expected not-found error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_team_activity_private_persists_across_load() {
+        use crate::persistence::workspaces::load_workspaces;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repo = crate::commands::repo::add_repo_inner(
+            local.to_str().unwrap().to_string(),
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+
+        let ws = create_workspace_inner(
+            repo.id,
+            "Persist privacy".into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+
+        set_workspace_team_activity_private_inner(
+            ws.id.clone(),
+            true,
+            data.clone(),
+            Arc::clone(&state),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Reload from disk into a fresh map (no in-memory state) — the
+        // persisted flag must round-trip.
+        let reloaded = load_workspaces(&data).unwrap();
+        let persisted_ws = reloaded
+            .get(&ws.id)
+            .expect("workspace should be on disk after toggle");
+        assert!(
+            persisted_ws.team_activity_private,
+            "team_activity_private should persist across load"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_team_activity_private_to_false_emits_false_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repo = crate::commands::repo::add_repo_inner(
+            local.to_str().unwrap().to_string(),
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        let ws = create_workspace_inner(
+            repo.id,
+            "Toggle off".into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        // Pre-set to true (no publisher) so we can verify the false-edge event.
+        set_workspace_team_activity_private_inner(
+            ws.id.clone(),
+            true,
+            data.clone(),
+            Arc::clone(&state),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<crate::state::WorkspaceEvent>(8);
+        let publisher_tx: crate::state::WorkspaceEventTx = std::sync::Arc::new(tx);
+        set_workspace_team_activity_private_inner(
+            ws.id.clone(),
+            false,
+            data,
+            Arc::clone(&state),
+            Some(&publisher_tx),
+        )
+        .await
+        .unwrap();
+
+        let ev = rx.try_recv().expect("PrivacyChanged should be emitted");
+        match ev {
+            crate::state::WorkspaceEvent::PrivacyChanged {
+                workspace_id,
+                is_private,
+            } => {
+                assert_eq!(workspace_id, ws.id);
+                assert!(!is_private, "expected is_private=false on toggle-off");
+            }
+            other => panic!("expected PrivacyChanged, got {other:?}"),
         }
     }
 

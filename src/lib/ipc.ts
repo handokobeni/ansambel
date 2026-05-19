@@ -57,6 +57,15 @@ export const api = {
 
     remove: (workspaceId: string): Promise<void> => invoke('remove_workspace', { workspaceId }),
 
+    /** Phase 3a-3 Task 18: flip the per-workspace privacy flag.
+     *
+     *  On `isPrivate = true`, the team-activity publisher suppresses
+     *  sensitive columns for this workspace and clears any previously
+     *  published values on its next flush. The new value is persisted
+     *  to `workspaces.json` so it survives app restart. */
+    setTeamActivityPrivate: (workspaceId: string, isPrivate: boolean): Promise<void> =>
+      invoke<void>('set_workspace_team_activity_private', { workspaceId, isPrivate }),
+
     /** Stream the unified diff for a workspace's worktree. The backend
      *  emits `text` chunks ≤ 64 KB, then a single `eof`. `error` is rare
      *  and surfaces as an inline banner in the DiffView. */

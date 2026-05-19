@@ -927,6 +927,7 @@ mod tests {
                 created_at: 0,
                 updated_at: 0,
                 worktree_dir: worktree,
+                team_activity_private: false,
             },
         );
     }

@@ -4,6 +4,7 @@
   import { messages } from '$lib/stores/messages.svelte';
   import { workspaceTabs } from '$lib/stores/workspace-tabs.svelte';
   import { editorTabs } from '$lib/stores/editor-tabs.svelte';
+  import { workspaces } from '$lib/stores/workspaces.svelte';
   import { addToast } from '$lib/stores/toasts.svelte';
   import ChatPanel from '$lib/components/chat/ChatPanel.svelte';
   import TabStrip from './TabStrip.svelte';
@@ -158,6 +159,28 @@
     if (s === 'stopped') return 'Stopped';
     return 'Idle';
   }
+
+  // ── Phase 3a-3 Task 18: team-activity privacy toggle ───────────────
+  //
+  // Source-of-truth lives on the workspaces store (which the optimistic
+  // setter mutates in place). We fall back to the prop value when the
+  // store hasn't loaded this workspace yet (e.g. component mounted from
+  // a deep link before the sidebar populated).
+  const isPrivate = $derived(
+    workspaces.byRepo.get(workspace.repo_id)?.get(workspace.id)?.team_activity_private ??
+      workspace.team_activity_private ??
+      false
+  );
+  let togglingPrivacy = $state(false);
+  async function handleTogglePrivacy() {
+    if (togglingPrivacy) return;
+    togglingPrivacy = true;
+    try {
+      await workspaces.setTeamActivityPrivate(workspace.id, workspace.repo_id, !isPrivate);
+    } finally {
+      togglingPrivacy = false;
+    }
+  }
 </script>
 
 <section class="flex flex-col h-full">
@@ -171,6 +194,23 @@
       <code class="text-xs text-[var(--text-muted)]">{workspace.branch}</code>
     </div>
     <div class="flex items-center gap-2">
+      <button
+        type="button"
+        onclick={handleTogglePrivacy}
+        disabled={togglingPrivacy}
+        data-testid="team-activity-privacy-toggle"
+        data-private={isPrivate ? 'true' : 'false'}
+        aria-pressed={isPrivate}
+        aria-label={isPrivate
+          ? 'Team Activity is private — click to make public'
+          : 'Team Activity is public — click to make private'}
+        title={isPrivate
+          ? 'Team Activity is private (publisher suppresses sensitive columns). Click to make public.'
+          : 'Team Activity is public. Click to make private and clear sensitive columns.'}
+        class="text-xs px-2 py-0.5 rounded border border-[var(--border)] text-[var(--text-primary)] hover:bg-[var(--bg-card)] disabled:opacity-50"
+      >
+        {isPrivate ? 'Team Activity: ◌ Private' : 'Team Activity: ● Public'}
+      </button>
       {#if status === 'running'}
         <button
           type="button"

@@ -443,6 +443,13 @@ pub struct WorkspaceInfo {
     /// Defaults to empty path for backward compatibility with existing persisted data.
     #[serde(default)]
     pub worktree_dir: PathBuf,
+    /// When true, the team-activity publisher (Phase 3a-3) suppresses
+    /// emission of sensitive columns for this workspace and clears any
+    /// previously published values via the `private_lock` semantics in
+    /// `commands::team_activity::AggregatedState`. `serde(default)` so
+    /// workspaces persisted before Task 18 deserialise without migration.
+    #[serde(default)]
+    pub team_activity_private: bool,
 }
 
 #[derive(Default, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -783,10 +790,33 @@ mod tests {
             created_at: 1_776_000_000,
             updated_at: 1_776_099_500,
             worktree_dir: PathBuf::from("/data/workspaces/ws_abc123"),
+            team_activity_private: false,
         };
         let json = serde_json::to_string(&ws).unwrap();
         let back: WorkspaceInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ws);
+    }
+
+    #[test]
+    fn workspace_info_team_activity_private_defaults_false_on_legacy_load() {
+        // Workspaces persisted before Task 18 don't have the field. The
+        // serde(default) attribute must let them deserialise cleanly with
+        // `team_activity_private = false`.
+        let legacy_json = r#"{
+            "id": "ws_legacy",
+            "repo_id": "repo_x",
+            "branch": "main",
+            "base_branch": "main",
+            "custom_branch": false,
+            "title": "old",
+            "description": "",
+            "status": "not_started",
+            "column": "todo",
+            "created_at": 0,
+            "updated_at": 0
+        }"#;
+        let ws: WorkspaceInfo = serde_json::from_str(legacy_json).unwrap();
+        assert!(!ws.team_activity_private);
     }
 
     #[test]

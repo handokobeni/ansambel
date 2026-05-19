@@ -289,6 +289,7 @@ pub fn run() {
             crate::commands::workspace::create_workspace,
             crate::commands::workspace::list_workspaces,
             crate::commands::workspace::remove_workspace,
+            crate::commands::workspace::set_workspace_team_activity_private,
             crate::commands::task::add_task,
             crate::commands::task::list_tasks,
             crate::commands::task::update_task,
@@ -474,6 +475,15 @@ mod tests {
             std::any::type_name_of_val(&crate::commands::team_activity::set_team_activity_config);
         let _ =
             std::any::type_name_of_val(&crate::commands::team_activity::setup_team_activity_table);
+    }
+
+    #[test]
+    fn set_workspace_team_activity_private_command_is_registered() {
+        // Task 18 — pin the new per-workspace privacy toggle command into
+        // the invoke handler so a future rebase can't silently drop it.
+        let _ = std::any::type_name_of_val(
+            &crate::commands::workspace::set_workspace_team_activity_private,
+        );
     }
 
     #[test]

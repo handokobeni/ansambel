@@ -45,12 +45,17 @@ vi.mock('$lib/stores/repos.svelte', () => ({
 vi.mock('$lib/stores/workspaces.svelte', () => ({
   workspaces: {
     selectedWorkspaceId: null as string | null,
+    // Task 18: WorkspaceView reads the privacy flag via byRepo. Surface
+    // a real Map so `.get(...)` works (returns undefined → derived falls
+    // back to the prop value, which is what the App-level tests want).
+    byRepo: new Map(),
     loadForRepo: vi.fn().mockResolvedValue(undefined),
     listForRepo: vi.fn(() => []),
     select: vi.fn(),
     create: vi.fn(),
     remove: vi.fn(),
     getSelected: vi.fn(() => null),
+    setTeamActivityPrivate: vi.fn().mockResolvedValue(true),
   },
 }));
 

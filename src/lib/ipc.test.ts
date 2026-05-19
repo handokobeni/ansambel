@@ -175,6 +175,32 @@ describe('api.workspace', () => {
     vi.mocked(invoke).mockRejectedValue(new Error('Workspace not found'));
     await expect(api.workspace.remove('ws_missing')).rejects.toThrow('Workspace not found');
   });
+
+  // ── Task 18: setTeamActivityPrivate ─────────────────────────────────
+  it('setTeamActivityPrivate: forwards camelCase args to backend', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.workspace.setTeamActivityPrivate('ws_abc123', true);
+    expect(invoke).toHaveBeenCalledWith('set_workspace_team_activity_private', {
+      workspaceId: 'ws_abc123',
+      isPrivate: true,
+    });
+  });
+
+  it('setTeamActivityPrivate: also accepts isPrivate=false', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.workspace.setTeamActivityPrivate('ws_abc123', false);
+    expect(invoke).toHaveBeenCalledWith('set_workspace_team_activity_private', {
+      workspaceId: 'ws_abc123',
+      isPrivate: false,
+    });
+  });
+
+  it('setTeamActivityPrivate: propagates rejection from backend', async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error('workspace not found'));
+    await expect(api.workspace.setTeamActivityPrivate('ws_missing', true)).rejects.toThrow(
+      'workspace not found'
+    );
+  });
 });
 
 const mockTask: Task = {
