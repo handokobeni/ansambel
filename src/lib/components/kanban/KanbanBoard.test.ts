@@ -325,7 +325,7 @@ describe('KanbanBoard loading state', () => {
     expect(screen.getAllByText(/no tasks/i).length).toBeGreaterThan(0);
   });
 
-  it('does not show loading placeholder when binding has no active filters', () => {
+  it('shows "Loading tasks…" when binding has no active filters and tasks are loading', () => {
     vi.mocked(larkBindings.get).mockReturnValue(makeBinding(0)); // binding exists but 0 conditions
     vi.mocked(tasksStoreMock.isLoading).mockReturnValue(true);
 
@@ -339,7 +339,10 @@ describe('KanbanBoard loading state', () => {
       },
     });
 
+    // Generic "Loading tasks…" copy (NOT "Loading filtered view…") when no filter active
+    expect(screen.getAllByText(/loading tasks/i).length).toBeGreaterThan(0);
     expect(screen.queryByText(/loading filtered view/i)).toBeNull();
-    expect(screen.getAllByText(/no tasks/i).length).toBeGreaterThan(0);
+    // "No tasks" placeholder should NOT show while loading
+    expect(screen.queryByText(/no tasks/i)).toBeNull();
   });
 });

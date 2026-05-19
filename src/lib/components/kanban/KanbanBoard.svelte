@@ -204,9 +204,11 @@
         onconsider={(e) => handleConsider(col.id, e)}
         onfinalize={(e) => handleFinalize(col.id, e)}
       >
-        {#if tasksStore.isLoading(repoId) && (larkBindings.get(repoId)?.filters?.conditions?.length ?? 0) > 0}
+        {#if tasksStore.isLoading(repoId) && larkBindings.get(repoId)}
+          {@const hasActiveFilter =
+            (larkBindings.get(repoId)?.filters?.conditions?.length ?? 0) > 0}
           <p class="text-xs text-[var(--text-muted)] text-center py-4 italic">
-            Loading filtered view…
+            {hasActiveFilter ? 'Loading filtered view…' : 'Loading tasks…'}
           </p>
         {:else}
           {#each itemsFor(col.id) as task (task.id)}
