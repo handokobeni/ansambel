@@ -1,4 +1,4 @@
-import { SvelteMap } from 'svelte/reactivity';
+import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import type { AgentEvent, AgentStatus, Attachment, Message, TurnState } from '../types';
 
 // TODO(phase-3a-3-publisher): Task 14 ships the frontend mirror of the
@@ -39,6 +39,29 @@ class MessagesStore {
 
   hydrate(wsId: string, batch: Message[]): void {
     const map = this.getOrCreate(wsId);
+    // De-duplicate local echo entries (`msg_user_<timestamp>` ids inserted
+    // by WorkspaceView.handleSend for instant feedback) against the
+    // backend's persisted user message (ULID id). Without this, switching
+    // away from a workspace and back re-hydrates the persisted version
+    // alongside the still-resident local echo and renders the same user
+    // bubble twice.
+    //
+    // Edge case: if the user sends two identical messages within the
+    // ~500ms message-writer debounce, only the first persisted version is
+    // available on remount; both echoes get dropped and one user bubble
+    // appears to "disappear" until the next mount. The fix is upstream —
+    // the message writer should flush user messages synchronously — but
+    // the visible bug is rare and the resolution lands on subsequent
+    // hydrate calls, so we accept it here.
+    const persistedUserTexts = new SvelteSet<string>();
+    for (const msg of batch) {
+      if (msg.role === 'user') persistedUserTexts.add(msg.text);
+    }
+    for (const [id, msg] of map) {
+      if (id.startsWith('msg_user_') && msg.role === 'user' && persistedUserTexts.has(msg.text)) {
+        map.delete(id);
+      }
+    }
     for (const msg of batch) {
       if (!map.has(msg.id)) {
         map.set(msg.id, msg);

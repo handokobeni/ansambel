@@ -162,6 +162,51 @@ describe('WorkspaceView', () => {
     });
   });
 
+  it('reattaches (does not respawn) on remount when messages store shows running', async () => {
+    // Repro: first mount with not_started prop spawns; status flips to
+    // running via events; component unmounts on tab switch; remounts with
+    // the same stale prop. The agent is still alive on the backend, so
+    // we must reattach rather than spawn (which would error with
+    // "agent already running").
+    messages.apply({ type: 'status', status: 'running' }, 'ws_a');
+    render(WorkspaceView, { props: { workspace: ws({ status: 'not_started' }) } });
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        'reattach_agent',
+        expect.objectContaining({ workspaceId: 'ws_a' })
+      );
+    });
+    expect(invoke).not.toHaveBeenCalledWith('spawn_agent', expect.any(Object));
+  });
+
+  it('does not stamp status synchronously before spawn (no premature turn indicator)', async () => {
+    // Regression: an earlier fix stamped 'running' optimistically before
+    // awaiting spawn to guard against rapid remount. That had a UX bug —
+    // the messages store auto-creates a TurnState on status flip to
+    // 'running', so the chat showed a "Crunching… (elapsed)" indicator
+    // before the user had sent any prompt. The fix moved idempotency to
+    // the backend (spawn_agent downgrades to reattach when the agent is
+    // already alive), so the stamp is no longer needed. This test pins
+    // the no-stamp behavior so it isn't reintroduced.
+    let resolveSpawn: () => void = () => {};
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'spawn_agent') {
+        return new Promise<void>((res) => {
+          resolveSpawn = res;
+        });
+      }
+      return undefined;
+    });
+    render(WorkspaceView, { props: { workspace: ws({ status: 'waiting' }) } });
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('spawn_agent', expect.any(Object));
+    });
+    // Status should NOT be stamped before spawn resolves and the backend
+    // broadcasts Status::Running through the channel.
+    expect(messages.statusFor('ws_a')).toBeUndefined();
+    resolveSpawn();
+  });
+
   it('routes reattach channel events through messages.apply', async () => {
     let captured: { onmessage?: (ev: unknown) => void } | undefined;
     vi.mocked(invoke).mockImplementation(async (cmd, args) => {

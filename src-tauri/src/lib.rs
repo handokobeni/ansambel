@@ -113,7 +113,8 @@ pub fn run() {
                 settings,
             };
 
-            app.manage(std::sync::Arc::new(std::sync::Mutex::new(state)));
+            let state_arc = std::sync::Arc::new(std::sync::Mutex::new(state));
+            app.manage(state_arc.clone());
 
             // Phase 3a-3: broadcast channel that team-activity state publisher subscribes
             // to. Capacity 256 — receivers that fall behind by more than this lose
@@ -205,10 +206,22 @@ pub fn run() {
                                 team_cfg.clone(),
                                 row_id_cache.clone(),
                             );
+                            // Phase 3a-3 follow-up: enrich every snapshot with
+                            // repo_remote_url / repo_display_name / task_title
+                            // by looking them up in AppState. Without this, the
+                            // matching Bitable columns stayed empty (the
+                            // publisher only sees `WorkspaceEvent`s, which
+                            // carry the workspace_id and the changed value,
+                            // not the static repo + task context).
+                            let enricher =
+                                Some(crate::commands::team_activity::build_app_enricher(
+                                    state_arc.clone(),
+                                ));
                             let publisher = crate::commands::team_activity::Publisher {
                                 cfg: team_cfg,
                                 row_id_cache,
                                 uploader,
+                                enricher,
                                 debounce: std::time::Duration::from_secs(3),
                             };
                             let rx = workspace_event_tx.subscribe();

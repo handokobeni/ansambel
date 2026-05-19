@@ -155,11 +155,46 @@ pub type UploaderFn = Arc<
         + Sync,
 >;
 
+/// Static-per-workspace context the publisher cannot derive from
+/// `WorkspaceEvent` alone — it requires looking up the workspace in
+/// `AppState`, finding the linked repo, running `git remote get-url`
+/// on the repo path, and looking up any linked task.
+///
+/// Populated by an [`EnricherFn`] right before the snapshot is handed
+/// to the uploader. Any field that is `None` falls back to leaving the
+/// matching Bitable column unchanged (so test stubs / unconfigured
+/// installs keep working without crashing).
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct RowEnrichment {
+    pub repo_remote_url: Option<String>,
+    pub repo_display_name: Option<String>,
+    pub task_title: Option<String>,
+    /// Workspace branch name. Sourced from `WorkspaceInfo.branch` —
+    /// `BranchChanged` is only emitted at workspace creation, so the
+    /// publisher would otherwise leave this empty for any workspace
+    /// reopened after app restart.
+    pub branch_name: Option<String>,
+}
+
+/// Closure that maps a workspace_id to the static repo + task fields the
+/// publisher cannot derive from events. Wired in `lib.rs` from
+/// `Arc<Mutex<AppState>>`; tests pass `None` to opt out of enrichment.
+///
+/// Synchronous on purpose — callers must keep the call cheap (a single
+/// `AppState` lock acquisition + one `git remote get-url origin` shell
+/// out per cache miss), since it runs from the publisher's flush path.
+pub type EnricherFn = Arc<dyn Fn(&str) -> RowEnrichment + Send + Sync>;
+
 pub struct Publisher {
     pub cfg: TeamActivityConfig,
     /// workspace_id → Bitable record_id, populated as the uploader returns ids.
     pub row_id_cache: Arc<Mutex<HashMap<String, String>>>,
     pub uploader: UploaderFn,
+    /// Optional enricher — when set, the publisher fills repo_remote_url /
+    /// repo_display_name / task_title on the snapshot right before the
+    /// uploader call. `None` means "publish events verbatim", used by tests
+    /// that don't need AppState wiring.
+    pub enricher: Option<EnricherFn>,
     pub debounce: Duration,
 }
 
@@ -207,7 +242,28 @@ impl Publisher {
                         let Some(state) = aggregated.get_mut(&ws_id) else {
                             continue;
                         };
-                        let snap = state.snapshot.clone();
+                        let mut snap = state.snapshot.clone();
+                        // Apply static enrichment (repo + task lookups) just
+                        // before upload. Skipping under privacy lock keeps
+                        // the row stripped — even repo_remote_url / display
+                        // / task_title are user-identifying once correlated.
+                        if !state.private_lock {
+                            if let Some(enricher) = &self.enricher {
+                                let e = enricher(&ws_id);
+                                if snap.repo_remote_url.is_none() {
+                                    snap.repo_remote_url = e.repo_remote_url;
+                                }
+                                if snap.repo_display_name.is_none() {
+                                    snap.repo_display_name = e.repo_display_name;
+                                }
+                                if snap.task_title.is_none() {
+                                    snap.task_title = e.task_title;
+                                }
+                                if snap.branch_name.is_none() {
+                                    snap.branch_name = e.branch_name;
+                                }
+                            }
+                        }
                         state.dirty = false;
                         last_flush.insert(ws_id.clone(), now);
                         let uploader = self.uploader.clone();
@@ -342,9 +398,20 @@ pub fn build_lark_uploader(
             // record_id, then drop the lock before the HTTP call. Holding
             // the lock across the await would serialize every concurrent
             // publish through one mutex.
-            let record_id = {
+            let cached = {
                 let guard = row_id_cache.lock().await;
-                guard.get(&ws_id).cloned().unwrap_or_default()
+                guard.get(&ws_id).cloned()
+            };
+            // On cache miss (fresh process / first publish for this workspace
+            // since startup), search Lark for an existing row keyed by
+            // workspace_id BEFORE deciding POST vs PUT. Without this lookup,
+            // every app restart creates a new row — the user reported 5
+            // duplicate rows for the same workspace_id after a few restarts.
+            let record_id = match cached {
+                Some(id) => id,
+                None => lookup_existing_record_id(&client, &cfg, &ws_id)
+                    .await
+                    .unwrap_or_default(),
             };
             let fields = snapshot_to_fields(&snap);
             let new_id = client
@@ -355,6 +422,139 @@ pub fn build_lark_uploader(
             Ok(new_id)
         })
     })
+}
+
+/// Builds the production [`EnricherFn`] backed by `AppState` lookups.
+///
+/// Resolves each workspace_id to its linked repo (for `repo_remote_url` +
+/// `repo_display_name`) and any task whose `workspace_id` points at it
+/// (for `task_title`). The canonical remote URL is computed once per
+/// repo path and cached in an in-memory map — `git remote get-url
+/// origin` shells out, and we don't want to pay that on every 3-second
+/// debounce flush for an active workspace.
+///
+/// Unknown / missing lookups silently return `None` for that field;
+/// the publisher's `snapshot_to_fields` skips `None` keys so the row
+/// keeps whatever value the column had before, rather than blanking it.
+///
+/// The state lock is held only for the synchronous read; the (slower)
+/// `git remote` call runs after the lock is dropped so the publisher's
+/// flush path doesn't serialise on AppState contention.
+pub fn build_app_enricher(state: Arc<std::sync::Mutex<crate::state::AppState>>) -> EnricherFn {
+    // Per-repo cache of the canonical remote URL. Keyed by repo_id (not
+    // repo.path) because the path string is identical anyway — repos
+    // don't migrate paths mid-session — and repo_id is shorter and
+    // stable. `Arc<Mutex<_>>` so the closure can mutate across calls.
+    let remote_url_cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+    Arc::new(move |ws_id: &str| {
+        let (repo_path, repo_id, repo_name, task_title, branch_name) = {
+            let s = match state.lock() {
+                Ok(s) => s,
+                Err(_) => return RowEnrichment::default(),
+            };
+            let Some(ws) = s.workspaces.get(ws_id) else {
+                return RowEnrichment::default();
+            };
+            let branch_name = if ws.branch.is_empty() {
+                None
+            } else {
+                Some(ws.branch.clone())
+            };
+            let repo = s.repos.get(&ws.repo_id);
+            let (repo_path, repo_id, repo_name) = match repo {
+                Some(r) => (
+                    Some(r.path.clone()),
+                    Some(r.id.clone()),
+                    Some(r.name.clone()),
+                ),
+                None => (None, None, None),
+            };
+            // Prefer a live linked task's title (reflects post-creation
+            // edits in Lark / Jira). Fall back to the workspace's own
+            // snapshotted title — local-only workspaces never have a Task
+            // entry with their workspace_id, but the title is always
+            // stamped on the workspace itself at creation time, so
+            // returning empty here would mean the column is empty for
+            // every locally-created workspace.
+            let task_title = s
+                .tasks
+                .values()
+                .find(|t| t.workspace_id.as_deref() == Some(ws_id))
+                .map(|t| t.title.clone())
+                .or_else(|| {
+                    if ws.title.is_empty() {
+                        None
+                    } else {
+                        Some(ws.title.clone())
+                    }
+                });
+            (repo_path, repo_id, repo_name, task_title, branch_name)
+        }; // lock dropped before running git below.
+        let remote_url = match (repo_path, repo_id) {
+            (Some(path), Some(rid)) => {
+                let cached = remote_url_cache
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.get(&rid).cloned());
+                match cached {
+                    Some(url) => Some(url),
+                    None => match crate::platform::repo_identity::read_origin_url(&path) {
+                        Ok(url) => {
+                            if let Ok(mut g) = remote_url_cache.lock() {
+                                g.insert(rid, url.clone());
+                            }
+                            Some(url)
+                        }
+                        Err(_) => None,
+                    },
+                }
+            }
+            _ => None,
+        };
+        RowEnrichment {
+            repo_remote_url: remote_url,
+            repo_display_name: repo_name,
+            task_title,
+            branch_name,
+        }
+    })
+}
+
+/// Searches Lark for an existing team-activity row matching `workspace_id`.
+/// Returns the first matching `record_id` (`Ok(Some(_))`) or `Ok(None)` if no
+/// row exists yet. Search errors are downgraded to `Ok(None)` by the caller —
+/// the worst case is a one-off duplicate (better than no publish at all if
+/// the search endpoint is transiently broken).
+async fn lookup_existing_record_id(
+    client: &crate::platform::lark_client::LarkClient,
+    cfg: &crate::state::TeamActivityConfig,
+    ws_id: &str,
+) -> Result<String> {
+    let filter = crate::state::FilterSpec {
+        conjunction: crate::state::FilterConjunction::And,
+        conditions: vec![crate::state::FilterCondition {
+            field_id: String::new(),
+            field_name: "workspace_id".into(),
+            operator: crate::state::FilterOperator::Is,
+            value: vec![ws_id.into()],
+        }],
+    };
+    let records = client
+        .bitable_search_records(&cfg.app_token, &cfg.table_id, &filter)
+        .await?;
+    if records.len() > 1 {
+        tracing::warn!(
+            workspace_id = ws_id,
+            matches = records.len(),
+            "team-activity: multiple rows match workspace_id; using first — manual cleanup recommended"
+        );
+    }
+    Ok(records
+        .into_iter()
+        .next()
+        .map(|r| r.record_id)
+        .unwrap_or_default())
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -601,10 +801,95 @@ mod tests {
             cfg,
             row_id_cache: Default::default(),
             uploader,
+            enricher: None,
             debounce,
         };
         tokio::spawn(publisher.run(rx));
         tx
+    }
+
+    fn spawn_publisher_with_enricher(
+        cfg: TeamActivityConfig,
+        uploader: UploaderFn,
+        enricher: EnricherFn,
+        debounce: Duration,
+    ) -> broadcast::Sender<WorkspaceEvent> {
+        let (tx, rx) = broadcast::channel::<WorkspaceEvent>(32);
+        let publisher = Publisher {
+            cfg,
+            row_id_cache: Default::default(),
+            uploader,
+            enricher: Some(enricher),
+            debounce,
+        };
+        tokio::spawn(publisher.run(rx));
+        tx
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn publisher_applies_enrichment_before_uploader_call() {
+        // End-to-end: send a single StatusChanged event with an enricher
+        // attached. After debounce, the recording uploader should observe
+        // the snapshot with repo_remote_url + repo_display_name +
+        // task_title filled in.
+        let (uploader, log) = recording_uploader();
+        let enricher: EnricherFn = Arc::new(|ws_id| RowEnrichment {
+            repo_remote_url: Some(format!("https://github.com/x/{ws_id}")),
+            repo_display_name: Some("my-repo".into()),
+            task_title: Some("Fix bug".into()),
+            branch_name: Some("feat/branch".into()),
+        });
+        let tx =
+            spawn_publisher_with_enricher(make_cfg(), uploader, enricher, Duration::from_secs(3));
+        let _ = tx.send(WorkspaceEvent::StatusChanged {
+            workspace_id: "ws_enrich".into(),
+            new_status: crate::state::WorkspaceStatus::Running,
+        });
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let snapshots = log.lock().await;
+        assert_eq!(snapshots.len(), 1);
+        let snap = &snapshots[0];
+        assert_eq!(snap.workspace_id, "ws_enrich");
+        assert_eq!(
+            snap.repo_remote_url.as_deref(),
+            Some("https://github.com/x/ws_enrich")
+        );
+        assert_eq!(snap.repo_display_name.as_deref(), Some("my-repo"));
+        assert_eq!(snap.task_title.as_deref(), Some("Fix bug"));
+        assert_eq!(snap.branch_name.as_deref(), Some("feat/branch"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn publisher_skips_enrichment_under_privacy_lock() {
+        // When the workspace is in private mode, enrichment must NOT
+        // populate repo_remote_url / repo_display_name / task_title —
+        // those fields are user-identifying once correlated with the
+        // workspace_id, and the privacy escape promises a stripped row.
+        let (uploader, log) = recording_uploader();
+        let enricher: EnricherFn = Arc::new(|_| RowEnrichment {
+            repo_remote_url: Some("https://github.com/leak/leak".into()),
+            repo_display_name: Some("leak".into()),
+            task_title: Some("leak".into()),
+            branch_name: Some("leak".into()),
+        });
+        let tx =
+            spawn_publisher_with_enricher(make_cfg(), uploader, enricher, Duration::from_secs(3));
+        let _ = tx.send(WorkspaceEvent::PrivacyChanged {
+            workspace_id: "ws_priv".into(),
+            is_private: true,
+        });
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let snapshots = log.lock().await;
+        assert_eq!(snapshots.len(), 1);
+        let snap = &snapshots[0];
+        assert!(snap.private);
+        assert!(snap.repo_remote_url.is_none(), "remote_url must stay None");
+        assert!(
+            snap.repo_display_name.is_none(),
+            "display_name must stay None"
+        );
+        assert!(snap.task_title.is_none(), "task_title must stay None");
+        assert!(snap.branch_name.is_none(), "branch_name must stay None");
     }
 
     #[tokio::test(start_paused = true)]
@@ -969,6 +1254,365 @@ mod tests {
         // Second call: cache now has "ws_t" → "recNEW", uploader takes PUT path.
         let rec2 = (uploader)("ws_t".into(), snap).await.unwrap();
         assert_eq!(rec2, "recNEW");
+    }
+
+    #[tokio::test]
+    async fn build_lark_uploader_reuses_existing_record_id_on_cache_miss() {
+        // Regression: after app restart, the in-memory row_id_cache is empty.
+        // The previous implementation always took POST on cache miss, which
+        // created duplicate Bitable rows for the same workspace. The fix
+        // searches Lark for an existing row keyed by workspace_id first.
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok", "tenant_access_token": "t_xyz", "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        // Search returns one existing record → uploader must NOT call POST.
+        Mock::given(method("POST"))
+            .and(path_regex(
+                r"^/open-apis/bitable/v1/apps/[^/]+/tables/[^/]+/records/search$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [{ "record_id": "recEXISTING", "fields": {} }],
+                    "has_more": false,
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // PUT to recEXISTING is the expected path.
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/open-apis/bitable/v1/apps/[^/]+/tables/[^/]+/records/recEXISTING$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "record": { "record_id": "recEXISTING", "fields": {} } }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // Bare POST to /records must NOT be hit — duplicate creation would
+        // be the bug we're guarding against.
+        Mock::given(method("POST"))
+            .and(path_regex(
+                r"^/open-apis/bitable/v1/apps/[^/]+/tables/[^/]+/records$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "record": { "record_id": "recDUPLICATE", "fields": {} } }
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = Arc::new(crate::platform::lark_client::LarkClient::new(
+            crate::platform::lark_client::LarkConfig {
+                app_id: "app_test_id".into(),
+                app_secret: "app_test_secret".into(),
+                app_token: "bascn".into(),
+                table_id: "tbl".into(),
+                base_url: server.uri(),
+            },
+        ));
+        let cfg = TeamActivityConfig {
+            app_token: "bascn".into(),
+            table_id: "tbl".into(),
+            machine_label: "test@machine".into(),
+        };
+        let cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let uploader = build_lark_uploader(client, cfg, cache.clone());
+        let snap = RowSnapshot {
+            workspace_id: "ws_t".into(),
+            ansambel_status: Some("running".into()),
+            ..Default::default()
+        };
+        let rec = (uploader)("ws_t".into(), snap).await.unwrap();
+        assert_eq!(rec, "recEXISTING");
+        assert_eq!(
+            cache.lock().await.get("ws_t"),
+            Some(&"recEXISTING".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn build_lark_uploader_falls_back_to_post_when_search_returns_empty() {
+        // Counterpart to the reuse test: when search finds no existing row,
+        // uploader proceeds to POST (creating the row for the first time).
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok", "tenant_access_token": "t_xyz", "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(
+                r"^/open-apis/bitable/v1/apps/[^/]+/tables/[^/]+/records/search$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "items": [], "has_more": false }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(
+                r"^/open-apis/bitable/v1/apps/[^/]+/tables/[^/]+/records$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "record": { "record_id": "recNEW", "fields": {} } }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = Arc::new(crate::platform::lark_client::LarkClient::new(
+            crate::platform::lark_client::LarkConfig {
+                app_id: "app_test_id".into(),
+                app_secret: "app_test_secret".into(),
+                app_token: "bascn".into(),
+                table_id: "tbl".into(),
+                base_url: server.uri(),
+            },
+        ));
+        let cfg = TeamActivityConfig {
+            app_token: "bascn".into(),
+            table_id: "tbl".into(),
+            machine_label: "test@machine".into(),
+        };
+        let cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let uploader = build_lark_uploader(client, cfg, cache.clone());
+        let snap = RowSnapshot {
+            workspace_id: "ws_t".into(),
+            ansambel_status: Some("running".into()),
+            ..Default::default()
+        };
+        let rec = (uploader)("ws_t".into(), snap).await.unwrap();
+        assert_eq!(rec, "recNEW");
+    }
+
+    // ── build_app_enricher (Phase 3a-3 follow-up) ───────────────────
+
+    fn make_appstate_with_workspace_and_repo(
+        ws_id: &str,
+        repo_id: &str,
+        repo_name: &str,
+        repo_path: std::path::PathBuf,
+    ) -> Arc<std::sync::Mutex<crate::state::AppState>> {
+        use crate::state::{AppState, KanbanColumn, RepoInfo, WorkspaceInfo, WorkspaceStatus};
+        let mut s = AppState::default();
+        s.repos.insert(
+            repo_id.into(),
+            RepoInfo {
+                id: repo_id.into(),
+                name: repo_name.into(),
+                path: repo_path,
+                gh_profile: None,
+                default_branch: "main".into(),
+                created_at: 0,
+                updated_at: 0,
+                scripts: Vec::new(),
+            },
+        );
+        s.workspaces.insert(
+            ws_id.into(),
+            WorkspaceInfo {
+                id: ws_id.into(),
+                repo_id: repo_id.into(),
+                title: "Workspace title".into(),
+                description: String::new(),
+                branch: "feat/x".into(),
+                base_branch: "main".into(),
+                custom_branch: false,
+                status: WorkspaceStatus::NotStarted,
+                column: KanbanColumn::InProgress,
+                created_at: 0,
+                updated_at: 0,
+                worktree_dir: std::path::PathBuf::new(),
+                team_activity_private: false,
+            },
+        );
+        Arc::new(std::sync::Mutex::new(s))
+    }
+
+    fn init_git_repo_with_origin(dir: &std::path::Path, origin_url: &str) {
+        use std::process::Command;
+        Command::new("git").arg("init").arg(dir).output().unwrap();
+        Command::new("git")
+            .args(["remote", "add", "origin", origin_url])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+    }
+
+    #[test]
+    fn build_app_enricher_returns_repo_name_and_canonical_remote_url() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(tmp.path(), "git@github.com:Foo/Bar.git");
+        let state = make_appstate_with_workspace_and_repo(
+            "ws_e",
+            "repo_e",
+            "kelola-app",
+            tmp.path().to_path_buf(),
+        );
+        let enricher = build_app_enricher(state);
+        let out = enricher("ws_e");
+        assert_eq!(out.repo_display_name.as_deref(), Some("kelola-app"));
+        // canonicalise_remote_url strips `.git`; the host case is preserved
+        // here because the canonicaliser only lowercases the host part.
+        assert!(
+            out.repo_remote_url
+                .as_deref()
+                .unwrap_or("")
+                .contains("github.com"),
+            "remote_url should contain canonical host, got {:?}",
+            out.repo_remote_url
+        );
+        // Falls back to the workspace's own title (stamped at creation time
+        // from the task card). The test helper sets title = "Workspace
+        // title", which is what we expect here when there is no live Task
+        // entry pointing to this workspace.
+        assert_eq!(out.task_title.as_deref(), Some("Workspace title"));
+        // The test helper stamps branch = "feat/x" on the workspace; the
+        // enricher reads it directly from WorkspaceInfo.branch.
+        assert_eq!(out.branch_name.as_deref(), Some("feat/x"));
+    }
+
+    #[test]
+    fn build_app_enricher_falls_back_to_workspace_title_when_no_linked_task() {
+        let state = make_appstate_with_workspace_and_repo(
+            "ws_fallback",
+            "repo_f",
+            "f",
+            std::path::PathBuf::from("/tmp/nonexistent_fb"),
+        );
+        let enricher = build_app_enricher(state);
+        let out = enricher("ws_fallback");
+        // No task entry was inserted; the workspace's own title field is
+        // the right value to publish so locally-created workspaces don't
+        // leave the column empty.
+        assert_eq!(out.task_title.as_deref(), Some("Workspace title"));
+    }
+
+    #[test]
+    fn build_app_enricher_prefers_linked_task_title_over_workspace_title() {
+        // When the workspace has been edited in Lark/Jira after creation,
+        // the live Task entry holds the up-to-date title. The workspace's
+        // own snapshotted title becomes stale. We prefer Task.title.
+        use crate::state::{KanbanColumn, Task};
+        let state = make_appstate_with_workspace_and_repo(
+            "ws_p",
+            "repo_p",
+            "p",
+            std::path::PathBuf::from("/tmp/nonexistent_p"),
+        );
+        {
+            let mut s = state.lock().unwrap();
+            s.tasks.insert(
+                "tk_p".into(),
+                Task {
+                    id: "tk_p".into(),
+                    repo_id: "repo_p".into(),
+                    workspace_id: Some("ws_p".into()),
+                    title: "Live updated title".into(),
+                    description: String::new(),
+                    column: KanbanColumn::InProgress,
+                    order: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                    pic_names: Vec::new(),
+                },
+            );
+        }
+        let enricher = build_app_enricher(state);
+        let out = enricher("ws_p");
+        assert_eq!(out.task_title.as_deref(), Some("Live updated title"));
+    }
+
+    #[test]
+    fn build_app_enricher_returns_task_title_when_linked() {
+        use crate::state::{KanbanColumn, Task};
+        let state = make_appstate_with_workspace_and_repo(
+            "ws_t",
+            "repo_t",
+            "kelola-app",
+            std::path::PathBuf::from("/tmp/nonexistent_for_remote_url"),
+        );
+        {
+            let mut s = state.lock().unwrap();
+            s.tasks.insert(
+                "tk_1".into(),
+                Task {
+                    id: "tk_1".into(),
+                    repo_id: "repo_t".into(),
+                    workspace_id: Some("ws_t".into()),
+                    title: "Fix login bug".into(),
+                    description: String::new(),
+                    column: KanbanColumn::InProgress,
+                    order: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                    pic_names: Vec::new(),
+                },
+            );
+        }
+        let enricher = build_app_enricher(state);
+        let out = enricher("ws_t");
+        assert_eq!(out.task_title.as_deref(), Some("Fix login bug"));
+    }
+
+    #[test]
+    fn build_app_enricher_returns_default_when_workspace_unknown() {
+        let state = make_appstate_with_workspace_and_repo(
+            "ws_known",
+            "repo_x",
+            "x",
+            std::path::PathBuf::from("/tmp/nonexistent"),
+        );
+        let enricher = build_app_enricher(state);
+        let out = enricher("ws_does_not_exist");
+        assert!(out.repo_remote_url.is_none());
+        assert!(out.repo_display_name.is_none());
+        assert!(out.task_title.is_none());
+    }
+
+    #[test]
+    fn build_app_enricher_caches_remote_url_across_calls() {
+        // After the first call, the remote_url_cache should be populated.
+        // Subsequent calls reuse it even if the repo no longer has an
+        // origin remote on disk (we simulate by checking the cache hit
+        // returns the same value after deleting the repo dir).
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(tmp.path(), "git@github.com:Foo/Bar.git");
+        let state = make_appstate_with_workspace_and_repo(
+            "ws_c",
+            "repo_c",
+            "kelola-app",
+            tmp.path().to_path_buf(),
+        );
+        let enricher = build_app_enricher(state);
+        let first = enricher("ws_c");
+        // Drop the repo directory; second call must still return the
+        // cached canonical URL rather than failing the git shell-out.
+        drop(tmp);
+        let second = enricher("ws_c");
+        assert_eq!(first.repo_remote_url, second.repo_remote_url);
+        assert!(second.repo_remote_url.is_some());
     }
 
     // ── get/set_team_activity_config (Task 15) ────────────────────

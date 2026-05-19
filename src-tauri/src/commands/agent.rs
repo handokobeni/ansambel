@@ -26,6 +26,25 @@ pub async fn spawn_agent(
     event_tx: tauri::State<'_, WorkspaceEventTx>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    // Idempotency guard: if the agent process is already alive for this
+    // workspace, silently downgrade to reattach. The frontend may call
+    // `spawn_agent` on remount when it can't tell whether the previous
+    // process survived (e.g. Plan ↔ Work mode toggle drops the Channel
+    // handler but leaves the agent running). Erroring with
+    // "agent already running" surfaces an alarming red toast for what is
+    // really a benign duplicate request; subscribing to the existing
+    // broadcaster instead is the natural recovery path.
+    let already_running = state
+        .lock()
+        .map_err(|e| format!("state lock poisoned: {e}"))?
+        .agents
+        .contains_key(&workspace_id);
+    if already_running {
+        let rx = reattach_agent_inner(state.inner().clone(), &workspace_id)
+            .map_err(|e| e.to_string())?;
+        forward_subscriber(rx, on_event);
+        return Ok(());
+    }
     let data_dir = app
         .path()
         .app_data_dir()

@@ -45,13 +45,25 @@
     channel.onmessage = (ev: AgentEvent) => {
       messages.apply(ev, workspace.id);
     };
+    // Read from the messages store first — it persists across tab-switch
+    // remounts within the same app session, while `workspace.status` (the
+    // prop) reflects the value at first open and can be stale.
+    //
+    // Note: the spawn_agent Tauri command is idempotent on the backend
+    // (it silently downgrades to reattach when the agent is already alive
+    // for this workspace), so taking the spawn path on a stale read here
+    // is no longer fatal — the backend won't error with
+    // "agent already running". The messages-store check is still the
+    // preferred branch because reattach skips the (small) overhead of
+    // re-checking process state on the backend.
+    const currentStatus = messages.statusFor(workspace.id) ?? workspace.status;
     try {
-      if (workspace.status === 'not_started' || workspace.status === 'waiting') {
+      if (currentStatus === 'not_started' || currentStatus === 'waiting') {
         await api.agent.spawn(workspace.id, channel);
       } else {
-        // Status is running — the agent is alive on the backend but our
-        // Channel handler was GC'd on the previous unmount. Re-subscribe
-        // to the broadcaster so live events resume.
+        // Agent is alive on the backend but our Channel handler was GC'd
+        // on the previous unmount. Re-subscribe to the broadcaster so live
+        // events resume.
         await api.agent.reattach(workspace.id, channel);
       }
     } catch (err) {

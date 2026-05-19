@@ -344,6 +344,53 @@ describe('MessagesStore', () => {
       messages.hydrate('ws_h4', []);
       expect(messages.listForWorkspace('ws_h4')).toEqual([]);
     });
+
+    it('drops local user echo when persisted version with same text arrives', () => {
+      // Repro: WorkspaceView.handleSend stamps `msg_user_<ts>` for instant
+      // feedback. The backend persists with a ULID (`m_01...`). On
+      // tab-switch remount, hydrate would render both — same bubble
+      // twice. Dedup by text keeps the persisted version, drops the echo.
+      const echo: Message = {
+        id: 'msg_user_1729000000000',
+        workspace_id: 'ws_dedupe',
+        role: 'user',
+        text: 'kenapa redis?',
+        is_partial: false,
+        tool_use: null,
+        tool_result: null,
+        created_at: 100,
+      };
+      const persisted: Message = {
+        ...echo,
+        id: 'm_01HX1234',
+        created_at: 105,
+      };
+      messages.upsert(echo);
+      messages.hydrate('ws_dedupe', [persisted]);
+      const list = messages.listForWorkspace('ws_dedupe');
+      expect(list).toHaveLength(1);
+      expect(list[0].id).toBe('m_01HX1234');
+    });
+
+    it('keeps local echo when no matching persisted text is in the batch', () => {
+      // The echo's job is to bridge the ~500ms gap before the backend
+      // flushes the user message to disk. If the user sends right before
+      // a tab switch, hydrate may run BEFORE the disk flush — the echo
+      // must survive that call so the user's bubble doesn't disappear.
+      const echo: Message = {
+        id: 'msg_user_1729000001000',
+        workspace_id: 'ws_keep',
+        role: 'user',
+        text: 'in-flight prompt',
+        is_partial: false,
+        tool_use: null,
+        tool_result: null,
+        created_at: 100,
+      };
+      messages.upsert(echo);
+      messages.hydrate('ws_keep', []);
+      expect(messages.listForWorkspace('ws_keep')).toHaveLength(1);
+    });
   });
 
   describe('turn state', () => {
