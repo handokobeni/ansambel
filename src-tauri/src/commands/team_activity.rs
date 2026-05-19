@@ -53,6 +53,83 @@ pub struct RowSnapshot {
     pub private: bool,
 }
 
+/// One row in the Phase 3a-4 sidebar / mirror view, mirroring the columns
+/// the publisher (`RowSnapshot` → `snapshot_to_fields`) writes. All-string
+/// for IPC simplicity; the i64 `last_activity_at` is epoch ms (the same
+/// shape the publisher writes via `last_activity_at = Some(now_ms)`).
+///
+/// Missing or wrong-typed fields default to empty / 0 / false instead of
+/// erroring; teammates running older publisher versions may emit partial
+/// rows, and a partial row is more useful than no row at all.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct TeamActivityRow {
+    pub workspace_id: String,
+    pub repo_remote_url: String,
+    pub repo_display_name: String,
+    pub task_title: String,
+    pub assignee_machine: String,
+    pub ansambel_status: String,
+    pub last_activity_at: i64,
+    pub last_message_preview: String,
+    pub branch_name: String,
+    pub diff_summary: String,
+    pub pr_url: String,
+    pub private: bool,
+}
+
+/// What `fetch_team_activity_rows` returns. Tagged enum so the frontend
+/// can pattern-match without an extra discriminator. Each non-Rows variant
+/// drives a distinct sidebar empty/disabled state; see the spec's error
+/// handling matrix.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FetchResult {
+    /// `team_activity_config.json` absent or `app_token` empty.
+    Disabled,
+    /// Config exists but `machine_label` is blank — filter would over-match.
+    MachineLabelEmpty,
+    /// User has no local repos with an origin remote, so there's nothing to
+    /// scope the team-activity rows against.
+    NoOverlapRepos,
+    /// Success. Rows may be empty (filter matched zero records).
+    Rows { rows: Vec<TeamActivityRow> },
+}
+
+/// Maps one Bitable record into a `TeamActivityRow`. Defensive against
+/// missing keys and wrong types — see the contract note on
+/// [`TeamActivityRow`].
+// Will be called by fetch_team_activity_rows_inner (Task 3).
+#[allow(dead_code)]
+pub(crate) fn parse_record_to_row(
+    record: crate::platform::lark_client::BitableRecord,
+) -> TeamActivityRow {
+    let f = &record.fields;
+    let s = |key: &str| -> String {
+        f.get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default()
+    };
+    TeamActivityRow {
+        workspace_id: s("workspace_id"),
+        repo_remote_url: s("repo_remote_url"),
+        repo_display_name: s("repo_display_name"),
+        task_title: s("task_title"),
+        assignee_machine: s("assignee_machine"),
+        ansambel_status: s("ansambel_status"),
+        last_activity_at: f
+            .get("last_activity_at")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        last_message_preview: s("last_message_preview"),
+        branch_name: s("branch_name"),
+        diff_summary: s("diff_summary"),
+        pr_url: s("pr_url"),
+        private: f.get("private").and_then(|v| v.as_bool()).unwrap_or(false),
+    }
+}
+
 /// Per-workspace aggregation state held while the loop debounces.
 #[derive(Clone, Default)]
 struct AggregatedState {
@@ -1613,6 +1690,110 @@ mod tests {
         let second = enricher("ws_c");
         assert_eq!(first.repo_remote_url, second.repo_remote_url);
         assert!(second.repo_remote_url.is_some());
+    }
+
+    // ── Phase 3a-4: parse_record_to_row ─────────────────────────────
+
+    #[test]
+    fn parse_record_to_row_extracts_all_fields_with_correct_types() {
+        let record = crate::platform::lark_client::BitableRecord {
+            record_id: "recA".into(),
+            fields: serde_json::json!({
+                "workspace_id": "ws_a",
+                "repo_remote_url": "https://github.com/x/y",
+                "repo_display_name": "y",
+                "task_title": "Fix bug",
+                "assignee_machine": "alice@laptop",
+                "ansambel_status": "running",
+                "last_activity_at": 1_700_000_000_000_i64,
+                "last_message_preview": "doing thing",
+                "branch_name": "feat/x",
+                "diff_summary": "+10 -3",
+                "pr_url": "https://github.com/x/y/pull/42",
+                "private": false,
+            }),
+            extra: Default::default(),
+        };
+        let row = parse_record_to_row(record);
+        assert_eq!(row.workspace_id, "ws_a");
+        assert_eq!(row.repo_remote_url, "https://github.com/x/y");
+        assert_eq!(row.repo_display_name, "y");
+        assert_eq!(row.task_title, "Fix bug");
+        assert_eq!(row.assignee_machine, "alice@laptop");
+        assert_eq!(row.ansambel_status, "running");
+        assert_eq!(row.last_activity_at, 1_700_000_000_000);
+        assert_eq!(row.last_message_preview, "doing thing");
+        assert_eq!(row.branch_name, "feat/x");
+        assert_eq!(row.diff_summary, "+10 -3");
+        assert_eq!(row.pr_url, "https://github.com/x/y/pull/42");
+        assert!(!row.private);
+    }
+
+    #[test]
+    fn parse_record_to_row_defaults_missing_strings_to_empty() {
+        let record = crate::platform::lark_client::BitableRecord {
+            record_id: "recM".into(),
+            fields: serde_json::json!({ "workspace_id": "ws_m" }),
+            extra: Default::default(),
+        };
+        let row = parse_record_to_row(record);
+        assert_eq!(row.workspace_id, "ws_m");
+        assert_eq!(row.repo_remote_url, "");
+        assert_eq!(row.repo_display_name, "");
+        assert_eq!(row.task_title, "");
+        assert_eq!(row.assignee_machine, "");
+        assert_eq!(row.ansambel_status, "");
+        assert_eq!(row.last_activity_at, 0);
+        assert_eq!(row.last_message_preview, "");
+        assert_eq!(row.branch_name, "");
+        assert_eq!(row.diff_summary, "");
+        assert_eq!(row.pr_url, "");
+        assert!(!row.private);
+    }
+
+    #[test]
+    fn parse_record_to_row_coerces_datetime_epoch_ms_to_i64() {
+        let record = crate::platform::lark_client::BitableRecord {
+            record_id: "recT".into(),
+            fields: serde_json::json!({
+                "workspace_id": "ws_t",
+                "last_activity_at": 1_705_000_000_000_i64,
+            }),
+            extra: Default::default(),
+        };
+        let row = parse_record_to_row(record);
+        assert_eq!(row.last_activity_at, 1_705_000_000_000);
+    }
+
+    #[test]
+    fn parse_record_to_row_handles_private_true_value() {
+        let record = crate::platform::lark_client::BitableRecord {
+            record_id: "recP".into(),
+            fields: serde_json::json!({
+                "workspace_id": "ws_p",
+                "private": true,
+            }),
+            extra: Default::default(),
+        };
+        let row = parse_record_to_row(record);
+        assert!(row.private);
+    }
+
+    #[test]
+    fn parse_record_to_row_handles_malformed_record_gracefully() {
+        let record = crate::platform::lark_client::BitableRecord {
+            record_id: "recX".into(),
+            fields: serde_json::json!({
+                "workspace_id": "ws_x",
+                "last_activity_at": "not a number",
+                "private": "not a bool",
+            }),
+            extra: Default::default(),
+        };
+        let row = parse_record_to_row(record);
+        assert_eq!(row.workspace_id, "ws_x");
+        assert_eq!(row.last_activity_at, 0);
+        assert!(!row.private);
     }
 
     // ── get/set_team_activity_config (Task 15) ────────────────────
