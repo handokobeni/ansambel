@@ -68,6 +68,78 @@ class TeamActivityStore {
     this.selectedWorkspaceId = workspaceId;
   }
 
+  private intervalId: ReturnType<typeof setTimeout> | null = null;
+  private visibilityHandler: (() => void) | null = null;
+  private inflight = false;
+
+  /** Mount-time entry: immediate fetch + recursive 10 s setTimeout + a
+   *  visibilitychange listener that fires an immediate fetch when the
+   *  user returns to the app. Idempotent — calling `start()` twice in a
+   *  row is a no-op (the existing loop keeps running).
+   *
+   *  The first tick is scheduled via setTimeout(0) (not a bare
+   *  `void this.tick()`) so that the entire poll-loop runs inside the
+   *  timer-callback chain. This prevents Vitest's
+   *  `runOnlyPendingTimersAsync` from double-firing the 10 s schedule
+   *  that is created inside the callback's `.finally()`. */
+  start(): void {
+    if (this.intervalId !== null) return; // already running
+    this.intervalId = setTimeout(() => this.doTickAndScheduleNext(), 0);
+    this.visibilityHandler = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        // Cancel the pending 10 s timer and trigger an immediate fetch
+        // via the same timer-callback chain (keeps the double-fire guard
+        // intact for test environments using runOnlyPendingTimersAsync).
+        if (this.intervalId !== null) clearTimeout(this.intervalId);
+        this.intervalId = setTimeout(() => this.doTickAndScheduleNext(), 0);
+      }
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.visibilityHandler);
+    }
+  }
+
+  /** Runs one tick then re-schedules itself in 10 s (if still running).
+   *  All scheduling stays inside this timer-callback chain so that
+   *  `runOnlyPendingTimers` semantics don't fire the next 10 s slot
+   *  during the same flush that ran the current tick. */
+  private doTickAndScheduleNext(): void {
+    void this.tick().finally(() => {
+      if (this.intervalId !== null) {
+        this.intervalId = setTimeout(() => this.doTickAndScheduleNext(), 10_000);
+      }
+    });
+  }
+
+  /** Unmount-time cleanup. Removes the visibility listener and clears
+   *  the pending timeout. Safe to call when already stopped. */
+  stop(): void {
+    if (this.intervalId !== null) {
+      clearTimeout(this.intervalId);
+      this.intervalId = null;
+    }
+    if (this.visibilityHandler !== null && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.visibilityHandler);
+      this.visibilityHandler = null;
+    }
+    this.inflight = false;
+  }
+
+  /** Internal tick — visibility-aware, inflight-guarded. Public `refresh`
+   *  delegates to the same fetch logic minus the visibility check (manual
+   *  Refresh button works even when the document is hidden — defensive
+   *  for headless tests). */
+  private async tick(): Promise<void> {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    if (this.inflight) return;
+    this.inflight = true;
+    try {
+      await this.refresh();
+    } finally {
+      this.inflight = false;
+    }
+  }
+
   private reconcile(rows: TeamActivityRow[]): void {
     // SvelteSet (not plain Set) to satisfy the codebase's
     // svelte/prefer-svelte-reactivity ESLint rule in .svelte.ts files.

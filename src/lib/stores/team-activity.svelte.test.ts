@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -7,7 +7,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { invoke } from '@tauri-apps/api/core';
 import { teamActivity } from './team-activity.svelte';
 import { removeToast, getToasts } from './toasts.svelte';
-import type { TeamActivityRow } from '../types';
+import type { FetchResult, TeamActivityRow } from '../types';
 
 function row(overrides: Partial<TeamActivityRow> = {}): TeamActivityRow {
   return {
@@ -143,5 +143,106 @@ describe('TeamActivityStore — core state', () => {
     await teamActivity.refresh();
     expect(teamActivity.selectedWorkspaceId).toBe(null);
     expect(getToasts().size).toBe(1);
+  });
+});
+
+describe('TeamActivityStore — poll loop + visibility', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(invoke).mockReset();
+    teamActivity.stop();
+    teamActivity.rows.clear();
+    teamActivity.status = 'idle';
+    teamActivity.error = null;
+    teamActivity.selectedWorkspaceId = null;
+  });
+
+  afterEach(() => {
+    teamActivity.stop();
+    vi.useRealTimers();
+  });
+
+  it('start triggers an immediate fetch (does not wait 10s)', async () => {
+    vi.mocked(invoke).mockResolvedValue({ kind: 'rows', rows: [] });
+    teamActivity.start();
+    await vi.runOnlyPendingTimersAsync();
+    expect(invoke).toHaveBeenCalledWith('fetch_team_activity_rows');
+  });
+
+  it('polls every 10 seconds after the first fetch', async () => {
+    vi.mocked(invoke).mockResolvedValue({ kind: 'rows', rows: [] });
+    teamActivity.start();
+    await vi.runOnlyPendingTimersAsync();
+    const callsAfterStart = vi.mocked(invoke).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(vi.mocked(invoke).mock.calls.length).toBe(callsAfterStart + 1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(vi.mocked(invoke).mock.calls.length).toBe(callsAfterStart + 2);
+  });
+
+  it('skips the tick when document.visibilityState is hidden', async () => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'hidden',
+    });
+    vi.mocked(invoke).mockResolvedValue({ kind: 'rows', rows: [] });
+    teamActivity.start();
+    await vi.runOnlyPendingTimersAsync();
+    const callsAfterStart = vi.mocked(invoke).mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(vi.mocked(invoke).mock.calls.length).toBe(callsAfterStart);
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+  });
+
+  it('fetches immediately when visibility flips to visible', async () => {
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      get: () => 'visible',
+    });
+    vi.mocked(invoke).mockResolvedValue({ kind: 'rows', rows: [] });
+    teamActivity.start();
+    await vi.runOnlyPendingTimersAsync();
+    const callsBefore = vi.mocked(invoke).mock.calls.length;
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.runOnlyPendingTimersAsync();
+    expect(vi.mocked(invoke).mock.calls.length).toBe(callsBefore + 1);
+  });
+
+  it('skips overlapping ticks when a previous fetch is inflight', async () => {
+    let resolveFirst: (v: FetchResult) => void = () => {};
+    vi.mocked(invoke).mockImplementationOnce(
+      () =>
+        new Promise<FetchResult>((res) => {
+          resolveFirst = res;
+        })
+    );
+    teamActivity.start();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    resolveFirst({ kind: 'rows', rows: [] });
+  });
+
+  it('start is idempotent when called twice (no double interval)', async () => {
+    vi.mocked(invoke).mockResolvedValue({ kind: 'rows', rows: [] });
+    teamActivity.start();
+    teamActivity.start();
+    await vi.runOnlyPendingTimersAsync();
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('stop clears the interval and removes the visibility listener', async () => {
+    vi.mocked(invoke).mockResolvedValue({ kind: 'rows', rows: [] });
+    teamActivity.start();
+    await vi.runOnlyPendingTimersAsync();
+    const callsAfterStart = vi.mocked(invoke).mock.calls.length;
+    teamActivity.stop();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(vi.mocked(invoke).mock.calls.length).toBe(callsAfterStart);
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.runOnlyPendingTimersAsync();
+    expect(vi.mocked(invoke).mock.calls.length).toBe(callsAfterStart);
   });
 });
