@@ -261,6 +261,102 @@ async fn call_once(uploader: &UploaderFn, ws_id: &str, snap: &RowSnapshot) -> Re
     }
 }
 
+/// Maps a `RowSnapshot` to the Bitable `fields` map for upsert.
+///
+/// `Option<None>` fields are omitted from the body — Lark treats a missing
+/// field as "no update", whereas sending `null` clobbers any existing value
+/// in the row. The publisher only knows about fields it actively manages,
+/// so a `None` here means "I have no opinion; leave whatever is there".
+///
+/// `private` is the lone exception: it's a `bool`, not an `Option<bool>`,
+/// because privacy is the user-controlled visibility signal — we always
+/// want to assert the current value (false or true), never "no opinion".
+//
+// TODO(phase-3a-3-followup): enrich snap.repo_remote_url / repo_display_name
+// / task_title from AppState by looking up workspace_id → repo_id → repo.path
+// (then call read_origin_url) and task_id → task.title. Deferred so the
+// uploader stays decoupled from AppState; resolved at event-emission time
+// or by a wrapping closure that holds AppState.
+fn snapshot_to_fields(snap: &RowSnapshot) -> serde_json::Map<String, serde_json::Value> {
+    let mut m = serde_json::Map::new();
+    m.insert("workspace_id".into(), serde_json::json!(snap.workspace_id));
+    if let Some(v) = &snap.repo_remote_url {
+        m.insert("repo_remote_url".into(), serde_json::json!(v));
+    }
+    if let Some(v) = &snap.repo_display_name {
+        m.insert("repo_display_name".into(), serde_json::json!(v));
+    }
+    if let Some(v) = &snap.task_title {
+        m.insert("task_title".into(), serde_json::json!(v));
+    }
+    if let Some(v) = &snap.assignee_machine {
+        m.insert("assignee_machine".into(), serde_json::json!(v));
+    }
+    if let Some(v) = &snap.ansambel_status {
+        m.insert("ansambel_status".into(), serde_json::json!(v));
+    }
+    if let Some(v) = snap.last_activity_at {
+        m.insert("last_activity_at".into(), serde_json::json!(v));
+    }
+    if let Some(v) = &snap.last_message_preview {
+        m.insert("last_message_preview".into(), serde_json::json!(v));
+    }
+    if let Some(v) = &snap.branch_name {
+        m.insert("branch_name".into(), serde_json::json!(v));
+    }
+    if let Some(v) = &snap.diff_summary {
+        m.insert("diff_summary".into(), serde_json::json!(v));
+    }
+    if let Some(v) = &snap.pr_url {
+        m.insert("pr_url".into(), serde_json::json!(v));
+    }
+    m.insert("private".into(), serde_json::json!(snap.private));
+    m
+}
+
+/// Builds the production [`UploaderFn`] that calls
+/// [`LarkClient::bitable_upsert_row`](crate::platform::lark_client::LarkClient::bitable_upsert_row).
+///
+/// Reads `row_id_cache` to decide POST (cache miss → create) vs PUT
+/// (cache hit → update by id), then writes the returned `record_id`
+/// back into the cache on success.
+///
+/// **Double-write note:** [`Publisher::run`] also writes the returned id
+/// into the cache after `upload_with_retry` succeeds. That's intentional:
+/// (a) the uploader's write keeps unit tests deterministic without
+/// spinning up the publisher loop, (b) the loop's write is the documented
+/// post-spawn contract. Both write the same id, so there's no conflict.
+/// If a future refactor moves the cache write entirely into one of the
+/// two sites, drop the other to remove the redundancy.
+pub fn build_lark_uploader(
+    client: Arc<crate::platform::lark_client::LarkClient>,
+    cfg: crate::state::TeamActivityConfig,
+    row_id_cache: Arc<Mutex<HashMap<String, String>>>,
+) -> UploaderFn {
+    Arc::new(move |ws_id, snap| {
+        let client = client.clone();
+        let cfg = cfg.clone();
+        let row_id_cache = row_id_cache.clone();
+        Box::pin(async move {
+            // Acquire the cache lock just long enough to copy the cached
+            // record_id, then drop the lock before the HTTP call. Holding
+            // the lock across the await would serialize every concurrent
+            // publish through one mutex.
+            let record_id = {
+                let guard = row_id_cache.lock().await;
+                guard.get(&ws_id).cloned().unwrap_or_default()
+            };
+            let fields = snapshot_to_fields(&snap);
+            let new_id = client
+                .bitable_upsert_row(&cfg.app_token, &cfg.table_id, &record_id, fields)
+                .await?;
+            // Write back to cache so subsequent calls take the PUT path.
+            row_id_cache.lock().await.insert(ws_id, new_id.clone());
+            Ok(new_id)
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,5 +644,126 @@ mod tests {
             result,
             Err(crate::error::AppError::LarkTimeout { .. })
         ));
+    }
+
+    // ── snapshot_to_fields ───────────────────────────────────────
+
+    #[test]
+    fn snapshot_to_fields_omits_none_values() {
+        let snap = RowSnapshot {
+            workspace_id: "ws_a".into(),
+            repo_remote_url: Some("https://github.com/x/y".into()),
+            repo_display_name: None, // omit
+            task_title: Some("Fix login bug".into()),
+            assignee_machine: Some("handoko@laptop-1".into()),
+            ansambel_status: Some("running".into()),
+            last_activity_at: Some(1_700_000_000_000),
+            last_message_preview: None, // omit
+            branch_name: Some("feat/x".into()),
+            diff_summary: None, // omit
+            pr_url: None,       // omit
+            private: false,
+        };
+        let fields = snapshot_to_fields(&snap);
+        // workspace_id is the primary key — always present
+        assert_eq!(fields.get("workspace_id"), Some(&serde_json::json!("ws_a")));
+        assert_eq!(
+            fields.get("repo_remote_url"),
+            Some(&serde_json::json!("https://github.com/x/y"))
+        );
+        assert!(
+            fields.get("repo_display_name").is_none(),
+            "None must be omitted"
+        );
+        assert!(fields.get("last_message_preview").is_none());
+        assert!(fields.get("diff_summary").is_none());
+        assert!(fields.get("pr_url").is_none());
+        // private is a bool — always present even when false
+        assert_eq!(fields.get("private"), Some(&serde_json::json!(false)));
+    }
+
+    #[test]
+    fn snapshot_to_fields_includes_private_true() {
+        let snap = RowSnapshot {
+            workspace_id: "ws_b".into(),
+            private: true,
+            ..Default::default()
+        };
+        let fields = snapshot_to_fields(&snap);
+        assert_eq!(fields.get("private"), Some(&serde_json::json!(true)));
+    }
+
+    // ── build_lark_uploader integration (wiremock) ───────────────
+
+    #[tokio::test]
+    async fn build_lark_uploader_creates_then_updates_same_workspace() {
+        use wiremock::matchers::{method, path, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Token endpoint
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "msg": "ok",
+                "tenant_access_token": "t_xyz",
+                "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        // POST → returns recNEW
+        Mock::given(method("POST"))
+            .and(path_regex(
+                r"^/open-apis/bitable/v1/apps/[^/]+/tables/[^/]+/records$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "record": { "record_id": "recNEW", "fields": {} } }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // PUT to recNEW → returns recNEW
+        Mock::given(method("PUT"))
+            .and(path_regex(
+                r"^/open-apis/bitable/v1/apps/[^/]+/tables/[^/]+/records/recNEW$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": { "record": { "record_id": "recNEW", "fields": {} } }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = Arc::new(crate::platform::lark_client::LarkClient::new(
+            crate::platform::lark_client::LarkConfig {
+                app_id: "app_test_id".into(),
+                app_secret: "app_test_secret".into(),
+                app_token: "bascn".into(),
+                table_id: "tbl".into(),
+                base_url: server.uri(),
+            },
+        ));
+        let cfg = TeamActivityConfig {
+            app_token: "bascn".into(),
+            table_id: "tbl".into(),
+            machine_label: "test@machine".into(),
+        };
+        let cache: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let uploader = build_lark_uploader(client, cfg, cache.clone());
+        let snap = RowSnapshot {
+            workspace_id: "ws_t".into(),
+            ansambel_status: Some("running".into()),
+            ..Default::default()
+        };
+        // First call → POST (cache empty)
+        let rec = (uploader)("ws_t".into(), snap.clone()).await.unwrap();
+        assert_eq!(rec, "recNEW");
+        assert_eq!(cache.lock().await.get("ws_t"), Some(&"recNEW".to_string()));
+        // Second call: cache now has "ws_t" → "recNEW", uploader takes PUT path.
+        let rec2 = (uploader)("ws_t".into(), snap).await.unwrap();
+        assert_eq!(rec2, "recNEW");
     }
 }
