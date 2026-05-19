@@ -1494,3 +1494,406 @@ describe('FilterBar loading placeholders', () => {
     expect(document.querySelector('[data-testid="lookup-select"]')).toBeTruthy();
   });
 });
+
+describe('FilterBar coverage gaps', () => {
+  it('Number field (type 2) renders number input as value picker', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_num',
+        field_name: 'Estimate',
+        type: 2,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_num',
+              field_name: 'Estimate',
+              operator: 'isGreater' as const,
+              value: ['3'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const numInput = document.querySelector('input[type="number"]') as HTMLInputElement;
+    expect(numInput).toBeTruthy();
+    expect(numInput.value).toBe('3');
+  });
+
+  it('DateTime field (type 5) renders date input as value picker', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_dt',
+        field_name: 'Due',
+        type: 5,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_dt',
+              field_name: 'Due',
+              operator: 'is' as const,
+              value: ['2026-05-19'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const dateInput = document.querySelector('input[type="date"]') as HTMLInputElement;
+    expect(dateInput).toBeTruthy();
+    expect(dateInput.value).toBe('2026-05-19');
+  });
+
+  it('Last Modified Time (type 1002) renders date input as value picker', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_mtime',
+        field_name: 'Last Modified',
+        type: 1002,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_mtime',
+              field_name: 'Last Modified',
+              operator: 'is' as const,
+              value: [''],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    expect(document.querySelector('input[type="date"]')).toBeTruthy();
+  });
+
+  it('Unary operator (isEmpty) renders no value picker', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_t',
+        field_name: 'Notes',
+        type: 1,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_t',
+              field_name: 'Notes',
+              operator: 'isEmpty' as const,
+              value: [],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    // Unary: no text/number/date input rendered for the value
+    expect(document.querySelector('input[type="text"]')).toBeNull();
+    expect(document.querySelector('input[type="number"]')).toBeNull();
+    expect(document.querySelector('input[type="date"]')).toBeNull();
+  });
+
+  it('changeField updates the condition and resets operator+value', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fld_a', field_name: 'A', type: 1, is_primary: false, property: null },
+      { field_id: 'fld_b', field_name: 'B', type: 2, is_primary: false, property: null },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            { field_id: 'fld_a', field_name: 'A', operator: 'contains' as const, value: ['x'] },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const fieldSelect = screen.getByRole('combobox', { name: /^field$/i }) as HTMLSelectElement;
+    await fireEvent.change(fieldSelect, { target: { value: 'fld_b' } });
+    expect(filterStore.update).toHaveBeenCalledWith(
+      'repo-1',
+      expect.objectContaining({
+        conditions: expect.arrayContaining([
+          expect.objectContaining({ field_id: 'fld_b', field_name: 'B', value: [''] }),
+        ]),
+      })
+    );
+  });
+
+  it('changeField with unknown field id is a no-op', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fld_a', field_name: 'A', type: 1, is_primary: false, property: null },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            { field_id: 'fld_a', field_name: 'A', operator: 'contains' as const, value: [''] },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const fieldSelect = screen.getByRole('combobox', { name: /^field$/i }) as HTMLSelectElement;
+    // Dispatch a change event with a non-existent field id — the change
+    // handler should early-return without calling filterStore.update.
+    vi.mocked(filterStore.update).mockClear();
+    await fireEvent.change(fieldSelect, { target: { value: 'fld_nonexistent' } });
+    expect(filterStore.update).not.toHaveBeenCalled();
+  });
+
+  it('changeOperator preserves existing value when switching between non-unary operators', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fld_t', field_name: 'Notes', type: 1, is_primary: false, property: null },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_t',
+              field_name: 'Notes',
+              operator: 'contains' as const,
+              value: ['hello'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const opSelect = screen.getByRole('combobox', { name: /operator/i }) as HTMLSelectElement;
+    await fireEvent.change(opSelect, { target: { value: 'doesNotContain' } });
+    expect(filterStore.update).toHaveBeenCalledWith(
+      'repo-1',
+      expect.objectContaining({
+        conditions: expect.arrayContaining([
+          expect.objectContaining({ operator: 'doesNotContain', value: ['hello'] }),
+        ]),
+      })
+    );
+  });
+
+  it('changeOperator switching to a unary op drops the value array', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fld_t', field_name: 'Notes', type: 1, is_primary: false, property: null },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            { field_id: 'fld_t', field_name: 'Notes', operator: 'contains' as const, value: ['x'] },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const opSelect = screen.getByRole('combobox', { name: /operator/i }) as HTMLSelectElement;
+    await fireEvent.change(opSelect, { target: { value: 'isEmpty' } });
+    expect(filterStore.update).toHaveBeenCalledWith(
+      'repo-1',
+      expect.objectContaining({
+        conditions: expect.arrayContaining([
+          expect.objectContaining({ operator: 'isEmpty', value: [] }),
+        ]),
+      })
+    );
+  });
+
+  it('changeOperator switching unary→non-unary with no prior value uses empty string', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fld_t', field_name: 'Notes', type: 1, is_primary: false, property: null },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            { field_id: 'fld_t', field_name: 'Notes', operator: 'isEmpty' as const, value: [] },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const opSelect = screen.getByRole('combobox', { name: /operator/i }) as HTMLSelectElement;
+    await fireEvent.change(opSelect, { target: { value: 'contains' } });
+    expect(filterStore.update).toHaveBeenCalledWith(
+      'repo-1',
+      expect.objectContaining({
+        conditions: expect.arrayContaining([
+          expect.objectContaining({ operator: 'contains', value: [''] }),
+        ]),
+      })
+    );
+  });
+
+  it('removeCondition deletes the targeted condition only', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fld_a', field_name: 'A', type: 1, is_primary: false, property: null },
+      { field_id: 'fld_b', field_name: 'B', type: 1, is_primary: false, property: null },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            { field_id: 'fld_a', field_name: 'A', operator: 'contains' as const, value: ['x'] },
+            { field_id: 'fld_b', field_name: 'B', operator: 'contains' as const, value: ['y'] },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const removeBtns = screen.getAllByRole('button', { name: /remove condition/i });
+    await fireEvent.click(removeBtns[0]);
+    expect(filterStore.update).toHaveBeenCalledWith(
+      'repo-1',
+      expect.objectContaining({
+        conditions: [expect.objectContaining({ field_id: 'fld_b' })],
+      })
+    );
+  });
+
+  it('renders condition row with empty value array (value[0] ?? "" fallback)', async () => {
+    // Forces the `cond.value[0] ?? ''` short-circuit's false branch in
+    // multiple value editors at once.
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fld_t', field_name: 'Notes', type: 1, is_primary: false, property: null },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            // Non-unary operator with empty value[] — forces fallback path.
+            { field_id: 'fld_t', field_name: 'Notes', operator: 'contains' as const, value: [] },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const textInput = screen.getByRole('textbox') as HTMLInputElement;
+    expect(textInput.value).toBe('');
+  });
+
+  it('renders a row using cond.field_id as placeholder when fields are still empty', async () => {
+    // Forces the {#if fields.length === 0} truthy path AND the
+    // {cond.field_name || cond.field_id} fallback.
+    let resolveFields!: (v: unknown[]) => void;
+    const slowFields = new Promise<unknown[]>((res) => {
+      resolveFields = res;
+    });
+    vi.mocked(api.lark.listFields).mockReturnValueOnce(slowFields as never);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            // No field_name → forces || field_id fallback rendering.
+            { field_id: 'fld_orphan', field_name: '', operator: 'contains' as const, value: [''] },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    // Fields still loading → the placeholder option uses field_id since
+    // field_name is empty.
+    const fieldSelect = screen.getByRole('combobox', { name: /^field$/i }) as HTMLSelectElement;
+    expect(fieldSelect.value).toBe('fld_orphan');
+    expect(fieldSelect.options[0].textContent?.trim()).toBe('fld_orphan');
+    resolveFields([]);
+  });
+
+  it('addCondition with no supported fields inserts an empty placeholder condition', async () => {
+    // listFields returns only mapped fields → supportedFields() is empty.
+    // The addCondition path must still write a placeholder so the user can
+    // pick a field afterwards.
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fld_title', field_name: 'Task name', type: 1, is_primary: true, property: null },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        // Mark the only field as mapped so it's hidden from the picker
+        mappedFieldIds: new Set(['fld_title']),
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const addBtn = screen.getByRole('button', { name: /add filter|add condition|\+ add/i });
+    await fireEvent.click(addBtn);
+    expect(filterStore.update).toHaveBeenCalledWith(
+      'repo-1',
+      expect.objectContaining({
+        conditions: expect.arrayContaining([
+          expect.objectContaining({ field_id: '', field_name: '', value: [''] }),
+        ]),
+      })
+    );
+  });
+});

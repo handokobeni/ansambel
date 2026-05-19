@@ -17,11 +17,24 @@ vi.mock('$lib/stores/toasts.svelte', () => ({
   addToast: vi.fn(),
 }));
 
+const loadForRepoMock = vi.fn();
+vi.mock('$lib/stores/tasks.svelte', async (importOriginal) => {
+  const mod: { tasks: Record<string, unknown> } = await importOriginal();
+  return {
+    tasks: {
+      ...mod.tasks,
+      loadForRepo: (...args: unknown[]) => loadForRepoMock(...args),
+    },
+  };
+});
+
 import { larkBindings } from '$lib/stores/lark-bindings.svelte';
 
 beforeEach(() => {
   vi.clearAllMocks();
   larkBindings.bindings.clear();
+  loadForRepoMock.mockReset();
+  loadForRepoMock.mockResolvedValue(undefined);
 });
 
 describe('RepoSettingsDialog', () => {
@@ -244,6 +257,79 @@ describe('RepoSettingsDialog', () => {
     await new Promise((r) => setTimeout(r, 0));
     // Dialog still open (no crash) — the catch in handleDisconnect swallowed the error
     expect(screen.getByTestId('repo-settings-backdrop')).toBeTruthy();
+  });
+
+  it('handleSaveBinding toasts on tasks.loadForRepo failure but still closes wizard', async () => {
+    const { api } = await import('$lib/ipc');
+    const { addToast } = await import('$lib/stores/toasts.svelte');
+    vi.mocked(api.lark.setRepoBinding).mockResolvedValue(undefined);
+    loadForRepoMock.mockRejectedValueOnce(new Error('IPC list failed'));
+    const noStatusProposal = {
+      fields: [{ field_id: 'fld_t', field_name: 'Task name', type: 1, is_primary: true }],
+      suggested: {
+        title: { field_id: 'fld_t', field_name: 'Task name' },
+        description: null,
+        status: null,
+        order: null,
+        pic: null,
+      },
+      status_options: [],
+      suggested_status_values: { entries: {}, default_column: 'todo' },
+    };
+    vi.mocked(api.lark.detectSchema).mockResolvedValueOnce(noStatusProposal as never);
+    render(RepoSettingsDialog, {
+      props: { repoId: 'repo_x', repoName: 'my-repo', open: true, onClose: vi.fn() },
+    });
+    await fireEvent.click(screen.getByTestId('connect-binding'));
+    await fireEvent.input(screen.getByTestId('wizard-app-token'), {
+      target: { value: 'bascn_tok' },
+    });
+    await fireEvent.input(screen.getByTestId('wizard-table-id'), {
+      target: { value: 'tbl_1' },
+    });
+    await fireEvent.click(screen.getByTestId('wizard-detect'));
+    await new Promise((r) => setTimeout(r, 0));
+    await fireEvent.click(screen.getByTestId('wizard-continue'));
+    await new Promise((r) => setTimeout(r, 0));
+    // Wizard closed; success toast still fired before the loadForRepo call;
+    // a SECOND toast is the "Reload tasks failed" one — that's the new branch.
+    expect(screen.queryByTestId('lark-binding-wizard')).toBeNull();
+    expect(addToast).toHaveBeenCalledWith(expect.stringContaining('Reload tasks failed'), 'error');
+  });
+
+  it('handleSaveBinding handles non-Error reload failure in toast template', async () => {
+    const { api } = await import('$lib/ipc');
+    const { addToast } = await import('$lib/stores/toasts.svelte');
+    vi.mocked(api.lark.setRepoBinding).mockResolvedValue(undefined);
+    loadForRepoMock.mockRejectedValueOnce('plain string error');
+    const noStatusProposal = {
+      fields: [{ field_id: 'fld_t', field_name: 'Task name', type: 1, is_primary: true }],
+      suggested: {
+        title: { field_id: 'fld_t', field_name: 'Task name' },
+        description: null,
+        status: null,
+        order: null,
+        pic: null,
+      },
+      status_options: [],
+      suggested_status_values: { entries: {}, default_column: 'todo' },
+    };
+    vi.mocked(api.lark.detectSchema).mockResolvedValueOnce(noStatusProposal as never);
+    render(RepoSettingsDialog, {
+      props: { repoId: 'repo_x', repoName: 'my-repo', open: true, onClose: vi.fn() },
+    });
+    await fireEvent.click(screen.getByTestId('connect-binding'));
+    await fireEvent.input(screen.getByTestId('wizard-app-token'), {
+      target: { value: 'bascn_tok' },
+    });
+    await fireEvent.input(screen.getByTestId('wizard-table-id'), {
+      target: { value: 'tbl_1' },
+    });
+    await fireEvent.click(screen.getByTestId('wizard-detect'));
+    await new Promise((r) => setTimeout(r, 0));
+    await fireEvent.click(screen.getByTestId('wizard-continue'));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(addToast).toHaveBeenCalledWith(expect.stringContaining('plain string error'), 'error');
   });
 
   it('does not register keydown handler when open=false', async () => {

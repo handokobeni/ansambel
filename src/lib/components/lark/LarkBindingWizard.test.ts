@@ -258,6 +258,99 @@ describe('LarkBindingWizard', () => {
     expect(onSave).not.toHaveBeenCalled();
   });
 
+  it('PIC dropdown lists only Person/Text/Created By/Modified By fields', async () => {
+    // Covers the multi-type filter on the PIC <select> (LarkBindingWizard
+    // line 241). The fixture has six fields covering supported and rejected
+    // types so the filter's true and false branches both fire.
+    const picProposal = {
+      fields: [
+        { field_id: 'fld_pri', field_name: 'Task name', type: 1, is_primary: true },
+        { field_id: 'fld_person', field_name: 'PIC', type: 11, is_primary: false },
+        { field_id: 'fld_cby', field_name: 'Created By', type: 1003, is_primary: false },
+        { field_id: 'fld_mby', field_name: 'Last Editor', type: 1004, is_primary: false },
+        { field_id: 'fld_num', field_name: 'Estimate', type: 2, is_primary: false },
+        { field_id: 'fld_date', field_name: 'Due', type: 5, is_primary: false },
+      ],
+      suggested: {
+        title: { field_id: 'fld_pri', field_name: 'Task name' },
+        description: null,
+        status: null,
+        order: null,
+        pic: null,
+      },
+      status_options: [],
+      suggested_status_values: { entries: {}, default_column: 'todo' },
+    };
+    vi.mocked(invoke).mockResolvedValueOnce(picProposal);
+    render(LarkBindingWizard, {
+      props: { repoId: 'repo_x', existing: null, onSave: vi.fn(), onCancel: vi.fn() },
+    });
+    await fireEvent.input(screen.getByTestId('wizard-app-token'), { target: { value: 'x' } });
+    await fireEvent.input(screen.getByTestId('wizard-table-id'), { target: { value: 'y' } });
+    await fireEvent.click(screen.getByTestId('wizard-detect'));
+    await new Promise((r) => setTimeout(r, 0));
+
+    const picSelect = screen.getByTestId('wizard-pic-field') as HTMLSelectElement;
+    const optionValues = Array.from(picSelect.options).map((o) => o.value);
+    // The "(none)" placeholder plus 4 supported field types (Text/Person/
+    // Created By/Modified By), but NOT Number (type 2) or Date (type 5).
+    expect(optionValues).toContain('');
+    expect(optionValues).toContain('fld_pri'); // Text
+    expect(optionValues).toContain('fld_person'); // Person
+    expect(optionValues).toContain('fld_cby'); // Created By
+    expect(optionValues).toContain('fld_mby'); // Modified By
+    expect(optionValues).not.toContain('fld_num');
+    expect(optionValues).not.toContain('fld_date');
+  });
+
+  it('preselects PIC from existing binding when wizard mounts at step 2', async () => {
+    // Covers the `existing?.field_mapping.pic?.field_id ?? ''` initializer
+    // (LarkBindingWizard line 46) — without this test the truthy branch
+    // is dead, and the binding save would silently drop the PIC.
+    const existing: BitableBinding = {
+      app_token: 'bascn_e',
+      table_id: 'tbl_e',
+      filters: { conjunction: 'and', conditions: [] },
+      field_mapping: {
+        title: { field_id: 'fld_t', field_name: 'Task name' },
+        description: null,
+        status: null,
+        order: null,
+        pic: { field_id: 'fld_existing_pic', field_name: 'PIC' },
+      },
+      status_value_mapping: { entries: {}, default_column: 'todo' },
+      created_at: 0,
+      updated_at: 0,
+    };
+    // Detect returns a proposal that includes the existing PIC field so
+    // the <select>'s preselected value is a real option.
+    vi.mocked(invoke).mockResolvedValueOnce({
+      fields: [
+        { field_id: 'fld_t', field_name: 'Task name', type: 1, is_primary: true },
+        { field_id: 'fld_existing_pic', field_name: 'PIC', type: 11, is_primary: false },
+      ],
+      suggested: {
+        title: { field_id: 'fld_t', field_name: 'Task name' },
+        description: null,
+        status: null,
+        order: null,
+        pic: { field_id: 'fld_existing_pic', field_name: 'PIC' },
+      },
+      status_options: [],
+      suggested_status_values: { entries: {}, default_column: 'todo' },
+    });
+    render(LarkBindingWizard, {
+      props: { repoId: 'repo_x', existing, onSave: vi.fn(), onCancel: vi.fn() },
+    });
+    // Step 2 mounts immediately; trigger re-detect so the proposal is
+    // populated and the <select> gains the option.
+    await fireEvent.click(screen.getByText(/← Back/));
+    await fireEvent.click(screen.getByTestId('wizard-detect'));
+    await new Promise((r) => setTimeout(r, 0));
+    const picSelect = screen.getByTestId('wizard-pic-field') as HTMLSelectElement;
+    expect(picSelect.value).toBe('fld_existing_pic');
+  });
+
   it('Step 2 continues directly to save when status type=3 but no options (property.options absent)', async () => {
     // handleContinueStep2 checks statusIsSingleSelect && statusField?.property?.options
     // If property.options is absent/falsy, it falls through to handleSave directly

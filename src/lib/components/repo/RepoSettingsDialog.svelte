@@ -22,7 +22,6 @@
   let confirmDisconnect = $state(false);
 
   const binding = $derived(larkBindings.get(repoId));
-  const isConnected = $derived(!!binding);
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
@@ -110,7 +109,7 @@
             onSave={handleSaveBinding}
             onCancel={() => (editingBinding = false)}
           />
-        {:else if isConnected && binding}
+        {:else if binding}
           <div class="flex flex-col gap-2 text-xs" data-testid="binding-summary">
             <div class="text-[var(--text-primary)]">✓ Connected: {binding.table_id}</div>
             <div class="text-[var(--text-muted)] text-[11px]">

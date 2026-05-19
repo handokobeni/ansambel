@@ -75,6 +75,28 @@ describe('filterStore.update', () => {
     expect(addToast).toHaveBeenCalledOnce();
   });
 
+  it('no-ops when the repo has no binding', async () => {
+    const { filterStore } = await import('./lark-binding-filters.svelte');
+    await filterStore.update('repo-missing', { conjunction: 'and', conditions: [] });
+    // No optimistic update written for the missing repo
+    expect(bindings.get('repo-missing')).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(300);
+    // setRepoBinding should never have been queued
+    expect(setRepoBinding).not.toHaveBeenCalled();
+  });
+
+  it('handles non-Error rejection values in the failure toast', async () => {
+    const { filterStore } = await import('./lark-binding-filters.svelte');
+    // Reject with a bare string instead of an Error instance — the toast
+    // template uses `err instanceof Error ? err.message : err` so this
+    // exercises the else branch.
+    setRepoBinding.mockRejectedValue('string failure');
+    await filterStore.update('repo-1', { conjunction: 'and', conditions: [] });
+    await vi.advanceTimersByTimeAsync(300);
+    await vi.runAllTimersAsync();
+    expect(addToast).toHaveBeenCalledWith(expect.stringContaining('string failure'), 'error');
+  });
+
   it('reverts to the original baseline after rapid update→update→fail', async () => {
     const { filterStore } = await import('./lark-binding-filters.svelte');
     // First call: succeed nothing yet — we'll cancel via second call before timer fires.
