@@ -183,6 +183,11 @@
           {detecting ? 'Detecting…' : 'Detect →'}
         </button>
       </div>
+      {#if detecting}
+        <p class="text-xs text-[var(--text-muted)] italic mt-2">
+          Detecting schema… this may take a few seconds.
+        </p>
+      {/if}
     </section>
   {:else if step === 2}
     <section class="flex flex-col gap-3" data-testid="wizard-step-2">
@@ -282,6 +287,9 @@
           {saving ? 'Saving…' : 'Save & Sync'}
         </button>
       </div>
+      {#if saving}
+        <p class="text-xs text-[var(--text-muted)] italic mt-2">Saving binding…</p>
+      {/if}
     </section>
   {/if}
 </div>
