@@ -7,6 +7,7 @@ pub mod logging;
 pub mod panic;
 pub mod persistence;
 pub mod platform;
+pub mod sanitize;
 pub mod state;
 pub mod task_provider;
 
