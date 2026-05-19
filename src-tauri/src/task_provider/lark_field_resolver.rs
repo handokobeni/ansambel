@@ -424,7 +424,7 @@ fn extract_person_names(value: &serde_json::Value) -> Vec<String> {
 /// Recognises `,`, `;`, `/`, `&`, and ` and ` as separators — covers the
 /// usual ways people type multiple assignees in a plain text cell.
 fn split_text_names(s: &str) -> Vec<String> {
-    s.split(|c: char| matches!(c, ',' | ';' | '/' | '&'))
+    s.split([',', ';', '/', '&'])
         .flat_map(|chunk| chunk.split(" and "))
         .map(str::trim)
         .filter(|p| !p.is_empty())
