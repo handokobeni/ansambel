@@ -244,6 +244,9 @@ pub async fn list_lark_person_options(
 /// these key spellings in the wild:
 ///   • `target_table` + `target_field` (formula-based Lookup — what Lark v1 uses
 ///     for the property shape that includes `formula`, `filter_info`, `roll_up`)
+///   • `filter_info.target_table` + top-level `target_field` (asymmetric shape —
+///     confirmed real-world case where `target_table` is nested inside the
+///     `filter_info` object while `target_field` stays at the top level)
 ///   • `table_id` + `field_id` (simpler Lookup)
 ///   • `target_table_id` + `link_field_id` (older variant)
 /// Try them in that priority order. Fall back to `Ok(vec![])` if none match.
@@ -300,13 +303,21 @@ pub(crate) async fn list_lark_lookup_options_inner(
     };
     // Accept all known property key spellings, newest/confirmed shape first.
     let src_table_id = prop
-        .get("target_table") // formula-based Lookup (confirmed shape)
+        .get("target_table") // top-level formula-based Lookup (confirmed shape)
+        .or_else(|| {
+            prop.get("filter_info")
+                .and_then(|fi| fi.get("target_table"))
+        }) // NEW: nested under filter_info
         .or_else(|| prop.get("table_id")) // simpler Lookup
         .or_else(|| prop.get("target_table_id")) // older variant
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let src_field_id = prop
-        .get("target_field") // formula-based Lookup (confirmed shape)
+        .get("target_field") // top-level
+        .or_else(|| {
+            prop.get("filter_info")
+                .and_then(|fi| fi.get("target_field"))
+        }) // NEW: nested under filter_info (in case it's there too)
         .or_else(|| prop.get("field_id")) // simpler Lookup
         .or_else(|| prop.get("link_field_id")) // older variant
         .and_then(|v| v.as_str())
@@ -866,6 +877,120 @@ mod tests {
         assert_eq!(options[0].option_id, "optNotStarted");
         assert_eq!(options[0].name, "Not Started");
         assert_eq!(options[1].option_id, "optInProgress");
+        assert_eq!(options[1].name, "In Progress");
+        assert_eq!(options[2].option_id, "optDone");
+        assert_eq!(options[2].name, "Done");
+    }
+
+    #[tokio::test]
+    async fn list_lark_lookup_options_inner_handles_target_table_nested_in_filter_info() {
+        // Lookup property shape where `target_table` is nested under `filter_info`
+        // (asymmetric — `target_field` stays top-level). Confirmed real-world shape.
+        //
+        // Mocks:
+        //  - bitable_list_fields(app_token, "tblBindings") returns Lookup field whose
+        //    property = {
+        //      "filter_info": { "target_table": "tblSrc", "conditions": {...} },
+        //      "target_field": "fldSrc",
+        //      "formula": "...",
+        //      "roll_up": 0
+        //    }
+        //  - bitable_list_fields(app_token, "tblSrc") returns a SingleSelect field
+        //    with id "fldSrc" and 3 options.
+        // Asserts: command returns those 3 options.
+        use wiremock::matchers::{method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Token endpoint.
+        Mock::given(method("POST"))
+            .and(wm_path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "tenant_access_token": "t_test", "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        // First call: binding table has a Lookup field (type 19) whose property uses the
+        // asymmetric shape: target_table is nested inside filter_info, target_field is top-level.
+        Mock::given(method("GET"))
+            .and(wm_path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblBindings/fields",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": { "items": [
+                    {
+                        "field_id": "fldLookupAsym",
+                        "field_name": "Sprint Status",
+                        "type": 19,
+                        "is_primary": false,
+                        "property": {
+                            "filter_info": {
+                                "conditions": {
+                                    "children": [{ "field_id": "fldLink", "field_type": 1, "operator": "is", "value": null }],
+                                    "conjunction": "and"
+                                },
+                                "target_table": "tblSrc"
+                            },
+                            "target_field": "fldSrc",
+                            "formula": "bitable::$table[tblSrc].FILTER(...).$column[fldSrc].LISTCOMBINE()",
+                            "roll_up": 0
+                        }
+                    }
+                ], "has_more": false, "page_token": null }
+            })))
+            .mount(&server)
+            .await;
+        // Second call: source table has a SingleSelect field (type 3) with 3 options.
+        Mock::given(method("GET"))
+            .and(wm_path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblSrc/fields",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": { "items": [
+                    {
+                        "field_id": "fldSrc",
+                        "field_name": "Status",
+                        "type": 3,
+                        "is_primary": false,
+                        "property": {
+                            "options": [
+                                {"id": "optTodo", "name": "Todo"},
+                                {"id": "optInProg", "name": "In Progress"},
+                                {"id": "optDone", "name": "Done"}
+                            ]
+                        }
+                    }
+                ], "has_more": false, "page_token": null }
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp = tempdir().unwrap();
+        let store = crate::commands::lark_auth::InMemorySecretStore::new();
+        let args = crate::commands::lark_auth::SetLarkCredentialsArgs {
+            app_id: "cli_test".into(),
+            app_secret: "sec".into(),
+            base_url: Some(server.uri()),
+        };
+        crate::commands::lark_auth::set_lark_credentials_inner(args, tmp.path(), &store).unwrap();
+
+        let options = list_lark_lookup_options_inner(
+            "appA",
+            "tblBindings",
+            "fldLookupAsym",
+            tmp.path(),
+            &store,
+        )
+        .await
+        .expect("ok");
+
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0].option_id, "optTodo");
+        assert_eq!(options[0].name, "Todo");
+        assert_eq!(options[1].option_id, "optInProg");
         assert_eq!(options[1].name, "In Progress");
         assert_eq!(options[2].option_id, "optDone");
         assert_eq!(options[2].name, "Done");
