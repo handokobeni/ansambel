@@ -110,7 +110,12 @@ impl AggregatedState {
             WorkspaceEvent::DiffSummaryUpdated { summary, .. } => {
                 self.snapshot.diff_summary = Some(summary.clone());
             }
-            WorkspaceEvent::PrivacyChanged { .. } => unreachable!("handled above"),
+            WorkspaceEvent::PrivacyChanged { .. } => {
+                // Handled above via the early-return. Empty arm guards against
+                // refactor regressions: if a future change inlines privacy into
+                // this match without keeping the early-return, this becomes a
+                // safe no-op rather than a runtime panic.
+            }
         }
     }
 }
@@ -156,10 +161,19 @@ impl Publisher {
         loop {
             tokio::select! {
                 msg = rx.recv() => {
-                    let Ok(event) = msg else {
-                        // RecvError::Closed → channel dropped (app shutdown).
-                        // RecvError::Lagged → recover silently; next event re-syncs.
-                        continue;
+                    let event = match msg {
+                        Ok(e) => e,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!(
+                                skipped,
+                                "team-activity publisher: broadcast channel lagged, events dropped"
+                            );
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            // Channel sender dropped — app is shutting down.
+                            return;
+                        }
                     };
                     let ws_id = event.workspace_id().to_string();
                     aggregated
@@ -336,5 +350,87 @@ mod tests {
         assert!(preview.contains("Bearer [REDACTED]"));
         assert!(preview.contains("[REDACTED-API-KEY]"));
         assert!(preview.chars().count() <= 201);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn private_lock_suppresses_status_events_until_toggled_off() {
+        let (uploader, log) = recording_uploader();
+        let tx = spawn_publisher(make_cfg(), uploader, Duration::from_secs(3));
+
+        // Make workspace private FIRST, then send a status update.
+        tx.send(WorkspaceEvent::PrivacyChanged {
+            workspace_id: "ws_d".into(),
+            is_private: true,
+        })
+        .unwrap();
+        tx.send(WorkspaceEvent::StatusChanged {
+            workspace_id: "ws_d".into(),
+            new_status: WorkspaceStatus::Running,
+        })
+        .unwrap();
+        tokio::time::sleep(Duration::from_secs(4)).await;
+
+        let calls = log.lock().await;
+        let last = calls.last().expect("expected a snapshot");
+        // The status update arrived AFTER private_lock was set, so
+        // assignee_machine and ansambel_status must remain None.
+        assert!(
+            last.assignee_machine.is_none(),
+            "private_lock should have suppressed assignee_machine update"
+        );
+        assert!(
+            last.ansambel_status.is_none(),
+            "private_lock should have suppressed status update"
+        );
+        assert!(last.private, "private flag should still be true");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn toggling_private_off_restores_field_updates() {
+        let (uploader, log) = recording_uploader();
+        let tx = spawn_publisher(make_cfg(), uploader, Duration::from_secs(3));
+
+        // Sequence: private on → flush → private off → status → flush
+        tx.send(WorkspaceEvent::PrivacyChanged {
+            workspace_id: "ws_e".into(),
+            is_private: true,
+        })
+        .unwrap();
+        tokio::time::sleep(Duration::from_secs(4)).await;
+
+        tx.send(WorkspaceEvent::PrivacyChanged {
+            workspace_id: "ws_e".into(),
+            is_private: false,
+        })
+        .unwrap();
+        tx.send(WorkspaceEvent::StatusChanged {
+            workspace_id: "ws_e".into(),
+            new_status: WorkspaceStatus::Running,
+        })
+        .unwrap();
+        tokio::time::sleep(Duration::from_secs(4)).await;
+
+        let calls = log.lock().await;
+        // Two snapshots should have been published.
+        assert!(
+            calls.len() >= 2,
+            "expected at least 2 snapshots after on→off cycle; got {}",
+            calls.len()
+        );
+        let last = calls.last().expect("expected a final snapshot");
+        assert!(
+            !last.private,
+            "private flag should be false after toggling off"
+        );
+        assert_eq!(
+            last.assignee_machine.as_deref(),
+            Some("handoko@laptop-1"),
+            "assignee_machine should be re-populated after lock released"
+        );
+        assert_eq!(
+            last.ansambel_status.as_deref(),
+            Some("running"),
+            "status should be re-populated after lock released"
+        );
     }
 }
