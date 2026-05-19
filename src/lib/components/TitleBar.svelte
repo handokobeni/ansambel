@@ -10,6 +10,13 @@
   import SettingsDialog from './SettingsDialog.svelte';
   import RepoSettingsDialog from '$lib/components/repo/RepoSettingsDialog.svelte';
   import type { Mode } from '$lib/types';
+  import { teamActivity } from '$lib/stores/team-activity.svelte';
+
+  const watching = $derived.by(() => {
+    const id = teamActivity.selectedWorkspaceId;
+    if (!id) return null;
+    return teamActivity.rows.get(id) ?? null;
+  });
 
   // Reading `theme.colorMode` (a `$state` field) inside this $derived
   // makes the toggle icon reactive to mode changes anywhere in the app.
@@ -103,7 +110,23 @@
     {/if}
   </div>
 
-  {#if mode !== undefined && onModeChange !== undefined}
+  {#if watching}
+    <div class="flex items-center gap-2 text-sm">
+      <button
+        type="button"
+        class="flex items-center justify-center w-7 h-7 rounded text-[var(--text-dim)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+        onclick={() => teamActivity.select(null)}
+        aria-label="back to workspace"
+      >
+        ←
+      </button>
+      <span class="text-[var(--text-secondary)]">
+        Watching:
+        <span class="ml-1 text-[var(--text-primary)] font-medium">{watching.assignee_machine}</span>
+        <span class="ml-1 text-[var(--text-dim)]">@ {watching.task_title}</span>
+      </span>
+    </div>
+  {:else if mode !== undefined && onModeChange !== undefined}
     <div
       class="flex overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-card)]"
       role="group"

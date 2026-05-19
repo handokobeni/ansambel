@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import TitleBar from './TitleBar.svelte';
+import { teamActivity } from '$lib/stores/team-activity.svelte';
 
 // Mock @tauri-apps/plugin-dialog
 vi.mock('@tauri-apps/plugin-dialog', () => ({
@@ -305,5 +306,68 @@ describe('TitleBar settings button', () => {
     expect(screen.getByRole('dialog')).toBeTruthy();
     await fireEvent.click(screen.getByTestId('settings-close'));
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+});
+
+describe('TitleBar — Team Activity mirror mode', () => {
+  beforeEach(() => {
+    teamActivity.rows.clear();
+    teamActivity.selectedWorkspaceId = null;
+  });
+
+  it('replaces the Plan/Work toggle with a Watching label when a mirror is selected', () => {
+    teamActivity.rows.set('ws_a', {
+      workspace_id: 'ws_a',
+      repo_remote_url: '',
+      repo_display_name: 'bar',
+      task_title: 'Fix it',
+      assignee_machine: 'bob@laptop',
+      ansambel_status: 'running',
+      last_activity_at: 0,
+      last_message_preview: '',
+      branch_name: '',
+      diff_summary: '',
+      pr_url: '',
+      private: false,
+    });
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByText, queryByRole } = render(TitleBar, {
+      props: { mode: 'work', onModeChange: vi.fn() },
+    });
+    expect(getByText(/Watching:/i)).toBeTruthy();
+    expect(getByText(/bob@laptop/i)).toBeTruthy();
+    expect(queryByRole('button', { name: /^Plan$/ })).toBeNull();
+  });
+
+  it('back button on the Watching label clears selectedWorkspaceId', async () => {
+    teamActivity.rows.set('ws_a', {
+      workspace_id: 'ws_a',
+      repo_remote_url: '',
+      repo_display_name: 'bar',
+      task_title: 'Fix it',
+      assignee_machine: 'bob@laptop',
+      ansambel_status: 'running',
+      last_activity_at: 0,
+      last_message_preview: '',
+      branch_name: '',
+      diff_summary: '',
+      pr_url: '',
+      private: false,
+    });
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByLabelText } = render(TitleBar, {
+      props: { mode: 'work', onModeChange: vi.fn() },
+    });
+    const back = getByLabelText(/back to workspace/i);
+    await fireEvent.click(back);
+    expect(teamActivity.selectedWorkspaceId).toBeNull();
+  });
+
+  it('renders the normal Plan/Work toggle when no mirror is selected', () => {
+    const { getByText } = render(TitleBar, {
+      props: { mode: 'work', onModeChange: vi.fn() },
+    });
+    expect(getByText('Plan')).toBeTruthy();
+    expect(getByText('Work')).toBeTruthy();
   });
 });
