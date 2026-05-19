@@ -1,12 +1,24 @@
 use crate::commands::agent_stream::StreamParser;
 use crate::commands::helpers::now_unix;
 use crate::error::{AppError, AppResult};
-use crate::state::{AgentEvent, AgentHandle, AppState, WorkspaceStatus};
+use crate::state::{
+    AgentEvent, AgentHandle, AppState, WorkspaceEvent, WorkspaceEventTx, WorkspaceStatus,
+};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+
+/// Fire-and-forget emission of a [`WorkspaceEvent`] to the team-activity
+/// publisher. Swallows `SendError` (raised when no receivers exist — the
+/// publisher is optional and may be unconfigured) and `None` (callers that
+/// don't have access to the broadcast handle, e.g. unit tests).
+pub(crate) fn emit_workspace_event(tx: Option<&WorkspaceEventTx>, event: WorkspaceEvent) {
+    if let Some(tx) = tx {
+        let _ = tx.send(event);
+    }
+}
 
 /// Owns the Claude agent child process and its stdout pipe.
 ///
@@ -40,6 +52,7 @@ pub fn spawn_agent_inner(
     data_dir: &Path,
     workspace_id: &str,
     claude_path: Option<PathBuf>,
+    publisher_tx: Option<&WorkspaceEventTx>,
 ) -> AppResult<AgentProcess> {
     let (worktree_dir, repo_id, ws_title, ws_description) = {
         let s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
@@ -177,6 +190,17 @@ pub fn spawn_agent_inner(
         );
     } // lock dropped here
 
+    // Emit AFTER the lock is dropped: emission is fire-and-forget but the
+    // publisher may immediately try to read state, and holding the lock
+    // across send() would serialize it.
+    emit_workspace_event(
+        publisher_tx,
+        WorkspaceEvent::StatusChanged {
+            workspace_id: workspace_id.into(),
+            new_status: WorkspaceStatus::Running,
+        },
+    );
+
     Ok(AgentProcess {
         child,
         stdout: stdout_pipe,
@@ -296,6 +320,31 @@ pub fn process_reader_events_with_cancel<F>(
 ) where
     F: Fn(AgentEvent),
 {
+    process_reader_events_with_cancel_and_publisher(
+        reader,
+        state,
+        workspace_id,
+        cancel,
+        None,
+        send_event,
+    )
+}
+
+/// Variant of [`process_reader_events_with_cancel`] that also broadcasts
+/// `WorkspaceEvent::StatusChanged` to the team-activity publisher when
+/// the workspace transitions out of Running on EOF / cancel. Kept as a
+/// separate fn so existing in-process tests (which don't care about the
+/// publisher) can keep calling the no-arg variant.
+pub fn process_reader_events_with_cancel_and_publisher<F>(
+    reader: Box<dyn std::io::Read + Send>,
+    state: Arc<Mutex<AppState>>,
+    workspace_id: &str,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    publisher_tx: Option<&WorkspaceEventTx>,
+    send_event: &F,
+) where
+    F: Fn(AgentEvent),
+{
     use std::sync::atomic::Ordering;
     let mut br = BufReader::new(reader);
     let mut line = String::new();
@@ -353,6 +402,7 @@ pub fn process_reader_events_with_cancel<F>(
     // still ours: after a user-initiated Stop+respawn, a fresh handle (with a
     // different cancel Arc) may already occupy the slot, and blindly removing
     // would orphan the new agent and break the user's next send.
+    let mut flipped_to_waiting = false;
     if let Ok(mut s) = state.lock() {
         let still_ours = s
             .agents
@@ -362,9 +412,21 @@ pub fn process_reader_events_with_cancel<F>(
         if still_ours {
             if let Some(ws) = s.workspaces.get_mut(workspace_id) {
                 ws.status = WorkspaceStatus::Waiting;
+                flipped_to_waiting = true;
             }
             s.agents.remove(workspace_id);
         }
+    }
+    // Emit outside the lock so the publisher (or any other subscriber) can
+    // pick it up without contending for AppState.
+    if flipped_to_waiting {
+        emit_workspace_event(
+            publisher_tx,
+            WorkspaceEvent::StatusChanged {
+                workspace_id: workspace_id.into(),
+                new_status: WorkspaceStatus::Waiting,
+            },
+        );
     }
 }
 
@@ -580,21 +642,44 @@ pub fn event_to_persisted_message(
 }
 
 pub fn stop_agent_inner(state: Arc<Mutex<AppState>>, workspace_id: &str) -> AppResult<()> {
+    stop_agent_inner_with_publisher(state, workspace_id, None)
+}
+
+/// Variant of [`stop_agent_inner`] that emits `WorkspaceEvent::StatusChanged`
+/// to the team-activity publisher when the workspace flips to Waiting.
+pub fn stop_agent_inner_with_publisher(
+    state: Arc<Mutex<AppState>>,
+    workspace_id: &str,
+    publisher_tx: Option<&WorkspaceEventTx>,
+) -> AppResult<()> {
     use crate::error::AppError;
-    let mut s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
-    // Flip the cancel token *before* removing the handle so the reader
-    // thread observes it on its next read_line check and exits cleanly,
-    // even if the child stdout doesn't EOF promptly.
-    if let Some(handle) = s.agents.get(workspace_id) {
-        handle
-            .cancel
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-    // Remove handle — drops stdin_tx sender, which closes the child's
-    // stdin and (usually) forces EOF on stdout.
-    s.agents.remove(workspace_id);
-    if let Some(ws) = s.workspaces.get_mut(workspace_id) {
-        ws.status = WorkspaceStatus::Waiting;
+    let mut flipped_to_waiting = false;
+    {
+        let mut s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        // Flip the cancel token *before* removing the handle so the reader
+        // thread observes it on its next read_line check and exits cleanly,
+        // even if the child stdout doesn't EOF promptly.
+        if let Some(handle) = s.agents.get(workspace_id) {
+            handle
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        // Remove handle — drops stdin_tx sender, which closes the child's
+        // stdin and (usually) forces EOF on stdout.
+        s.agents.remove(workspace_id);
+        if let Some(ws) = s.workspaces.get_mut(workspace_id) {
+            ws.status = WorkspaceStatus::Waiting;
+            flipped_to_waiting = true;
+        }
+    } // lock dropped before broadcasting
+    if flipped_to_waiting {
+        emit_workspace_event(
+            publisher_tx,
+            WorkspaceEvent::StatusChanged {
+                workspace_id: workspace_id.into(),
+                new_status: WorkspaceStatus::Waiting,
+            },
+        );
     }
     Ok(())
 }
@@ -763,7 +848,7 @@ mod tests {
     fn spawn_agent_unknown_workspace_returns_err() {
         let state = make_state();
         let tmp = make_data_dir();
-        let result = spawn_agent_inner(state.clone(), tmp.path(), "ws_missing", None);
+        let result = spawn_agent_inner(state.clone(), tmp.path(), "ws_missing", None, None);
         assert!(result.is_err());
         let msg = result.err().unwrap().to_string();
         assert!(
@@ -791,7 +876,7 @@ mod tests {
                 cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
-        let result = spawn_agent_inner(state, tmp.path(), "ws_a", None);
+        let result = spawn_agent_inner(state, tmp.path(), "ws_a", None, None);
         assert!(result.is_err());
         assert!(result
             .err()
@@ -812,7 +897,7 @@ mod tests {
         } else {
             std::path::PathBuf::from("/bin/echo")
         };
-        let result = spawn_agent_inner(state, tmp.path(), "ws_b", Some(echo_path));
+        let result = spawn_agent_inner(state, tmp.path(), "ws_b", Some(echo_path), None);
         assert!(result.is_ok(), "got err: {:?}", result.err());
     }
 
@@ -829,7 +914,7 @@ mod tests {
         } else {
             std::path::PathBuf::from("/bin/echo")
         };
-        spawn_agent_inner(state.clone(), tmp.path(), "ws_c", Some(echo_path)).unwrap();
+        spawn_agent_inner(state.clone(), tmp.path(), "ws_c", Some(echo_path), None).unwrap();
         let s = state.lock().unwrap();
         let ws = s.workspaces.get("ws_c").unwrap();
         assert_eq!(ws.status, WorkspaceStatus::Running);
@@ -847,7 +932,7 @@ mod tests {
         } else {
             std::path::PathBuf::from("/bin/echo")
         };
-        spawn_agent_inner(state.clone(), tmp.path(), "ws_d", Some(echo_path)).unwrap();
+        spawn_agent_inner(state.clone(), tmp.path(), "ws_d", Some(echo_path), None).unwrap();
         let s = state.lock().unwrap();
         assert!(s.agents.contains_key("ws_d"));
     }
@@ -1619,7 +1704,7 @@ mod tests {
         write_workspace(&state, "ws_nobin", "repo_nobin", worktree);
         // Use a path that definitely doesn't exist.
         let bad_path = std::path::PathBuf::from("/tmp/definitely-does-not-exist-binary-xyz");
-        let result = spawn_agent_inner(state, tmp.path(), "ws_nobin", Some(bad_path));
+        let result = spawn_agent_inner(state, tmp.path(), "ws_nobin", Some(bad_path), None);
         // Should fail because the PTY can't spawn a non-existent binary.
         assert!(result.is_err());
     }
@@ -1708,7 +1793,7 @@ mod tests {
         } else {
             std::path::PathBuf::from("/bin/echo")
         };
-        let result = spawn_agent_inner(state.clone(), tmp.path(), "ws_ctx", Some(echo_path));
+        let result = spawn_agent_inner(state.clone(), tmp.path(), "ws_ctx", Some(echo_path), None);
         assert!(result.is_ok(), "got err: {:?}", result.err());
         assert_eq!(
             state
@@ -1746,7 +1831,7 @@ mod tests {
         } else {
             std::path::PathBuf::from("/bin/echo")
         };
-        let result = spawn_agent_inner(state, tmp.path(), "ws_race", Some(echo_path));
+        let result = spawn_agent_inner(state, tmp.path(), "ws_race", Some(echo_path), None);
         assert!(result.is_err());
         let err_msg = result.err().unwrap().to_string();
         assert!(err_msg.contains("already running"), "got: {err_msg}");
@@ -2192,5 +2277,187 @@ mod tests {
             cancel.load(Ordering::Relaxed),
             "stop_agent must flip the cancel token before dropping the handle"
         );
+    }
+
+    // ── Task 10 — WorkspaceEvent::StatusChanged emissions ─────────────────────
+
+    fn make_publisher_tx() -> (
+        crate::state::WorkspaceEventTx,
+        tokio::sync::broadcast::Receiver<crate::state::WorkspaceEvent>,
+    ) {
+        let (tx, rx) = tokio::sync::broadcast::channel::<crate::state::WorkspaceEvent>(32);
+        (std::sync::Arc::new(tx), rx)
+    }
+
+    #[test]
+    fn emit_workspace_event_no_op_when_none() {
+        // Documented behaviour: when no publisher is wired (tests, unconfigured
+        // installs), the helper must silently no-op rather than panic.
+        emit_workspace_event(
+            None,
+            crate::state::WorkspaceEvent::StatusChanged {
+                workspace_id: "ws_x".into(),
+                new_status: crate::state::WorkspaceStatus::Running,
+            },
+        );
+    }
+
+    #[test]
+    fn emit_workspace_event_ignores_send_error_when_no_subscribers() {
+        // Drop the receiver so send() returns SendError. The helper must
+        // swallow it — this is the "publisher not running" case in production.
+        let (tx, rx) = tokio::sync::broadcast::channel::<crate::state::WorkspaceEvent>(8);
+        drop(rx);
+        let tx_arc: crate::state::WorkspaceEventTx = std::sync::Arc::new(tx);
+        emit_workspace_event(
+            Some(&tx_arc),
+            crate::state::WorkspaceEvent::StatusChanged {
+                workspace_id: "ws_y".into(),
+                new_status: crate::state::WorkspaceStatus::Running,
+            },
+        );
+    }
+
+    #[test]
+    fn spawn_agent_inner_emits_status_changed_running() {
+        let state = make_state();
+        let tmp = make_data_dir();
+        let worktree = tmp.path().join("workspaces/ws_emit_run");
+        std::fs::create_dir_all(&worktree).unwrap();
+        write_workspace(&state, "ws_emit_run", "repo_e", worktree);
+        let echo_path = if cfg!(windows) {
+            std::path::PathBuf::from("C:\\Windows\\System32\\where.exe")
+        } else {
+            std::path::PathBuf::from("/bin/echo")
+        };
+        let (tx, mut rx) = make_publisher_tx();
+        spawn_agent_inner(state, tmp.path(), "ws_emit_run", Some(echo_path), Some(&tx)).unwrap();
+        let ev = rx.try_recv().expect("StatusChanged should be emitted");
+        match ev {
+            crate::state::WorkspaceEvent::StatusChanged {
+                workspace_id,
+                new_status,
+            } => {
+                assert_eq!(workspace_id, "ws_emit_run");
+                assert_eq!(new_status, crate::state::WorkspaceStatus::Running);
+            }
+            other => panic!("expected StatusChanged Running, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_agent_inner_with_publisher_emits_status_changed_waiting() {
+        use crate::state::WorkspaceStatus;
+        use tokio::sync::mpsc;
+        let state = make_state();
+        let tmp = make_data_dir();
+        let worktree = tmp.path().join("workspaces/ws_emit_stop");
+        std::fs::create_dir_all(&worktree).unwrap();
+        write_workspace(&state, "ws_emit_stop", "repo_e", worktree);
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .get_mut("ws_emit_stop")
+            .unwrap()
+            .status = WorkspaceStatus::Running;
+        let (stdin_tx, _stdin_rx) = mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_emit_stop".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_emit_stop".into(),
+                stdin_tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        let (tx, mut rx) = make_publisher_tx();
+        stop_agent_inner_with_publisher(state, "ws_emit_stop", Some(&tx)).unwrap();
+        let ev = rx.try_recv().expect("StatusChanged should be emitted");
+        match ev {
+            crate::state::WorkspaceEvent::StatusChanged {
+                workspace_id,
+                new_status,
+            } => {
+                assert_eq!(workspace_id, "ws_emit_stop");
+                assert_eq!(new_status, crate::state::WorkspaceStatus::Waiting);
+            }
+            other => panic!("expected StatusChanged Waiting, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stop_agent_inner_with_publisher_skips_emit_when_workspace_missing() {
+        // Defensive: if the workspace was deleted between agent insertion
+        // and stop, we must NOT emit a stale StatusChanged for a workspace
+        // the publisher knows nothing about.
+        use tokio::sync::mpsc;
+        let state = make_state();
+        let (stdin_tx, _stdin_rx) = mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_no_ws".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_no_ws".into(),
+                stdin_tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(64).0,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        let (tx, mut rx) = make_publisher_tx();
+        stop_agent_inner_with_publisher(state, "ws_no_ws", Some(&tx)).unwrap();
+        assert!(rx.try_recv().is_err(), "no event expected");
+    }
+
+    #[test]
+    fn process_reader_events_with_publisher_emits_status_changed_waiting_on_eof() {
+        use crate::state::WorkspaceStatus;
+        use std::io::Cursor;
+        let state = make_state();
+        let tmp = make_data_dir();
+        let worktree = tmp.path().join("workspaces/ws_emit_eof");
+        std::fs::create_dir_all(&worktree).unwrap();
+        write_workspace(&state, "ws_emit_eof", "repo_e", worktree);
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .get_mut("ws_emit_eof")
+            .unwrap()
+            .status = WorkspaceStatus::Running;
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (stdin_tx, _stdin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        state.lock().unwrap().agents.insert(
+            "ws_emit_eof".into(),
+            crate::state::AgentHandle {
+                workspace_id: "ws_emit_eof".into(),
+                stdin_tx,
+                session_id: None,
+                event_tx: tokio::sync::broadcast::channel::<crate::state::AgentEvent>(8).0,
+                cancel: cancel.clone(),
+            },
+        );
+        let (tx, mut rx) = make_publisher_tx();
+        let reader: Box<dyn std::io::Read + Send> = Box::new(Cursor::new(b"".to_vec()));
+        process_reader_events_with_cancel_and_publisher(
+            reader,
+            state,
+            "ws_emit_eof",
+            cancel,
+            Some(&tx),
+            &|_| {},
+        );
+        let ev = rx.try_recv().expect("StatusChanged Waiting on EOF");
+        match ev {
+            crate::state::WorkspaceEvent::StatusChanged {
+                workspace_id,
+                new_status,
+            } => {
+                assert_eq!(workspace_id, "ws_emit_eof");
+                assert_eq!(new_status, crate::state::WorkspaceStatus::Waiting);
+            }
+            other => panic!("expected StatusChanged Waiting, got {other:?}"),
+        }
     }
 }

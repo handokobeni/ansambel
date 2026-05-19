@@ -3,14 +3,14 @@
 // tests.  All business logic lives in `agent_core.rs` (fully covered).
 pub use crate::commands::agent_core::{
     build_system_prompt_prefix, event_to_persisted_message, process_reader_events,
-    process_reader_events_with_cancel, reattach_agent_inner, send_message_inner,
-    send_message_inner_with_persist, spawn_agent_inner, stderr_line_to_event, stop_agent_inner,
-    AgentProcess,
+    process_reader_events_with_cancel, process_reader_events_with_cancel_and_publisher,
+    reattach_agent_inner, send_message_inner, send_message_inner_with_persist, spawn_agent_inner,
+    stderr_line_to_event, stop_agent_inner, stop_agent_inner_with_publisher, AgentProcess,
 };
 
 use crate::persistence::message_writer::MessageWriter;
 use crate::persistence::messages::list_messages_paginated;
-use crate::state::{AgentEvent, AgentStatus, AppState, Message};
+use crate::state::{AgentEvent, AgentStatus, AppState, Message, WorkspaceEventTx};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
@@ -22,6 +22,7 @@ pub async fn spawn_agent(
     on_event: Channel<AgentEvent>,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
     writer: tauri::State<'_, MessageWriter>,
+    event_tx: tauri::State<'_, WorkspaceEventTx>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let data_dir = app
@@ -34,8 +35,15 @@ pub async fn spawn_agent(
         .settings
         .claude_binary_override
         .clone();
-    let session = spawn_agent_inner(state.inner().clone(), &data_dir, &workspace_id, claude_path)
-        .map_err(|e| e.to_string())?;
+    let publisher_tx: WorkspaceEventTx = event_tx.inner().clone();
+    let session = spawn_agent_inner(
+        state.inner().clone(),
+        &data_dir,
+        &workspace_id,
+        claude_path,
+        Some(&publisher_tx),
+    )
+    .map_err(|e| e.to_string())?;
     spawn_reader_thread(
         session,
         on_event,
@@ -43,6 +51,7 @@ pub async fn spawn_agent(
         writer.inner().clone(),
         workspace_id,
         data_dir,
+        publisher_tx,
     );
     Ok(())
 }
@@ -90,8 +99,11 @@ pub async fn send_message(
 pub async fn stop_agent(
     workspace_id: String,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    event_tx: tauri::State<'_, WorkspaceEventTx>,
 ) -> Result<(), String> {
-    stop_agent_inner(state.inner().clone(), &workspace_id).map_err(|e| e.to_string())
+    let publisher_tx: WorkspaceEventTx = event_tx.inner().clone();
+    stop_agent_inner_with_publisher(state.inner().clone(), &workspace_id, Some(&publisher_tx))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -148,6 +160,7 @@ fn spawn_reader_thread(
     message_writer: MessageWriter,
     workspace_id: String,
     data_dir: PathBuf,
+    publisher_tx: WorkspaceEventTx,
 ) {
     let (event_tx, cancel) = match state.lock() {
         Ok(s) => match s.agents.get(&workspace_id) {
@@ -185,11 +198,13 @@ fn spawn_reader_thread(
                 return;
             }
         };
-        process_reader_events_with_cancel(
+        let publisher_for_reader = publisher_tx.clone();
+        process_reader_events_with_cancel_and_publisher(
             reader,
             state,
             &workspace_id,
             cancel,
+            Some(&publisher_for_reader),
             &|ev: AgentEvent| {
                 // Persist assistant + tool events through the debounced writer
                 // so a tool-heavy turn (5+ tool_use + tool_result + assistant
@@ -203,6 +218,7 @@ fn spawn_reader_thread(
                             "agent reader: queue failed"
                         );
                     }
+                    // Task 11 emission point lives here in Task 11 commit.
                 }
                 let _ = event_tx_reader.send(ev);
             },
