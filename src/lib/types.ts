@@ -384,3 +384,33 @@ export type TurnState = {
   /** Cumulative `output_tokens`. */
   outputTokens: number;
 };
+
+// ── Phase 3a-4: Team Activity reader ─────────────────────────────
+
+/** One row of the Phase 3a-4 sidebar / mirror view, mirroring the Rust
+ *  `TeamActivityRow` shape and the columns the Phase 3a-3 publisher
+ *  writes. All-string fields default to `''` when missing on the wire;
+ *  `last_activity_at` is epoch ms (`0` when missing). */
+export type TeamActivityRow = {
+  workspace_id: string;
+  repo_remote_url: string;
+  repo_display_name: string;
+  task_title: string;
+  assignee_machine: string;
+  ansambel_status: string;
+  last_activity_at: number; // epoch ms
+  last_message_preview: string;
+  branch_name: string;
+  diff_summary: string;
+  pr_url: string;
+  private: boolean;
+};
+
+/** Tagged-enum mirror of the Rust `FetchResult`. The `kind` discriminator
+ *  matches the Rust `#[serde(tag = "kind", rename_all = "snake_case")]`
+ *  shape. */
+export type FetchResult =
+  | { kind: 'disabled' }
+  | { kind: 'machine_label_empty' }
+  | { kind: 'no_overlap_repos' }
+  | { kind: 'rows'; rows: TeamActivityRow[] };
