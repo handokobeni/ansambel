@@ -1,0 +1,134 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { render, fireEvent } from '@testing-library/svelte';
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }));
+
+import TeamWorkspaceMirror from './TeamWorkspaceMirror.svelte';
+import { teamActivity } from '$lib/stores/team-activity.svelte';
+import type { TeamActivityRow } from '$lib/types';
+
+function row(overrides: Partial<TeamActivityRow> = {}): TeamActivityRow {
+  return {
+    workspace_id: 'ws_a',
+    repo_remote_url: 'https://github.com/foo/bar',
+    repo_display_name: 'bar',
+    task_title: 'Refactor auth',
+    assignee_machine: 'bob@laptop',
+    ansambel_status: 'running',
+    last_activity_at: Date.now() - 5 * 60 * 1000,
+    last_message_preview: 'Working on token validation',
+    branch_name: 'feat/auth',
+    diff_summary: '+10 -3',
+    pr_url: '',
+    private: false,
+    ...overrides,
+  };
+}
+
+describe('TeamWorkspaceMirror', () => {
+  beforeEach(() => {
+    teamActivity.rows.clear();
+    teamActivity.selectedWorkspaceId = null;
+  });
+
+  it('renders task_title, assignee_machine, status in the header', () => {
+    teamActivity.rows.set('ws_a', row());
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByText } = render(TeamWorkspaceMirror);
+    expect(getByText('Refactor auth')).toBeTruthy();
+    expect(getByText(/bob@laptop/i)).toBeTruthy();
+    expect(getByText(/running/i)).toBeTruthy();
+  });
+
+  it('constructs a GitHub branch URL from an https remote', () => {
+    teamActivity.rows.set('ws_a', row());
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByRole } = render(TeamWorkspaceMirror);
+    const link = getByRole('link', { name: /open branch on github/i });
+    expect(link.getAttribute('href')).toBe('https://github.com/foo/bar/tree/feat%2Fauth');
+  });
+
+  it('constructs a GitHub branch URL from a git@ ssh remote', () => {
+    teamActivity.rows.set(
+      'ws_a',
+      row({ repo_remote_url: 'git@github.com:foo/bar', branch_name: 'feat/x' })
+    );
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByRole } = render(TeamWorkspaceMirror);
+    const link = getByRole('link', { name: /open branch on github/i });
+    expect(link.getAttribute('href')).toBe('https://github.com/foo/bar/tree/feat%2Fx');
+  });
+
+  it('hides the branch link when the remote scheme is unknown', () => {
+    teamActivity.rows.set(
+      'ws_a',
+      row({ repo_remote_url: 'ftp://example/foo', branch_name: 'main' })
+    );
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { queryByRole } = render(TeamWorkspaceMirror);
+    expect(queryByRole('link', { name: /open branch on github/i })).toBeNull();
+  });
+
+  it('renders "Not yet published" placeholder when diff_summary is empty', () => {
+    teamActivity.rows.set('ws_a', row({ diff_summary: '' }));
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByText } = render(TeamWorkspaceMirror);
+    expect(getByText(/Not yet published/i)).toBeTruthy();
+  });
+
+  it('renders the diff_summary text when present', () => {
+    teamActivity.rows.set('ws_a', row({ diff_summary: '+45 -12 across 3 files' }));
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByText } = render(TeamWorkspaceMirror);
+    expect(getByText(/\+45 -12 across 3 files/)).toBeTruthy();
+  });
+
+  it('renders the Open PR button only when status is pr_ready AND pr_url is set', () => {
+    teamActivity.rows.set(
+      'ws_a',
+      row({
+        ansambel_status: 'pr_ready',
+        pr_url: 'https://github.com/foo/bar/pull/9',
+      })
+    );
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByRole } = render(TeamWorkspaceMirror);
+    const button = getByRole('link', { name: /open pr/i });
+    expect(button.getAttribute('href')).toBe('https://github.com/foo/bar/pull/9');
+  });
+
+  it('hides the Open PR button when pr_url is empty', () => {
+    teamActivity.rows.set('ws_a', row({ ansambel_status: 'pr_ready', pr_url: '' }));
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { queryByRole } = render(TeamWorkspaceMirror);
+    expect(queryByRole('link', { name: /open pr/i })).toBeNull();
+  });
+
+  it('back button clears selectedWorkspaceId', async () => {
+    teamActivity.rows.set('ws_a', row());
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByLabelText } = render(TeamWorkspaceMirror);
+    const back = getByLabelText(/back to workspace/i);
+    await fireEvent.click(back);
+    expect(teamActivity.selectedWorkspaceId).toBeNull();
+  });
+
+  it('renders the sanitized message preview verbatim', () => {
+    teamActivity.rows.set(
+      'ws_a',
+      row({ last_message_preview: 'token: [REDACTED] — checking next step' })
+    );
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByText } = render(TeamWorkspaceMirror);
+    expect(getByText(/\[REDACTED\] — checking next step/i)).toBeTruthy();
+  });
+
+  it('handles workspaces with no branch_name gracefully', () => {
+    teamActivity.rows.set('ws_a', row({ branch_name: '' }));
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { queryByRole, queryByText } = render(TeamWorkspaceMirror);
+    expect(queryByRole('link', { name: /open branch on github/i })).toBeNull();
+    expect(queryByText(/feat\//i)).toBeNull();
+  });
+});
