@@ -58,6 +58,10 @@ export type Task = {
   order: number;
   created_at: number;
   updated_at: number;
+  /** Person-in-charge names resolved from the optional `pic` field on the
+   *  repo's Lark binding. Empty array when no PIC field is mapped or the
+   *  record has no assignees. Optional so older persisted records load. */
+  pic_names?: string[];
 };
 
 export type CreateTaskArgs = {
@@ -272,6 +276,10 @@ export type FieldMapping = {
   description: FieldRef | null;
   status: FieldRef | null;
   order: FieldRef | null;
+  /** Optional Person-type (Lark type 11) field whose resolved names are
+   *  surfaced on task cards. Null when the user opted not to map a PIC
+   *  field in the wizard. */
+  pic: FieldRef | null;
 };
 
 export type KanbanColumnLiteral = 'todo' | 'in_progress' | 'review' | 'done';

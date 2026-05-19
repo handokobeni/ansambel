@@ -2,6 +2,7 @@
 <script lang="ts">
   import LarkBindingWizard from '$lib/components/lark/LarkBindingWizard.svelte';
   import { larkBindings } from '$lib/stores/lark-bindings.svelte';
+  import { tasks } from '$lib/stores/tasks.svelte';
   import { addToast } from '$lib/stores/toasts.svelte';
   import type { BitableBinding } from '$lib/types';
 
@@ -36,6 +37,14 @@
     await larkBindings.setBinding(repoId, b);
     editingBinding = false;
     addToast(`Bitable connected for ${repoName}`, 'success');
+    // Backend rebuilds the LarkProvider on setBinding, but cached task rows
+    // still reflect the OLD field mapping. Refetch so newly-mapped fields
+    // (PIC, description, etc.) appear immediately without an app restart.
+    try {
+      await tasks.loadForRepo(repoId);
+    } catch (err) {
+      addToast(`Reload tasks failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
+    }
   }
 
   async function handleDisconnect() {

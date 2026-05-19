@@ -264,6 +264,7 @@ describe('KanbanBoard loading state', () => {
       description: null,
       status: null,
       order: null,
+      pic: null,
     },
     status_value_mapping: { entries: {}, default_column: 'todo' as const },
     created_at: 0,

@@ -43,6 +43,11 @@ pub struct FieldMapping {
     pub status: Option<FieldRef>,
     #[serde(default)]
     pub order: Option<FieldRef>,
+    /// Optional Person-type (Lark type 11) field whose names are surfaced
+    /// on task cards. `serde(default)` so bindings persisted before this
+    /// field existed deserialize without migration.
+    #[serde(default)]
+    pub pic: Option<FieldRef>,
 }
 
 /// Maps Bitable status field values to kanban columns. Keys are
@@ -213,6 +218,11 @@ pub struct Task {
     pub order: i32,           // within-column sort order (higher = top)
     pub created_at: i64,
     pub updated_at: i64,
+    /// Person-in-charge names resolved from the optional `pic` field on the
+    /// repo's Lark binding. Empty when no PIC field is mapped or the record
+    /// has no assignees. `serde(default)` so older persisted tasks load.
+    #[serde(default)]
+    pub pic_names: Vec<String>,
 }
 
 /// One streamed slice of terminal output. Tagged so the frontend (and
@@ -803,6 +813,7 @@ mod tests {
             order: 1024,
             created_at: 1_776_000_000,
             updated_at: 1_776_099_000,
+            pic_names: Vec::new(),
         };
         let json = serde_json::to_string(&t).unwrap();
         let back: Task = serde_json::from_str(&json).unwrap();
@@ -821,6 +832,7 @@ mod tests {
             order: 2048,
             created_at: 0,
             updated_at: 0,
+            pic_names: Vec::new(),
         };
         let json = serde_json::to_string(&t).unwrap();
         assert!(json.contains("\"workspace_id\":\"ws_xyz\""));
@@ -834,6 +846,7 @@ mod tests {
             order: 0,
             created_at: 0,
             updated_at: 0,
+            pic_names: Vec::new(),
         };
         let none_json = serde_json::to_string(&none_task).unwrap();
         assert!(none_json.contains("\"workspace_id\":null"));
@@ -857,6 +870,7 @@ mod tests {
             order: 3072,
             created_at: 0,
             updated_at: 0,
+            pic_names: Vec::new(),
         };
         let json = serde_json::to_string(&t).unwrap();
         assert!(json.contains("\"column\":\"review\""));
@@ -1265,6 +1279,7 @@ mod tests {
                 description: None,
                 status: None,
                 order: None,
+                pic: None,
             },
             status_value_mapping: StatusValueMapping::default(),
             created_at: 1700000000,
@@ -1292,6 +1307,7 @@ mod tests {
                     field_name: "Task Status".into(),
                 }),
                 order: None,
+                pic: None,
             },
             status_value_mapping: StatusValueMapping {
                 entries: {

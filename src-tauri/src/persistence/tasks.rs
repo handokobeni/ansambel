@@ -41,6 +41,7 @@ mod tests {
             order: 1024,
             created_at: 1_776_000_000,
             updated_at: 1_776_000_001,
+            pic_names: Vec::new(),
         }
     }
 

@@ -39,6 +39,11 @@
   let descFieldId = $state<string>('');
   let statusFieldId = $state<string>('');
   let orderFieldId = $state<string>('');
+  // PIC field id — preselected from existing binding so the picker keeps
+  // the user's prior choice when re-detecting the schema (re-detect blows
+  // away `proposal.suggested.*` but not user input).
+  // svelte-ignore state_referenced_locally
+  let picFieldId = $state<string>(existing?.field_mapping.pic?.field_id ?? '');
 
   let valueMap = $state<Record<string, KanbanColumnLiteral>>({});
   let defaultColumn = $state<KanbanColumnLiteral>('todo');
@@ -101,6 +106,7 @@
         description: fieldRefOf(descFieldId),
         status: fieldRefOf(statusFieldId),
         order: fieldRefOf(orderFieldId),
+        pic: fieldRefOf(picFieldId),
       } satisfies FieldMapping,
       status_value_mapping: {
         entries: valueMap,
@@ -223,6 +229,15 @@
         <select bind:value={orderFieldId} class={selectClass} data-testid="wizard-order-field">
           <option value="">(none — sort by created time)</option>
           {#each proposal?.fields ?? [] as f (f.field_id)}
+            <option value={f.field_id}>{f.field_name}</option>
+          {/each}
+        </select>
+      </label>
+      <label class="flex flex-col gap-1 text-[11px]">
+        PIC (person-in-charge)
+        <select bind:value={picFieldId} class={selectClass} data-testid="wizard-pic-field">
+          <option value="">(none — hide PIC on cards)</option>
+          {#each (proposal?.fields ?? []).filter((f) => f.type === 11 || f.type === 1 || f.type === 1003 || f.type === 1004) as f (f.field_id)}
             <option value={f.field_id}>{f.field_name}</option>
           {/each}
         </select>

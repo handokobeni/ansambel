@@ -414,6 +414,7 @@ mod tests {
                 description: None,
                 status: None,
                 order: None,
+                pic: None,
             },
             status_value_mapping: StatusValueMapping::default(),
             created_at: 0,

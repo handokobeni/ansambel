@@ -47,6 +47,7 @@ fn maybe_migrate_to_per_repo_binding(
             description: None,
             status: None,
             order: None,
+            pic: None,
         },
         status_value_mapping: crate::state::StatusValueMapping::default(),
         created_at: std::time::SystemTime::now()
@@ -430,6 +431,7 @@ mod migration_tests {
                 description: None,
                 status: None,
                 order: None,
+                pic: None,
             },
             status_value_mapping: crate::state::StatusValueMapping::default(),
             created_at: 0,
@@ -873,6 +875,7 @@ mod migration_tests {
                     field_name: "Status".into(),
                 }),
                 order: None,
+                pic: None,
             },
             crate::state::StatusValueMapping::default(),
         );
@@ -939,6 +942,7 @@ mod migration_tests {
                 description: None,
                 status: None,
                 order: None,
+                pic: None,
             },
             crate::state::StatusValueMapping::default(),
         );

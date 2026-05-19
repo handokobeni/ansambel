@@ -347,6 +347,91 @@ pub fn resolve_order(record: &BitableRecord, mapping: &FieldMapping) -> i32 {
     -clamped
 }
 
+/// Resolves the Person-in-charge names for a record from the mapped Person
+/// field (Lark type 11). Empty `Vec` when no `pic` field is mapped, the
+/// record has no value, or the value yields no names.
+///
+/// Lark Person fields come back as an array of user objects. Across endpoints
+/// we've seen these shapes:
+///   - `[{"id": "ou_xxx", "name": "Alice"}, ...]` (list endpoint)
+///   - `[{"id": "ou_xxx", "name": "Alice", "en_name": "Alice"}]`
+///   - `[{"type": "user", "id": "ou_xxx", "name": "Alice", "text": "Alice"}]`
+///     (search endpoint mentions an object similar to segments)
+///
+/// Each item's display name is preferred from `name`, falling back to
+/// `en_name` then `text`. Items without any of those are skipped.
+pub fn resolve_pic(record: &BitableRecord, mapping: &FieldMapping) -> Vec<String> {
+    let Some(pic_ref) = mapping.pic.as_ref() else {
+        return Vec::new();
+    };
+    let Some(fields) = record.fields.as_object() else {
+        return Vec::new();
+    };
+    let Some(raw) = fields.get(&pic_ref.field_name) else {
+        return Vec::new();
+    };
+    extract_person_names(raw)
+}
+
+fn extract_person_names(value: &serde_json::Value) -> Vec<String> {
+    use serde_json::Value;
+    // Plain Text-field shape: single string. Some users keep a free-text
+    // "Assigned to" column with one name (or "Alice, Bob"). Split on common
+    // separators so multi-name text fields surface as multiple PICs.
+    if let Some(s) = value.as_str() {
+        return split_text_names(s);
+    }
+    let mut out: Vec<String> = Vec::new();
+    let items: &[Value] = match value {
+        Value::Array(arr) => arr.as_slice(),
+        Value::Object(_) => std::slice::from_ref(value),
+        _ => return out,
+    };
+    for item in items {
+        // Array of plain strings (rare, but defensive).
+        if let Some(s) = item.as_str() {
+            out.extend(split_text_names(s));
+            continue;
+        }
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        // Segmented text shape from the search endpoint: `{"type": "text",
+        // "text": "Alice, Bob"}`. Treat the text portion the same way as a
+        // plain Text field so comma-separated names split correctly.
+        if obj.get("type").and_then(Value::as_str) == Some("text") {
+            if let Some(t) = obj.get("text").and_then(Value::as_str) {
+                out.extend(split_text_names(t));
+                continue;
+            }
+        }
+        let name = obj
+            .get("name")
+            .or_else(|| obj.get("en_name"))
+            .or_else(|| obj.get("text"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(n) = name {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// Splits a free-text PIC value (Text-field case) into individual names.
+/// Recognises `,`, `;`, `/`, `&`, and ` and ` as separators — covers the
+/// usual ways people type multiple assignees in a plain text cell.
+fn split_text_names(s: &str) -> Vec<String> {
+    s.split(|c: char| matches!(c, ',' | ';' | '/' | '&'))
+        .flat_map(|chunk| chunk.split(" and "))
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 pub(crate) struct BitableSchemaDetector {
     client: Arc<LarkClient>,
 }
@@ -425,6 +510,7 @@ impl BitableSchemaDetector {
                 field_name: f.field_name.clone(),
             }),
             order: None,
+            pic: None,
         };
         Ok(ProposedMapping {
             fields,
@@ -485,6 +571,151 @@ mod tests {
         let err = resolve_title(&r, &m, Some("Task name")).unwrap_err();
         assert!(err.to_string().contains("missing title"));
         assert!(err.to_string().contains("r1"));
+    }
+
+    // ── resolve_pic tests ──────────────────────────────────────────────────
+
+    fn pic_mapping(name: &str) -> FieldMapping {
+        FieldMapping {
+            title: FieldRef {
+                field_id: "fld_t".into(),
+                field_name: "Task name".into(),
+            },
+            pic: Some(FieldRef {
+                field_id: "fld_pic".into(),
+                field_name: name.into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_pic_returns_empty_when_pic_unmapped() {
+        let r = rec("r1", serde_json::json!({"PIC": [{"name": "Alice"}]}));
+        let m = title_mapping("Task name");
+        assert!(resolve_pic(&r, &m).is_empty());
+    }
+
+    #[test]
+    fn resolve_pic_returns_empty_when_field_missing_from_record() {
+        let r = rec("r1", serde_json::json!({"Task name": "x"}));
+        let m = pic_mapping("PIC");
+        assert!(resolve_pic(&r, &m).is_empty());
+    }
+
+    #[test]
+    fn resolve_pic_extracts_names_from_list_endpoint_array() {
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "PIC": [
+                    {"id": "ou_a", "name": "Alice"},
+                    {"id": "ou_b", "name": "Bob"}
+                ]
+            }),
+        );
+        let m = pic_mapping("PIC");
+        assert_eq!(
+            resolve_pic(&r, &m),
+            vec!["Alice".to_string(), "Bob".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_pic_falls_back_to_en_name_then_text() {
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "PIC": [
+                    {"id": "ou_a", "en_name": "Alice"},
+                    {"id": "ou_b", "text": "Bob"},
+                    {"id": "ou_c"}
+                ]
+            }),
+        );
+        let m = pic_mapping("PIC");
+        assert_eq!(
+            resolve_pic(&r, &m),
+            vec!["Alice".to_string(), "Bob".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_pic_handles_single_user_object_shape() {
+        let r = rec(
+            "r1",
+            serde_json::json!({"PIC": {"id": "ou_a", "name": "Alice"}}),
+        );
+        let m = pic_mapping("PIC");
+        assert_eq!(resolve_pic(&r, &m), vec!["Alice".to_string()]);
+    }
+
+    #[test]
+    fn resolve_pic_handles_plain_text_single_name() {
+        let r = rec("r1", serde_json::json!({"PIC": "Alice"}));
+        let m = pic_mapping("PIC");
+        assert_eq!(resolve_pic(&r, &m), vec!["Alice".to_string()]);
+    }
+
+    #[test]
+    fn resolve_pic_splits_plain_text_comma_separated() {
+        let r = rec(
+            "r1",
+            serde_json::json!({"PIC": "Alice, Bob; Carol / Dan & Eve"}),
+        );
+        let m = pic_mapping("PIC");
+        assert_eq!(
+            resolve_pic(&r, &m),
+            vec![
+                "Alice".to_string(),
+                "Bob".to_string(),
+                "Carol".to_string(),
+                "Dan".to_string(),
+                "Eve".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_pic_splits_plain_text_on_and() {
+        let r = rec("r1", serde_json::json!({"PIC": "Alice and Bob"}));
+        let m = pic_mapping("PIC");
+        assert_eq!(
+            resolve_pic(&r, &m),
+            vec!["Alice".to_string(), "Bob".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_pic_handles_segmented_text_from_search_endpoint() {
+        // Search endpoint returns Text fields as `[{"type": "text", "text": "..."}]`.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "PIC": [{"type": "text", "text": "Alice, Bob"}]
+            }),
+        );
+        let m = pic_mapping("PIC");
+        assert_eq!(
+            resolve_pic(&r, &m),
+            vec!["Alice".to_string(), "Bob".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_pic_skips_empty_and_whitespace_names() {
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "PIC": [
+                    {"id": "ou_a", "name": ""},
+                    {"id": "ou_b", "name": "  "},
+                    {"id": "ou_c", "name": "Carol"}
+                ]
+            }),
+        );
+        let m = pic_mapping("PIC");
+        assert_eq!(resolve_pic(&r, &m), vec!["Carol".to_string()]);
     }
 
     // ── extract_text unit tests ─────────────────────────────────────────────

@@ -14,7 +14,7 @@ use crate::state::{
     StatusValueMapping, Task,
 };
 use crate::task_provider::lark_field_resolver::{
-    resolve_description, resolve_order, resolve_status, resolve_title,
+    resolve_description, resolve_order, resolve_pic, resolve_status, resolve_title,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -336,6 +336,7 @@ fn record_to_task(
     let description = resolve_description(rec, mapping);
     let (column, _) = resolve_status(rec, mapping, status_values, status_options);
     let order = resolve_order(rec, mapping);
+    let pic_names = resolve_pic(rec, mapping);
     let repo_id = default_repo_id.unwrap_or("").to_string();
     let created_at = rec
         .extra_i64("created_time")
@@ -355,6 +356,7 @@ fn record_to_task(
         order,
         created_at,
         updated_at,
+        pic_names,
     })
 }
 
@@ -686,6 +688,7 @@ mod tests {
                 field_id: "fld_o".into(),
                 field_name: "order_within_column".into(),
             }),
+            pic: None,
         }
     }
 
@@ -938,6 +941,7 @@ mod tests {
                 field_name: "Task Status".into(),
             }),
             order: None,
+            pic: None,
         };
         let provider = LarkProvider::new(
             client,
@@ -1184,6 +1188,7 @@ mod tests {
                 field_id: "fld_o".into(),
                 field_name: "order_within_column".into(),
             }),
+            pic: None,
         };
         let provider = LarkProvider::new(
             client,
@@ -1835,6 +1840,7 @@ mod tests {
                 description: None,
                 status: None,
                 order: None,
+                pic: None,
             },
             StatusValueMapping::default(),
         );
@@ -1916,6 +1922,7 @@ mod tests {
                 description: None,
                 status: None,
                 order: None,
+                pic: None,
             },
             StatusValueMapping::default(),
         )

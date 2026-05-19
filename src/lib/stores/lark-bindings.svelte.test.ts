@@ -28,6 +28,7 @@ const makeBinding = (overrides: Partial<BitableBinding> = {}): BitableBinding =>
     description: null,
     status: null,
     order: null,
+    pic: null,
   },
   status_value_mapping: { entries: {}, default_column: 'todo' },
   created_at: 0,
