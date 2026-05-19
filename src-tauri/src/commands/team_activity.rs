@@ -683,8 +683,6 @@ pub(crate) fn read_remote_url_cached(
 /// Returns `Ok(FetchResult::…)` for the four reachable outcomes; `Err`
 /// is reserved for genuine Lark / network failures (HTTP error, timeout,
 /// parse error). The frontend store maps `Err` to `status='error'`.
-// TODO(phase-3a-4): Tauri wrapper (`fetch_team_activity_rows`) lands in Task 4.
-#[allow(dead_code)]
 pub(crate) async fn fetch_team_activity_rows_inner(
     state: Arc<std::sync::Mutex<crate::state::AppState>>,
     cfg: Option<crate::state::TeamActivityConfig>,
@@ -756,8 +754,59 @@ pub(crate) async fn fetch_team_activity_rows_inner(
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// IPC commands (Task 15)
+// IPC commands (Task 15 + Task 4)
 // ─────────────────────────────────────────────────────────────────────
+
+/// Shared process-wide cache for canonical remote URLs used by the
+/// Phase 3a-4 reader. Distinct from the publisher's enricher cache so
+/// the read path doesn't depend on the write path's state.
+fn reader_remote_url_cache() -> &'static Arc<std::sync::Mutex<HashMap<String, String>>> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Arc<std::sync::Mutex<HashMap<String, String>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Arc::new(std::sync::Mutex::new(HashMap::new())))
+}
+
+/// Phase 3a-4: fetch the rows the Team Activity sidebar and mirror view
+/// should display. Builds the FilterSpec internally from AppState +
+/// `team_activity_config.json`; the frontend passes no arguments.
+///
+/// Returns a tagged [`FetchResult`] enum — see the spec's error handling
+/// matrix for what each variant maps to in the UI.
+#[tauri::command]
+pub async fn fetch_team_activity_rows(
+    state: tauri::State<'_, Arc<std::sync::Mutex<crate::state::AppState>>>,
+    app: tauri::AppHandle,
+) -> std::result::Result<FetchResult, String> {
+    let data_dir = data_dir_from(&app)?;
+    let cfg = crate::persistence::team_activity_config::load_team_activity_config(&data_dir)
+        .map_err(|e| format!("load team_activity_config: {e}"))?;
+
+    // Early exit before constructing LarkClient: cheap path when disabled.
+    let needs_client =
+        matches!(&cfg, Some(c) if !c.app_token.is_empty() && !c.machine_label.is_empty());
+    let client = if needs_client {
+        let store = crate::commands::lark_auth::KeyringStore;
+        match crate::commands::lark_auth::load_lark_config_inner(&data_dir, &store) {
+            Ok(mut lark_cfg) => {
+                if let Some(c) = &cfg {
+                    lark_cfg.app_token = c.app_token.clone();
+                    lark_cfg.table_id = c.table_id.clone();
+                }
+                Some(Arc::new(crate::platform::lark_client::LarkClient::new(
+                    lark_cfg,
+                )))
+            }
+            Err(_) => None, // global lark creds missing → inner treats as Disabled-equivalent
+        }
+    } else {
+        None
+    };
+
+    let cache = reader_remote_url_cache();
+    fetch_team_activity_rows_inner(state.inner().clone(), cfg, cache, client)
+        .await
+        .map_err(|e| e.to_string())
+}
 
 /// Returns the persisted `TeamActivityConfig`, or `Ok(None)` when no
 /// config file exists or its `app_token` is empty (the persister treats
@@ -2517,5 +2566,17 @@ mod tests {
         set_team_activity_config_inner(tmp.path(), &cfg).unwrap();
         let loaded = get_team_activity_config_inner(tmp.path()).unwrap();
         assert!(loaded.is_none());
+    }
+
+    // ── Phase 3a-4: Tauri command wiring ───────────────────────────
+
+    #[test]
+    fn fetch_team_activity_rows_is_a_tauri_command() {
+        // Symbol-presence check: confirms the function exists and is
+        // reachable as a public symbol. The #[tauri::command] macro wraps
+        // the function in generated glue so a direct fn-pointer coercion
+        // would not compile; we use the same type_name_of_val pattern as
+        // the other command registration tests.
+        let _ = std::any::type_name_of_val(&fetch_team_activity_rows);
     }
 }
