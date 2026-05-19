@@ -634,6 +634,50 @@ async fn lookup_existing_record_id(
         .unwrap_or_default())
 }
 
+/// Returns the canonical `repo_remote_url` for `repo_id` — first call shells
+/// out to `git -C <path> remote get-url origin` (via
+/// [`crate::platform::repo_identity::read_origin_url`]), normalises with
+/// [`crate::platform::repo_identity::canonicalise_remote_url`], and caches
+/// the result keyed by `repo_id`. Subsequent calls return the cached value
+/// without touching the filesystem.
+///
+/// Empty results (repo has no origin, or the git invocation failed) are
+/// cached too — otherwise every 10-second poll would re-shell-out for
+/// every repo that doesn't have an origin remote.
+///
+/// The cache lives for the process lifetime. If the user re-points a
+/// repo's `origin` mid-session, the stale URL stays until app restart;
+/// acceptable per the spec's "enrichment refresh" deferred follow-up.
+///
+/// Poisoned-mutex case: returns an empty string and skips the cache
+/// write. A poisoned mutex means some other writer panicked, which is
+/// already a worse failure mode than a missed cache write here.
+// TODO(phase-3a-4): caller lands in Task 3.
+#[allow(dead_code)]
+pub(crate) fn read_remote_url_cached(
+    cache: &Arc<std::sync::Mutex<HashMap<String, String>>>,
+    repo_id: &str,
+    repo_path: &std::path::Path,
+) -> String {
+    if let Ok(guard) = cache.lock() {
+        if let Some(cached) = guard.get(repo_id) {
+            return cached.clone();
+        }
+    } else {
+        return String::new();
+    }
+    let raw = crate::platform::repo_identity::read_origin_url(repo_path).unwrap_or_default();
+    let canonical = if raw.is_empty() {
+        String::new()
+    } else {
+        crate::platform::repo_identity::canonicalise_remote_url(&raw)
+    };
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(repo_id.to_string(), canonical.clone());
+    }
+    canonical
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // IPC commands (Task 15)
 // ─────────────────────────────────────────────────────────────────────
@@ -1794,6 +1838,67 @@ mod tests {
         assert_eq!(row.workspace_id, "ws_x");
         assert_eq!(row.last_activity_at, 0);
         assert!(!row.private);
+    }
+
+    // ── Phase 3a-4: read_remote_url_cached ─────────────────────────
+
+    #[test]
+    fn read_remote_url_cached_returns_canonical_url_for_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(tmp.path(), "git@github.com:Foo/Bar.git");
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let url = read_remote_url_cached(&cache, "repo_a", tmp.path());
+        assert!(
+            url.contains("github.com"),
+            "expected canonical github.com host, got {url:?}"
+        );
+        assert!(
+            !url.ends_with(".git"),
+            "canonicaliser strips .git, got {url:?}"
+        );
+    }
+
+    #[test]
+    fn read_remote_url_cached_returns_empty_string_when_no_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg(tmp.path())
+            .output()
+            .unwrap();
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let url = read_remote_url_cached(&cache, "repo_b", tmp.path());
+        assert_eq!(url, "");
+    }
+
+    #[test]
+    fn read_remote_url_cached_hits_cache_on_second_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(tmp.path(), "git@github.com:Foo/Bar.git");
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let first = read_remote_url_cached(&cache, "repo_c", tmp.path());
+        drop(tmp);
+        let second = read_remote_url_cached(&cache, "repo_c", std::path::Path::new("/tmp/gone"));
+        assert_eq!(first, second);
+        assert!(!second.is_empty());
+    }
+
+    #[test]
+    fn read_remote_url_cached_caches_empty_negative_results_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg(tmp.path())
+            .output()
+            .unwrap();
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let first = read_remote_url_cached(&cache, "repo_d", tmp.path());
+        assert_eq!(first, "");
+        assert_eq!(cache.lock().unwrap().get("repo_d"), Some(&"".to_string()));
     }
 
     // ── get/set_team_activity_config (Task 15) ────────────────────
