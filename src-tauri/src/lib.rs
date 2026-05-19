@@ -178,6 +178,59 @@ pub fn run() {
                 }
             }
 
+            // Phase 3a-3 Task 9: spawn team-activity state publisher if a
+            // team_activity_config.json is present AND the global Lark
+            // credentials are configured. Disabled (info-log only) when
+            // either is missing so first-launch / unconfigured installs
+            // don't pay the spawn cost or risk a noisy auth failure.
+            match crate::persistence::team_activity_config::load_team_activity_config(&data_dir) {
+                Ok(Some(team_cfg)) => {
+                    let store = crate::commands::lark_auth::KeyringStore;
+                    match crate::commands::lark_auth::load_lark_config_inner(&data_dir, &store) {
+                        Ok(mut lark_cfg) => {
+                            // Reuse the global app_id + app_secret; inject
+                            // the team-activity binding's app_token + table_id.
+                            lark_cfg.app_token = team_cfg.app_token.clone();
+                            lark_cfg.table_id = team_cfg.table_id.clone();
+                            let client = std::sync::Arc::new(
+                                crate::platform::lark_client::LarkClient::new(lark_cfg),
+                            );
+                            let row_id_cache: std::sync::Arc<
+                                tokio::sync::Mutex<std::collections::HashMap<String, String>>,
+                            > = std::sync::Arc::new(tokio::sync::Mutex::new(
+                                std::collections::HashMap::new(),
+                            ));
+                            let uploader = crate::commands::team_activity::build_lark_uploader(
+                                client,
+                                team_cfg.clone(),
+                                row_id_cache.clone(),
+                            );
+                            let publisher = crate::commands::team_activity::Publisher {
+                                cfg: team_cfg,
+                                row_id_cache,
+                                uploader,
+                                debounce: std::time::Duration::from_secs(3),
+                            };
+                            let rx = workspace_event_tx.subscribe();
+                            tauri::async_runtime::spawn(publisher.run(rx));
+                            tracing::info!("team-activity publisher spawned");
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "team-activity publisher skipped: global Lark credentials missing"
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("team-activity publisher disabled (no config)");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "team-activity config load failed");
+                }
+            }
+
             // Initial hydrate: pull tasks from LocalProvider and populate
             // AppState mirror. Spawned so setup() returns immediately.
             // Task 10 will replace this with binding-aware hydration.
