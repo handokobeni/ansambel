@@ -328,6 +328,7 @@ pub fn run() {
             crate::commands::lark_repo_binding::list_lark_lookup_options,
             crate::commands::team_activity::get_team_activity_config,
             crate::commands::team_activity::set_team_activity_config,
+            crate::commands::team_activity::setup_team_activity_table,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -471,6 +472,8 @@ mod tests {
             std::any::type_name_of_val(&crate::commands::team_activity::get_team_activity_config);
         let _ =
             std::any::type_name_of_val(&crate::commands::team_activity::set_team_activity_config);
+        let _ =
+            std::any::type_name_of_val(&crate::commands::team_activity::setup_team_activity_table);
     }
 
     #[test]

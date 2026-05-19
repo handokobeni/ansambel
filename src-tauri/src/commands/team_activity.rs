@@ -415,6 +415,152 @@ fn data_dir_from(app_handle: &tauri::AppHandle) -> std::result::Result<std::path
         .map_err(|e| format!("resolve app_data_dir: {e}"))
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Task 16: setup_team_activity_table — idempotent column auto-provisioner
+// ─────────────────────────────────────────────────────────────────────
+
+/// Canonical column spec for the team-activity Bitable. The order is
+/// significant for first-time provisioning (only the order of the POSTs;
+/// Lark renders columns in creation order). `workspace_id` is the
+/// primary key.
+///
+/// Lark `ui_type` numeric codes used:
+/// - 1  = Text
+/// - 3  = SingleSelect
+/// - 5  = DateTime
+/// - 7  = Checkbox
+/// - 15 = URL
+struct ColumnSpec {
+    name: &'static str,
+    field_type: u32,
+    property: Option<serde_json::Value>,
+}
+
+fn team_activity_columns() -> Vec<ColumnSpec> {
+    vec![
+        ColumnSpec {
+            name: "workspace_id",
+            field_type: 1,
+            property: None,
+        },
+        ColumnSpec {
+            name: "repo_remote_url",
+            field_type: 1,
+            property: None,
+        },
+        ColumnSpec {
+            name: "repo_display_name",
+            field_type: 1,
+            property: None,
+        },
+        ColumnSpec {
+            name: "task_title",
+            field_type: 1,
+            property: None,
+        },
+        ColumnSpec {
+            name: "assignee_machine",
+            field_type: 1,
+            property: None,
+        },
+        ColumnSpec {
+            name: "ansambel_status",
+            field_type: 3,
+            property: Some(serde_json::json!({
+                "options": [
+                    {"name": "idle"},
+                    {"name": "running"},
+                    {"name": "waiting"},
+                    {"name": "blocked"},
+                    {"name": "pr_ready"},
+                    {"name": "done"}
+                ]
+            })),
+        },
+        ColumnSpec {
+            name: "last_activity_at",
+            field_type: 5,
+            property: None,
+        },
+        ColumnSpec {
+            name: "last_message_preview",
+            field_type: 1,
+            property: None,
+        },
+        ColumnSpec {
+            name: "branch_name",
+            field_type: 1,
+            property: None,
+        },
+        ColumnSpec {
+            name: "diff_summary",
+            field_type: 1,
+            property: None,
+        },
+        ColumnSpec {
+            name: "pr_url",
+            field_type: 15,
+            property: None,
+        },
+        ColumnSpec {
+            name: "private",
+            field_type: 7,
+            property: None,
+        },
+    ]
+}
+
+/// Diff the canonical 12 columns against what's already in the table and
+/// POST `bitable_create_field` for each missing one. Existing columns are
+/// left untouched — type drift is NOT corrected (that would be destructive).
+///
+/// Returns the list of column names that were created (empty when the
+/// table is already fully provisioned).
+pub(crate) async fn setup_team_activity_table_inner(
+    client: std::sync::Arc<crate::platform::lark_client::LarkClient>,
+    app_token: &str,
+    table_id: &str,
+) -> crate::error::Result<Vec<String>> {
+    let existing = client.bitable_list_fields(app_token, table_id).await?;
+    let existing_names: std::collections::HashSet<String> =
+        existing.iter().map(|f| f.field_name.clone()).collect();
+
+    let mut created = Vec::new();
+    for col in team_activity_columns() {
+        if existing_names.contains(col.name) {
+            tracing::debug!(
+                column = col.name,
+                "team-activity setup: column already exists"
+            );
+            continue;
+        }
+        client
+            .bitable_create_field(app_token, table_id, col.name, col.field_type, col.property)
+            .await?;
+        tracing::info!(column = col.name, "team-activity setup: created column");
+        created.push(col.name.to_string());
+    }
+    Ok(created)
+}
+
+#[tauri::command]
+pub async fn setup_team_activity_table(
+    app_token: String,
+    table_id: String,
+    app_handle: tauri::AppHandle,
+) -> std::result::Result<Vec<String>, String> {
+    let data_dir = data_dir_from(&app_handle)?;
+    let store = crate::commands::lark_auth::KeyringStore;
+    let mut cfg = crate::commands::lark_auth::load_lark_config_inner(&data_dir, &store)
+        .map_err(|e| format!("global Lark credentials missing: {e}"))?;
+    cfg.app_token = app_token.clone();
+    cfg.table_id = table_id.clone();
+    let client = std::sync::Arc::new(crate::platform::lark_client::LarkClient::new(cfg));
+    setup_team_activity_table_inner(client, &app_token, &table_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -864,6 +1010,248 @@ mod tests {
         set_team_activity_config_inner(tmp.path(), &second).unwrap();
         let loaded = get_team_activity_config_inner(tmp.path()).unwrap();
         assert_eq!(loaded, Some(second));
+    }
+
+    // ── setup_team_activity_table (Task 16) ───────────────────────
+
+    async fn mount_token(server: &wiremock::MockServer) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "msg": "ok",
+                "tenant_access_token": "t_xyz",
+                "expire": 7200,
+            })))
+            .mount(server)
+            .await;
+    }
+
+    fn make_client_for(uri: &str) -> Arc<crate::platform::lark_client::LarkClient> {
+        Arc::new(crate::platform::lark_client::LarkClient::new(
+            crate::platform::lark_client::LarkConfig {
+                app_id: "app_test_id".into(),
+                app_secret: "app_test_secret".into(),
+                app_token: "appA".into(),
+                table_id: "tblA".into(),
+                base_url: uri.into(),
+            },
+        ))
+    }
+
+    #[tokio::test]
+    async fn setup_team_activity_table_creates_all_columns_when_table_empty() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        // Empty field list → all 12 columns must be created.
+        Mock::given(method("GET"))
+            .and(path("/open-apis/bitable/v1/apps/appA/tables/tblA/fields"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "msg": "ok",
+                "data": { "items": [], "has_more": false, "page_token": null }
+            })))
+            .mount(&server)
+            .await;
+        // Expect exactly 12 POSTs (one per canonical column).
+        Mock::given(method("POST"))
+            .and(path("/open-apis/bitable/v1/apps/appA/tables/tblA/fields"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "field": {
+                        "field_id": "fld_new",
+                        "field_name": "stub",
+                        "type": 1
+                    }
+                }
+            })))
+            .expect(12)
+            .mount(&server)
+            .await;
+
+        let client = make_client_for(&server.uri());
+        let created = setup_team_activity_table_inner(client, "appA", "tblA")
+            .await
+            .expect("setup ok");
+        assert_eq!(
+            created.len(),
+            12,
+            "expected all 12 canonical columns to be created"
+        );
+        // Spot-check: primary key + the SingleSelect status column + the
+        // bool privacy column appear in the created list.
+        assert!(created.contains(&"workspace_id".to_string()));
+        assert!(created.contains(&"ansambel_status".to_string()));
+        assert!(created.contains(&"private".to_string()));
+    }
+
+    #[tokio::test]
+    async fn setup_team_activity_table_is_idempotent_when_columns_already_exist() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        // Return all 12 canonical columns as already-present. The field_id /
+        // type values don't have to match the canonical spec — the inner
+        // only diffs by field_name (a name-collision is treated as "exists").
+        let existing_items: Vec<serde_json::Value> = [
+            "workspace_id",
+            "repo_remote_url",
+            "repo_display_name",
+            "task_title",
+            "assignee_machine",
+            "ansambel_status",
+            "last_activity_at",
+            "last_message_preview",
+            "branch_name",
+            "diff_summary",
+            "pr_url",
+            "private",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            serde_json::json!({
+                "field_id": format!("fld_existing_{i}"),
+                "field_name": name,
+                "type": 1,
+                "is_primary": *name == "workspace_id",
+                "property": null,
+            })
+        })
+        .collect();
+        Mock::given(method("GET"))
+            .and(path("/open-apis/bitable/v1/apps/appA/tables/tblA/fields"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "msg": "ok",
+                "data": { "items": existing_items, "has_more": false, "page_token": null }
+            })))
+            .mount(&server)
+            .await;
+        // Zero POSTs expected — any create call is a regression.
+        Mock::given(method("POST"))
+            .and(path("/open-apis/bitable/v1/apps/appA/tables/tblA/fields"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let client = make_client_for(&server.uri());
+        let created = setup_team_activity_table_inner(client, "appA", "tblA")
+            .await
+            .expect("setup ok");
+        assert!(
+            created.is_empty(),
+            "expected zero columns created on idempotent call; got {created:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_team_activity_table_only_creates_missing_columns() {
+        // Pre-existing: workspace_id + ansambel_status + private. Setup
+        // should create the other 9.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        mount_token(&server).await;
+        let existing_items: Vec<serde_json::Value> = ["workspace_id", "ansambel_status", "private"]
+            .iter()
+            .map(|name| {
+                serde_json::json!({
+                    "field_id": format!("fld_{name}"),
+                    "field_name": name,
+                    "type": 1,
+                    "is_primary": *name == "workspace_id",
+                    "property": null,
+                })
+            })
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/open-apis/bitable/v1/apps/appA/tables/tblA/fields"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "msg": "ok",
+                "data": { "items": existing_items, "has_more": false, "page_token": null }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/bitable/v1/apps/appA/tables/tblA/fields"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "field": {
+                        "field_id": "fld_new",
+                        "field_name": "stub",
+                        "type": 1
+                    }
+                }
+            })))
+            .expect(9)
+            .mount(&server)
+            .await;
+
+        let client = make_client_for(&server.uri());
+        let created = setup_team_activity_table_inner(client, "appA", "tblA")
+            .await
+            .expect("setup ok");
+        assert_eq!(created.len(), 9);
+        // None of the three already-present columns should be in `created`.
+        for already_there in ["workspace_id", "ansambel_status", "private"] {
+            assert!(
+                !created.contains(&already_there.to_string()),
+                "did not expect {already_there} in created list"
+            );
+        }
+    }
+
+    #[test]
+    fn team_activity_columns_spec_has_12_canonical_entries() {
+        // Lock the canonical column count + names so a future edit to
+        // `team_activity_columns()` that adds/drops a column is caught by
+        // the test suite, not by production drift.
+        let cols = team_activity_columns();
+        assert_eq!(cols.len(), 12);
+        let names: Vec<&str> = cols.iter().map(|c| c.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "workspace_id",
+                "repo_remote_url",
+                "repo_display_name",
+                "task_title",
+                "assignee_machine",
+                "ansambel_status",
+                "last_activity_at",
+                "last_message_preview",
+                "branch_name",
+                "diff_summary",
+                "pr_url",
+                "private",
+            ]
+        );
+        // ansambel_status must be SingleSelect (type 3) with 6 options.
+        let status_col = cols
+            .iter()
+            .find(|c| c.name == "ansambel_status")
+            .expect("ansambel_status present");
+        assert_eq!(status_col.field_type, 3);
+        let opts = status_col
+            .property
+            .as_ref()
+            .and_then(|p| p.get("options"))
+            .and_then(|o| o.as_array())
+            .expect("ansambel_status has options array");
+        assert_eq!(opts.len(), 6);
     }
 
     #[test]

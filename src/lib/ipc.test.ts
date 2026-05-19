@@ -562,6 +562,27 @@ describe('api.teamActivity', () => {
     vi.mocked(invoke).mockRejectedValue(new Error('write fail'));
     await expect(api.teamActivity.set(mockCfg)).rejects.toThrow('write fail');
   });
+
+  it('setupTable: forwards camelCase params and returns created column names', async () => {
+    vi.mocked(invoke).mockResolvedValue(['workspace_id', 'ansambel_status']);
+    const out = await api.teamActivity.setupTable('appA', 'tblA');
+    expect(invoke).toHaveBeenCalledWith('setup_team_activity_table', {
+      appToken: 'appA',
+      tableId: 'tblA',
+    });
+    expect(out).toEqual(['workspace_id', 'ansambel_status']);
+  });
+
+  it('setupTable: returns empty list on idempotent run', async () => {
+    vi.mocked(invoke).mockResolvedValue([]);
+    const out = await api.teamActivity.setupTable('appA', 'tblA');
+    expect(out).toEqual([]);
+  });
+
+  it('setupTable: propagates Lark API error', async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error('Lark API: code 99991663'));
+    await expect(api.teamActivity.setupTable('appA', 'tblA')).rejects.toThrow('99991663');
+  });
 });
 
 describe('agentChannel', () => {

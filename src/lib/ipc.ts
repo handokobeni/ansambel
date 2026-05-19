@@ -282,6 +282,12 @@ export const api = {
      *  `commands/team_activity.rs::set_team_activity_config_inner`. */
     set: (cfg: TeamActivityConfig): Promise<void> =>
       invoke<void>('set_team_activity_config', { cfg }),
+
+    /** Idempotently provisions the 12 canonical team-activity columns on
+     *  the user's Bitable. Returns the list of column names that were
+     *  created — empty when the table is already fully provisioned. */
+    setupTable: (appToken: string, tableId: string): Promise<string[]> =>
+      invoke<string[]>('setup_team_activity_table', { appToken, tableId }),
   },
 
   script: {
