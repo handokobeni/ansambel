@@ -12,7 +12,7 @@
 
 use crate::commands::files::resolve_within_worktree;
 use crate::error::{AppError, Result};
-use crate::state::AppState;
+use crate::state::{AppState, WorkspaceEvent, WorkspaceEventTx};
 use serde::Serialize;
 use sha1::{Digest, Sha1};
 use std::sync::{Arc, Mutex};
@@ -102,6 +102,21 @@ pub fn file_write_inner(
     expected_sha1: &str,
     state: Arc<Mutex<AppState>>,
 ) -> Result<FileWriteResponse> {
+    file_write_inner_with_publisher(workspace_id, rel_path, content, expected_sha1, state, None)
+}
+
+/// Variant of [`file_write_inner`] that emits
+/// `WorkspaceEvent::FileTouched` to the team-activity publisher on a
+/// successful write. Kept as a separate function so existing unit tests
+/// (which don't need to assert telemetry) keep calling the no-arg form.
+pub fn file_write_inner_with_publisher(
+    workspace_id: &str,
+    rel_path: &str,
+    content: &str,
+    expected_sha1: &str,
+    state: Arc<Mutex<AppState>>,
+    publisher_tx: Option<&WorkspaceEventTx>,
+) -> Result<FileWriteResponse> {
     if rel_path.trim().is_empty() {
         return Err(AppError::Other("file path is empty".into()));
     }
@@ -184,10 +199,19 @@ pub fn file_write_inner(
     std::fs::write(&tmp, new_bytes)?;
     std::fs::rename(&tmp, &absolute)?;
 
-    Ok(FileWriteResponse {
+    let resp = FileWriteResponse {
         sha1: sha1_hex(new_bytes),
         size: new_bytes.len() as u64,
-    })
+    };
+    // Task 12: surface user-driven file edits on the team-activity row.
+    // Fire-and-forget; SendError just means no publisher is wired (or it
+    // has shut down) and is not actionable from a single file write.
+    if let Some(tx) = publisher_tx {
+        let _ = tx.send(WorkspaceEvent::FileTouched {
+            workspace_id: workspace_id.to_string(),
+        });
+    }
+    Ok(resp)
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -220,11 +244,20 @@ pub async fn file_write(
     content: String,
     expected_sha1: String,
     state: State<'_, Arc<Mutex<AppState>>>,
+    event_tx: State<'_, WorkspaceEventTx>,
 ) -> std::result::Result<FileWriteResponse, String> {
     let inner_state = state.inner().clone();
+    let publisher_tx: WorkspaceEventTx = event_tx.inner().clone();
     tokio::task::spawn_blocking(move || {
-        file_write_inner(&workspace_id, &path, &content, &expected_sha1, inner_state)
-            .map_err(|e| e.to_string())
+        file_write_inner_with_publisher(
+            &workspace_id,
+            &path,
+            &content,
+            &expected_sha1,
+            inner_state,
+            Some(&publisher_tx),
+        )
+        .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("file_write task join error: {e}"))?
@@ -489,5 +522,66 @@ mod tests {
     fn looks_binary_detects_nul_byte_within_first_8kb() {
         assert!(looks_binary(&[1, 2, 0, 3]));
         assert!(!looks_binary(b"hello world"));
+    }
+
+    // ── Task 12 — WorkspaceEvent::FileTouched emission ───────────────────────
+
+    fn make_publisher_tx() -> (
+        crate::state::WorkspaceEventTx,
+        tokio::sync::broadcast::Receiver<crate::state::WorkspaceEvent>,
+    ) {
+        let (tx, rx) = tokio::sync::broadcast::channel::<crate::state::WorkspaceEvent>(8);
+        (std::sync::Arc::new(tx), rx)
+    }
+
+    #[test]
+    fn file_write_with_publisher_emits_file_touched_on_success() {
+        let (_tmp, wt) = make_worktree();
+        let state = make_state("ws_emit_write", &wt);
+        let (tx, mut rx) = make_publisher_tx();
+        file_write_inner_with_publisher("ws_emit_write", "x.txt", "hi", "", state, Some(&tx))
+            .unwrap();
+        let ev = rx.try_recv().expect("FileTouched should be emitted");
+        match ev {
+            crate::state::WorkspaceEvent::FileTouched { workspace_id } => {
+                assert_eq!(workspace_id, "ws_emit_write");
+            }
+            other => panic!("expected FileTouched, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_write_with_publisher_skips_emit_when_write_rejected() {
+        // sha1 mismatch → InvalidState; we must NOT emit a FileTouched
+        // for a write that never actually landed on disk.
+        let (_tmp, wt) = make_worktree();
+        std::fs::write(wt.join("a.txt"), b"original").unwrap();
+        let state = make_state("ws_emit_skip", &wt);
+        let (tx, mut rx) = make_publisher_tx();
+        let err = file_write_inner_with_publisher(
+            "ws_emit_skip",
+            "a.txt",
+            "would overwrite",
+            "0000000000000000000000000000000000000000",
+            state,
+            Some(&tx),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("FileChangedOnDisk"));
+        assert!(rx.try_recv().is_err(), "no event expected on failure");
+    }
+
+    #[test]
+    fn file_write_without_publisher_still_writes_and_is_noop() {
+        let (_tmp, wt) = make_worktree();
+        let state = make_state("ws_nopub", &wt);
+        let resp =
+            file_write_inner_with_publisher("ws_nopub", "x.txt", "hi", "", state, None).unwrap();
+        assert_eq!(resp.size, 2);
+        // Backwards-compat wrapper threads `None`:
+        let (_t2, wt2) = make_worktree();
+        let state2 = make_state("ws_nopub2", &wt2);
+        file_write_inner("ws_nopub2", "y.txt", "yo", "", state2).unwrap();
+        assert_eq!(std::fs::read_to_string(wt2.join("y.txt")).unwrap(), "yo");
     }
 }
