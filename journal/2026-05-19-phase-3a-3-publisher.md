@@ -121,14 +121,25 @@ is the next phase. The branch (`feat/phase-3a-3-publisher`) landed 24 commits in
 
 ## Followups deferred
 
-- `DiffSummaryUpdated` and `PrCreated` are emitted but the publisher has no
-  handlers yet — the `diff_summary` and `pr_url` Bitable columns stay blank.
-  Adding the handlers is a one-screen change once we agree on the wire format
-  (Lark expects a URL object for `pr_url`, plain text for `diff_summary`).
-- AppState-based repo enrichment — the publisher carries `repo_remote_url` and
-  `repo_display_name` but currently builds them per-event by re-reading the
-  workspace. A `workspace_id → repo` lookup table on AppState would let the
-  publisher hydrate both once per workspace, not once per event.
+- `diff_summary` stays blank — the publisher's column is wired (see
+  `snapshot_to_fields` and the `DiffSummaryUpdated` variant) but no emission
+  site exists. The clean trigger is a backend commit/push handler that doesn't
+  exist yet (agents currently run `git commit` via the `Bash` tool, so Ansambel
+  never sees the event). When Phase 3a-5/6 introduces a first-class commit/push
+  surface — or when 3a-8 ships handoff bundles — wire `commands/diff.rs` to emit
+  `DiffSummaryUpdated` with the `+45 -12 across 3 files` short-stat string. A
+  workaround (`git diff --shortstat` shell-out in the publisher's flush path)
+  was considered and rejected: every 3-second flush would shell out for every
+  active workspace, and for large repos the cost outweighs the readability win.
+- `pr_url` stays blank — same story. `PrCreated` is on the broadcast bus but
+  there's no `gh pr create` Tauri handler (agents shell out). Wire when a proper
+  PR-creation command lands.
+- Enrichment refresh — `build_app_enricher` reads workspace + repo + task fields
+  once per flush via the in-memory `remote_url_cache`. If the user re-binds a
+  repo or renames a task mid-session, the cached canonical URL doesn't refresh
+  until restart. Acceptable today (rename is rare); when this bites someone,
+  swap the per-repo cache for a `tokio::sync::watch` feed off the existing
+  repo/task persistence layer.
 - Restartable publisher on config change — Save currently toasts "Restart app to
   apply changes" because the publisher's `TeamActivityConfig` is captured at
   spawn time. A `tokio::sync::watch<TeamActivityConfig>` channel would close
@@ -185,6 +196,34 @@ is the next phase. The branch (`feat/phase-3a-3-publisher`) landed 24 commits in
 
 The publisher is on by default once a user configures it via Settings → Team
 Activity; before that it's a no-op. Read side (the team-activity sidebar that
-consumes these Bitable rows for the local user's repos) is Phase 3a-4. The
-`DiffSummaryUpdated` / `PrCreated` consumer wiring is the most obvious thing to
-sweep in alongside that work — both events are already on the broadcast bus.
+consumes these Bitable rows for the local user's repos) is Phase 3a-4.
+
+Smoke-test polish landed alongside the main 20-task plan:
+
+- **Duplicate-row prevention on app restart** (`build_lark_uploader`): the
+  in-memory `row_id_cache` is empty after each process boot, so the first
+  publish for any workspace would POST a new row before this fix. Now we search
+  Lark by `workspace_id IS X` before deciding POST vs PUT, so a restart never
+  duplicates an existing row. Discovered in manual smoke testing — Bitable had 5
+  rows for the same workspace after a few iterations.
+- **`spawn_agent` idempotency** (`commands/agent.rs`): the Tauri command now
+  downgrades to `reattach` when `agents` map already has an entry for this
+  workspace. Frontend `Plan ↔ Work` toggle no longer surfaces "agent already
+  running for ws\_…" errors. The frontend's onMount keeps using
+  `messages.statusFor` first (cheaper than backend round-trip) but the backend
+  guard means a stale read can't escalate to a toast.
+- **Hydrate dedupe** (`messages.svelte.ts`): WorkspaceView's local user echo
+  (`msg_user_<ts>` id) lives in the singleton store; on remount the persisted
+  version arrives via `list_messages` with a different ULID id and renders
+  alongside. `hydrate` now drops local echoes whose text matches a persisted
+  user message in the same batch.
+- **Snapshot enrichment** (`build_app_enricher` + `Publisher.enricher`):
+  `repo_remote_url`, `repo_display_name`, `task_title`, `branch_name` are now
+  populated for every flush by looking up the workspace in `AppState`.
+  `repo_remote_url` is computed once per repo via `git remote get-url origin`
+  and cached in-process; the rest come straight from existing struct fields.
+  Privacy lock skips enrichment so the stripped-row contract still holds.
+
+The `diff_summary` / `pr_url` consumer wiring remains the most obvious sweep
+when Phase 3a-4 / 3a-5 lands a backend commit/push/PR-create surface — both
+events are already on the broadcast bus.
