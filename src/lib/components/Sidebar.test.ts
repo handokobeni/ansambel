@@ -3,6 +3,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import Sidebar from './Sidebar.svelte';
 
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+
 vi.mock('$lib/stores/repos.svelte', () => ({
   repos: {
     selectedRepoId: 'repo_abc123' as string | null,
@@ -63,6 +65,7 @@ vi.mock('$lib/stores/workspaces.svelte', () => {
 import { workspaces } from '$lib/stores/workspaces.svelte';
 import { repos } from '$lib/stores/repos.svelte';
 import { getToasts, removeToast } from '$lib/stores/toasts.svelte';
+import { teamActivity } from '$lib/stores/team-activity.svelte';
 
 const defaultRepo = {
   id: 'repo_abc123',
@@ -643,5 +646,33 @@ describe('Sidebar resize', () => {
     const aside = container.querySelector<HTMLElement>('[data-sidebar]')!;
     // Default = 280 per the component constants.
     expect(aside.style.width).toBe('280px');
+  });
+});
+
+describe('Sidebar — Team Activity panel mount', () => {
+  beforeEach(() => {
+    teamActivity.rows.clear();
+    teamActivity.status = 'idle';
+    teamActivity.selectedWorkspaceId = null;
+  });
+
+  it('renders the TeamActivityPanel below WORKSPACES', () => {
+    const { getByTestId } = render(Sidebar);
+    expect(getByTestId('team-activity-panel')).toBeTruthy();
+  });
+
+  it('calls teamActivity.start() on mount', () => {
+    const startSpy = vi.spyOn(teamActivity, 'start');
+    render(Sidebar);
+    expect(startSpy).toHaveBeenCalled();
+    startSpy.mockRestore();
+  });
+
+  it('calls teamActivity.stop() on destroy', () => {
+    const stopSpy = vi.spyOn(teamActivity, 'stop');
+    const { unmount } = render(Sidebar);
+    unmount();
+    expect(stopSpy).toHaveBeenCalled();
+    stopSpy.mockRestore();
   });
 });

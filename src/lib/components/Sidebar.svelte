@@ -7,6 +7,17 @@
   import { tooltip } from '$lib/actions';
   import ResizeHandle from './ResizeHandle.svelte';
   import type { KanbanColumn, Workspace, WorkspaceStatus } from '$lib/types';
+  import { onDestroy, onMount } from 'svelte';
+  import TeamActivityPanel from './sidebar/TeamActivityPanel.svelte';
+  import { teamActivity } from '$lib/stores/team-activity.svelte';
+
+  onMount(() => {
+    teamActivity.start();
+  });
+
+  onDestroy(() => {
+    teamActivity.stop();
+  });
 
   const selectedRepo = $derived(repos.getSelected());
   const workspaceList = $derived(selectedRepo ? workspaces.listForRepo(selectedRepo.id) : []);
@@ -301,6 +312,7 @@
         {/each}
       {/if}
     </div>
+    <TeamActivityPanel />
   </aside>
   <ResizeHandle direction="horizontal" onResize={handleResize} onResizeEnd={handleResizeEnd} />
 </div>
