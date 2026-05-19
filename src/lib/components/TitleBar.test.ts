@@ -8,19 +8,22 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: vi.fn(),
 }));
 
-// SettingsDialog → LarkSettings calls invoke('get_lark_status') on mount;
-// stub it so opening the dialog in tests doesn't hit the network.
+// SettingsDialog mounts LarkSettings (calls `get_lark_status`) and
+// TeamActivitySettings (calls `get_team_activity_config`) on mount; stub
+// both so opening the dialog in tests doesn't hit the network or crash on
+// missing fields.
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn(() =>
-    Promise.resolve({
+  invoke: vi.fn((cmd: string) => {
+    if (cmd === 'get_team_activity_config') return Promise.resolve(null);
+    return Promise.resolve({
       configured: false,
       app_id: null,
       app_token: null,
       table_id: null,
       base_url: 'https://open.larksuite.com',
       has_secret: false,
-    })
-  ),
+    });
+  }),
   Channel: class {},
 }));
 
