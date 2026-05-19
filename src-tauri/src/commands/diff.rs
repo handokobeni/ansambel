@@ -8,6 +8,16 @@
 // The inner function takes a closure rather than a `Channel<T>` so it can
 // be unit-tested without a Tauri runtime — the same pattern Phase 1 uses
 // for agent_core.
+//
+// TODO(phase-3a-3-followup): emit `WorkspaceEvent::DiffSummaryUpdated`
+// from a future commit/push/diff-snapshot flow. `workspace_diff` itself
+// is a pull-driven read — emitting from here would fire on every UI
+// refresh. The clean emission point is a backend commit/push handler
+// that doesn't yet exist; until then, the publisher's `diff_summary`
+// column on the team-activity row stays unpopulated. The variant is
+// already defined on `WorkspaceEvent` (state.rs) and exercised by the
+// publisher's debounce/private-lock tests, so wiring it later is a
+// pure additive change.
 
 use crate::error::{AppError, Result};
 use crate::state::AppState;
@@ -279,6 +289,7 @@ mod tests {
                 created_at: 0,
                 updated_at: 0,
                 worktree_dir: worktree.to_path_buf(),
+                team_activity_private: false,
             },
         );
         Arc::new(Mutex::new(state))

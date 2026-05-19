@@ -225,6 +225,84 @@ pub struct Task {
     pub pic_names: Vec<String>,
 }
 
+/// Events published by various command handlers and consumed by the
+/// team-activity state publisher (Phase 3a-3). Each variant carries the
+/// `workspace_id` of the workspace whose state changed; the publisher
+/// aggregates events per workspace, debounces, and upserts the matching
+/// Bitable row.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WorkspaceEvent {
+    StatusChanged {
+        workspace_id: String,
+        new_status: WorkspaceStatus,
+    },
+    MessageAppended {
+        workspace_id: String,
+        role: String, // "user" | "assistant" | "system" | "tool"
+        /// Already truncated to ≤400 chars at the emission site. The
+        /// publisher's sanitiser runs the credential redaction pass.
+        text_preview: String,
+    },
+    FileTouched {
+        workspace_id: String,
+    },
+    /// Emitted after a successful PR-creation flow (`gh pr create` or
+    /// equivalent). Phase 3a-3 Task 13 ships the
+    /// `emit_pr_created` helper that constructs this variant but leaves
+    /// the call site BLOCKED — no PR-creation Tauri handler exists in
+    /// the app yet. When that handler lands, it should call
+    /// `emit_pr_created(publisher_tx, workspace_id, url)` after the
+    /// `gh pr create` invocation succeeds.
+    PrCreated {
+        workspace_id: String,
+        url: String,
+    },
+    BranchChanged {
+        workspace_id: String,
+        branch_name: String,
+    },
+    DiffSummaryUpdated {
+        workspace_id: String,
+        summary: String,
+    },
+    PrivacyChanged {
+        workspace_id: String,
+        is_private: bool,
+    },
+}
+
+impl WorkspaceEvent {
+    pub fn workspace_id(&self) -> &str {
+        match self {
+            WorkspaceEvent::StatusChanged { workspace_id, .. }
+            | WorkspaceEvent::MessageAppended { workspace_id, .. }
+            | WorkspaceEvent::FileTouched { workspace_id }
+            | WorkspaceEvent::PrCreated { workspace_id, .. }
+            | WorkspaceEvent::BranchChanged { workspace_id, .. }
+            | WorkspaceEvent::DiffSummaryUpdated { workspace_id, .. }
+            | WorkspaceEvent::PrivacyChanged { workspace_id, .. } => workspace_id,
+        }
+    }
+}
+
+/// Broadcast-sender alias, registered as a separate Tauri-managed state so
+/// command handlers can emit without holding the AppState lock. Created in
+/// `lib.rs::run()` with capacity 256 (well above expected event rate).
+pub type WorkspaceEventTx = std::sync::Arc<tokio::sync::broadcast::Sender<WorkspaceEvent>>;
+
+/// Connection details for the team-activity Bitable (Phase 3a-3 publisher).
+/// Stored in `<data_dir>/team_activity_config.json`. Reuses the global
+/// Lark `app_id`/`app_secret` from `commands::lark_auth`, so this config
+/// is just the table coordinates + machine label.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct TeamActivityConfig {
+    pub app_token: String,
+    pub table_id: String,
+    /// User-editable display label, e.g., "handoko@laptop-1". Auto-filled
+    /// on first launch from `$USER@$(hostname)`.
+    pub machine_label: String,
+}
+
 /// One streamed slice of terminal output. Tagged so the frontend (and
 /// future tests) can pattern-match without an extra discriminator.
 #[derive(Serialize, Clone, Debug)]
@@ -365,6 +443,13 @@ pub struct WorkspaceInfo {
     /// Defaults to empty path for backward compatibility with existing persisted data.
     #[serde(default)]
     pub worktree_dir: PathBuf,
+    /// When true, the team-activity publisher (Phase 3a-3) suppresses
+    /// emission of sensitive columns for this workspace and clears any
+    /// previously published values via the `private_lock` semantics in
+    /// `commands::team_activity::AggregatedState`. `serde(default)` so
+    /// workspaces persisted before Task 18 deserialise without migration.
+    #[serde(default)]
+    pub team_activity_private: bool,
 }
 
 #[derive(Default, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -705,10 +790,33 @@ mod tests {
             created_at: 1_776_000_000,
             updated_at: 1_776_099_500,
             worktree_dir: PathBuf::from("/data/workspaces/ws_abc123"),
+            team_activity_private: false,
         };
         let json = serde_json::to_string(&ws).unwrap();
         let back: WorkspaceInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ws);
+    }
+
+    #[test]
+    fn workspace_info_team_activity_private_defaults_false_on_legacy_load() {
+        // Workspaces persisted before Task 18 don't have the field. The
+        // serde(default) attribute must let them deserialise cleanly with
+        // `team_activity_private = false`.
+        let legacy_json = r#"{
+            "id": "ws_legacy",
+            "repo_id": "repo_x",
+            "branch": "main",
+            "base_branch": "main",
+            "custom_branch": false,
+            "title": "old",
+            "description": "",
+            "status": "not_started",
+            "column": "todo",
+            "created_at": 0,
+            "updated_at": 0
+        }"#;
+        let ws: WorkspaceInfo = serde_json::from_str(legacy_json).unwrap();
+        assert!(!ws.team_activity_private);
     }
 
     #[test]
@@ -1288,6 +1396,21 @@ mod tests {
         let json = serde_json::to_string(&binding).unwrap();
         let back: BitableBinding = serde_json::from_str(&json).unwrap();
         assert_eq!(binding, back);
+    }
+
+    #[tokio::test]
+    async fn workspace_event_broadcasts_to_multiple_subscribers() {
+        use tokio::sync::broadcast;
+        let (tx, _) = broadcast::channel::<WorkspaceEvent>(32);
+        let mut rx1 = tx.subscribe();
+        let mut rx2 = tx.subscribe();
+        let event = WorkspaceEvent::StatusChanged {
+            workspace_id: "ws_test".into(),
+            new_status: crate::state::WorkspaceStatus::Running,
+        };
+        tx.send(event.clone()).unwrap();
+        assert_eq!(rx1.recv().await.unwrap(), event);
+        assert_eq!(rx2.recv().await.unwrap(), event);
     }
 
     #[test]

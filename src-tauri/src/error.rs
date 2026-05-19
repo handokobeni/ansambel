@@ -35,6 +35,12 @@ pub enum AppError {
 
     #[error("Lark API: {0}")]
     Lark(String),
+
+    #[error("Lark rate limit; retry after {retry_after_secs}s")]
+    LarkRateLimit { retry_after_secs: u64 },
+
+    #[error("Lark request timed out after {timeout_secs}s")]
+    LarkTimeout { timeout_secs: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;

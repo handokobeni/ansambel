@@ -13,6 +13,7 @@
 -->
 <script lang="ts">
   import LarkSettings from './lark/LarkGlobalSettings.svelte';
+  import TeamActivitySettings from './lark/TeamActivitySettings.svelte';
 
   const {
     open,
@@ -81,6 +82,7 @@
       <div class="divide-y divide-[var(--border-light)]">
         {#key open}
           <LarkSettings />
+          <TeamActivitySettings />
         {/key}
       </div>
     </div>

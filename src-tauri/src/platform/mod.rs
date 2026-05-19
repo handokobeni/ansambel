@@ -2,6 +2,7 @@ pub mod binary;
 pub mod lark_client;
 pub mod paths;
 pub mod pty;
+pub mod repo_identity;
 
 #[cfg(test)]
 mod dep_tests {

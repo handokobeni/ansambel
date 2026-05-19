@@ -175,6 +175,32 @@ describe('api.workspace', () => {
     vi.mocked(invoke).mockRejectedValue(new Error('Workspace not found'));
     await expect(api.workspace.remove('ws_missing')).rejects.toThrow('Workspace not found');
   });
+
+  // ── Task 18: setTeamActivityPrivate ─────────────────────────────────
+  it('setTeamActivityPrivate: forwards camelCase args to backend', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.workspace.setTeamActivityPrivate('ws_abc123', true);
+    expect(invoke).toHaveBeenCalledWith('set_workspace_team_activity_private', {
+      workspaceId: 'ws_abc123',
+      isPrivate: true,
+    });
+  });
+
+  it('setTeamActivityPrivate: also accepts isPrivate=false', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.workspace.setTeamActivityPrivate('ws_abc123', false);
+    expect(invoke).toHaveBeenCalledWith('set_workspace_team_activity_private', {
+      workspaceId: 'ws_abc123',
+      isPrivate: false,
+    });
+  });
+
+  it('setTeamActivityPrivate: propagates rejection from backend', async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error('workspace not found'));
+    await expect(api.workspace.setTeamActivityPrivate('ws_missing', true)).rejects.toThrow(
+      'workspace not found'
+    );
+  });
 });
 
 const mockTask: Task = {
@@ -522,6 +548,66 @@ describe('api.lark.listFields', () => {
     });
     expect(result).toHaveLength(1);
     expect(result[0].field_name).toBe('Title');
+  });
+});
+
+describe('api.teamActivity', () => {
+  const mockCfg = {
+    app_token: 'bascn_team',
+    table_id: 'tbl_team',
+    machine_label: 'handoko@laptop-1',
+  };
+
+  it('get: invokes get_team_activity_config and returns config', async () => {
+    vi.mocked(invoke).mockResolvedValue(mockCfg);
+    const out = await api.teamActivity.get();
+    expect(invoke).toHaveBeenCalledWith('get_team_activity_config');
+    expect(out).toEqual(mockCfg);
+  });
+
+  it('get: returns null when no config persisted', async () => {
+    vi.mocked(invoke).mockResolvedValue(null);
+    const out = await api.teamActivity.get();
+    expect(out).toBeNull();
+  });
+
+  it('get: propagates rejection from backend', async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error('read fail'));
+    await expect(api.teamActivity.get()).rejects.toThrow('read fail');
+  });
+
+  it('set: forwards cfg payload under the cfg key', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.teamActivity.set(mockCfg);
+    expect(invoke).toHaveBeenCalledWith('set_team_activity_config', {
+      cfg: mockCfg,
+    });
+  });
+
+  it('set: propagates rejection on disk error', async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error('write fail'));
+    await expect(api.teamActivity.set(mockCfg)).rejects.toThrow('write fail');
+  });
+
+  it('setupTable: forwards camelCase params and returns created column names', async () => {
+    vi.mocked(invoke).mockResolvedValue(['workspace_id', 'ansambel_status']);
+    const out = await api.teamActivity.setupTable('appA', 'tblA');
+    expect(invoke).toHaveBeenCalledWith('setup_team_activity_table', {
+      appToken: 'appA',
+      tableId: 'tblA',
+    });
+    expect(out).toEqual(['workspace_id', 'ansambel_status']);
+  });
+
+  it('setupTable: returns empty list on idempotent run', async () => {
+    vi.mocked(invoke).mockResolvedValue([]);
+    const out = await api.teamActivity.setupTable('appA', 'tblA');
+    expect(out).toEqual([]);
+  });
+
+  it('setupTable: propagates Lark API error', async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error('Lark API: code 99991663'));
+    await expect(api.teamActivity.setupTable('appA', 'tblA')).rejects.toThrow('99991663');
   });
 });
 

@@ -6,4 +6,5 @@ pub mod messages;
 pub mod repos;
 pub mod settings;
 pub mod tasks;
+pub mod team_activity_config;
 pub mod workspaces;

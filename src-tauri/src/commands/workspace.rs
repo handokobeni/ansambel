@@ -1,7 +1,9 @@
 use crate::error::{AppError, Result};
 use crate::ids::workspace_id;
 use crate::persistence::workspaces::save_workspaces;
-use crate::state::{AppState, KanbanColumn, WorkspaceInfo, WorkspaceStatus};
+use crate::state::{
+    AppState, KanbanColumn, WorkspaceEvent, WorkspaceEventTx, WorkspaceInfo, WorkspaceStatus,
+};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{Manager, State};
@@ -113,15 +115,18 @@ pub async fn create_workspace(
     branch_name: Option<String>,
     app: tauri::AppHandle,
     state: State<'_, Arc<Mutex<AppState>>>,
+    event_tx: State<'_, WorkspaceEventTx>,
 ) -> std::result::Result<WorkspaceInfo, String> {
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    create_workspace_inner(
+    let publisher_tx: WorkspaceEventTx = event_tx.inner().clone();
+    create_workspace_inner_with_publisher(
         repo_id,
         title,
         description,
         branch_name,
         data_dir,
         state.inner().clone(),
+        Some(&publisher_tx),
     )
     .await
     .map_err(|e| {
@@ -161,6 +166,76 @@ pub async fn remove_workspace(
         })
 }
 
+/// Task 18 — flip the per-workspace privacy flag.
+///
+/// On `is_private = true`, the team-activity publisher's `private_lock`
+/// kicks in (see `commands::team_activity::AggregatedState`) and the
+/// sensitive columns are cleared on the next flush. On `false`, the
+/// publisher resumes normal field population.
+///
+/// The new value is persisted to `workspaces.json` so the toggle survives
+/// app restart, and `WorkspaceEvent::PrivacyChanged` is broadcast to the
+/// publisher AFTER the state lock is released — per the Mutex-discipline
+/// rule, we never hold the AppState lock across a broadcast send.
+#[tauri::command]
+pub async fn set_workspace_team_activity_private(
+    workspace_id: String,
+    is_private: bool,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Mutex<AppState>>>,
+    event_tx: State<'_, WorkspaceEventTx>,
+) -> std::result::Result<(), String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let publisher_tx: WorkspaceEventTx = event_tx.inner().clone();
+    set_workspace_team_activity_private_inner(
+        workspace_id,
+        is_private,
+        data_dir,
+        state.inner().clone(),
+        Some(&publisher_tx),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "set_workspace_team_activity_private failed");
+        e.to_string()
+    })
+}
+
+pub(crate) async fn set_workspace_team_activity_private_inner(
+    ws_id: String,
+    is_private: bool,
+    data_dir: PathBuf,
+    state: Arc<Mutex<AppState>>,
+    publisher_tx: Option<&WorkspaceEventTx>,
+) -> Result<()> {
+    {
+        let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        let ws = st
+            .workspaces
+            .get_mut(&ws_id)
+            .ok_or_else(|| AppError::NotFound(format!("workspace '{}'", ws_id)))?;
+        if ws.team_activity_private == is_private {
+            // Idempotent — still persist + emit so the publisher gets a
+            // refresh event (cheap, and avoids subtle bugs where a UI
+            // double-click yields no broadcast).
+        }
+        ws.team_activity_private = is_private;
+        save_workspaces(&data_dir, &st.workspaces)?;
+        tracing::info!(
+            workspace_id = %ws_id,
+            is_private,
+            "Updated workspace team_activity_private"
+        );
+    } // lock dropped before broadcasting
+    if let Some(tx) = publisher_tx {
+        let _ = tx.send(WorkspaceEvent::PrivacyChanged {
+            workspace_id: ws_id,
+            is_private,
+        });
+    }
+    Ok(())
+}
+
 // ── Inner implementations ────────────────────────────────────────────
 
 pub(crate) async fn create_workspace_inner(
@@ -170,6 +245,33 @@ pub(crate) async fn create_workspace_inner(
     branch_name: Option<String>,
     data_dir: PathBuf,
     state: Arc<Mutex<AppState>>,
+) -> Result<WorkspaceInfo> {
+    create_workspace_inner_with_publisher(
+        repo_id,
+        title,
+        description,
+        branch_name,
+        data_dir,
+        state,
+        None,
+    )
+    .await
+}
+
+/// Variant of [`create_workspace_inner`] that broadcasts
+/// `WorkspaceEvent::BranchChanged` to the team-activity publisher after
+/// the new branch is materialised via `git worktree add -b`. In this
+/// codebase, branch creation is the only branch-flipping event we ever
+/// emit (there is no in-app `git checkout` command yet) — see Task 12 of
+/// the Phase 3a-3 plan.
+pub(crate) async fn create_workspace_inner_with_publisher(
+    repo_id: String,
+    title: String,
+    description: String,
+    branch_name: Option<String>,
+    data_dir: PathBuf,
+    state: Arc<Mutex<AppState>>,
+    publisher_tx: Option<&WorkspaceEventTx>,
 ) -> Result<WorkspaceInfo> {
     use crate::commands::helpers::now_unix;
 
@@ -256,12 +358,25 @@ pub(crate) async fn create_workspace_inner(
         created_at: now,
         updated_at: now,
         worktree_dir: worktree_path.clone(),
+        team_activity_private: false,
     };
 
-    let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
-    st.workspaces.insert(ws_id, ws.clone());
-    save_workspaces(&data_dir, &st.workspaces)?;
-    tracing::info!(workspace_id = %ws.id, branch = %ws.branch, dir = %dir_name, "Created workspace");
+    {
+        let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        st.workspaces.insert(ws_id, ws.clone());
+        save_workspaces(&data_dir, &st.workspaces)?;
+        tracing::info!(workspace_id = %ws.id, branch = %ws.branch, dir = %dir_name, "Created workspace");
+    } // lock dropped before broadcasting
+      // Task 12: surface the new branch on the team-activity row. Emitted
+      // here because `git worktree add -b <branch>` is the only branch-
+      // creation path in the app today — there is no follow-up `git
+      // checkout` command yet.
+    if let Some(tx) = publisher_tx {
+        let _ = tx.send(WorkspaceEvent::BranchChanged {
+            workspace_id: ws.id.clone(),
+            branch_name: ws.branch.clone(),
+        });
+    }
     Ok(ws)
 }
 
@@ -850,5 +965,301 @@ mod tests {
         // None filter means all workspaces
         let all: Vec<_> = st.workspaces.values().collect();
         assert_eq!(all.len(), 2);
+    }
+
+    // ── Task 12 — WorkspaceEvent::BranchChanged emission ─────────────────────
+
+    #[tokio::test]
+    async fn create_workspace_with_publisher_emits_branch_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repo = crate::commands::repo::add_repo_inner(
+            local.to_str().unwrap().to_string(),
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<crate::state::WorkspaceEvent>(8);
+        let publisher_tx: crate::state::WorkspaceEventTx = std::sync::Arc::new(tx);
+
+        let ws = create_workspace_inner_with_publisher(
+            repo.id,
+            "Branch-emit test".into(),
+            String::new(),
+            None,
+            data,
+            state,
+            Some(&publisher_tx),
+        )
+        .await
+        .unwrap();
+
+        let ev = rx.try_recv().expect("BranchChanged should be emitted");
+        match ev {
+            crate::state::WorkspaceEvent::BranchChanged {
+                workspace_id,
+                branch_name,
+            } => {
+                assert_eq!(workspace_id, ws.id);
+                assert_eq!(branch_name, ws.branch);
+                assert!(
+                    branch_name.starts_with("ansambel/"),
+                    "auto-named branches must carry the ansambel/ prefix; got {branch_name}"
+                );
+            }
+            other => panic!("expected BranchChanged, got {other:?}"),
+        }
+    }
+
+    // ── Task 18 — per-workspace privacy toggle ───────────────────────────────
+
+    #[tokio::test]
+    async fn set_team_activity_private_toggles_flag_and_emits_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repo = crate::commands::repo::add_repo_inner(
+            local.to_str().unwrap().to_string(),
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+
+        let ws = create_workspace_inner(
+            repo.id,
+            "Privacy toggle".into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        assert!(!ws.team_activity_private);
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<crate::state::WorkspaceEvent>(8);
+        let publisher_tx: crate::state::WorkspaceEventTx = std::sync::Arc::new(tx);
+
+        set_workspace_team_activity_private_inner(
+            ws.id.clone(),
+            true,
+            data.clone(),
+            Arc::clone(&state),
+            Some(&publisher_tx),
+        )
+        .await
+        .unwrap();
+
+        {
+            let st = state.lock().unwrap();
+            assert!(
+                st.workspaces.get(&ws.id).unwrap().team_activity_private,
+                "flag should be true after toggle"
+            );
+        }
+
+        let ev = rx.try_recv().expect("PrivacyChanged should be emitted");
+        match ev {
+            crate::state::WorkspaceEvent::PrivacyChanged {
+                workspace_id,
+                is_private,
+            } => {
+                assert_eq!(workspace_id, ws.id);
+                assert!(is_private);
+            }
+            other => panic!("expected PrivacyChanged, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn set_team_activity_private_returns_err_when_workspace_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+
+        let err = set_workspace_team_activity_private_inner(
+            "ws_does_not_exist".into(),
+            true,
+            data,
+            state,
+            None,
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("not found") || msg.contains("ws_does_not_exist"),
+            "expected not-found error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_team_activity_private_persists_across_load() {
+        use crate::persistence::workspaces::load_workspaces;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repo = crate::commands::repo::add_repo_inner(
+            local.to_str().unwrap().to_string(),
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+
+        let ws = create_workspace_inner(
+            repo.id,
+            "Persist privacy".into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+
+        set_workspace_team_activity_private_inner(
+            ws.id.clone(),
+            true,
+            data.clone(),
+            Arc::clone(&state),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Reload from disk into a fresh map (no in-memory state) — the
+        // persisted flag must round-trip.
+        let reloaded = load_workspaces(&data).unwrap();
+        let persisted_ws = reloaded
+            .get(&ws.id)
+            .expect("workspace should be on disk after toggle");
+        assert!(
+            persisted_ws.team_activity_private,
+            "team_activity_private should persist across load"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_team_activity_private_to_false_emits_false_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repo = crate::commands::repo::add_repo_inner(
+            local.to_str().unwrap().to_string(),
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        let ws = create_workspace_inner(
+            repo.id,
+            "Toggle off".into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        // Pre-set to true (no publisher) so we can verify the false-edge event.
+        set_workspace_team_activity_private_inner(
+            ws.id.clone(),
+            true,
+            data.clone(),
+            Arc::clone(&state),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<crate::state::WorkspaceEvent>(8);
+        let publisher_tx: crate::state::WorkspaceEventTx = std::sync::Arc::new(tx);
+        set_workspace_team_activity_private_inner(
+            ws.id.clone(),
+            false,
+            data,
+            Arc::clone(&state),
+            Some(&publisher_tx),
+        )
+        .await
+        .unwrap();
+
+        let ev = rx.try_recv().expect("PrivacyChanged should be emitted");
+        match ev {
+            crate::state::WorkspaceEvent::PrivacyChanged {
+                workspace_id,
+                is_private,
+            } => {
+                assert_eq!(workspace_id, ws.id);
+                assert!(!is_private, "expected is_private=false on toggle-off");
+            }
+            other => panic!("expected PrivacyChanged, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_workspace_with_publisher_does_not_emit_when_worktree_add_fails() {
+        // If `git worktree add -b` fails (repo path invalid), we must NOT
+        // emit a stale BranchChanged for a branch that was never created.
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        // Insert a fake repo whose path points at a non-existent directory
+        // so `git worktree add` fails.
+        let bad_path = tmp.path().join("not-a-real-repo");
+        state.lock().unwrap().repos.insert(
+            "repo_bad".into(),
+            crate::state::RepoInfo {
+                id: "repo_bad".into(),
+                name: "bad".into(),
+                path: bad_path,
+                gh_profile: None,
+                default_branch: "main".into(),
+                created_at: 0,
+                updated_at: 0,
+                scripts: Vec::new(),
+            },
+        );
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<crate::state::WorkspaceEvent>(8);
+        let publisher_tx: crate::state::WorkspaceEventTx = std::sync::Arc::new(tx);
+
+        let res = create_workspace_inner_with_publisher(
+            "repo_bad".into(),
+            "Will fail".into(),
+            String::new(),
+            None,
+            data,
+            state,
+            Some(&publisher_tx),
+        )
+        .await;
+
+        assert!(res.is_err(), "expected git worktree add failure");
+        assert!(
+            rx.try_recv().is_err(),
+            "no BranchChanged should be emitted when create fails"
+        );
     }
 }

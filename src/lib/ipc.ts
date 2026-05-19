@@ -26,6 +26,7 @@ import type {
   BitableField,
   PersonOption,
   SingleSelectOption,
+  TeamActivityConfig,
 } from './types';
 
 export type ListMessagesOpts = {
@@ -55,6 +56,15 @@ export const api = {
     list: (repoId?: string): Promise<WorkspaceInfo[]> => invoke('list_workspaces', { repoId }),
 
     remove: (workspaceId: string): Promise<void> => invoke('remove_workspace', { workspaceId }),
+
+    /** Phase 3a-3 Task 18: flip the per-workspace privacy flag.
+     *
+     *  On `isPrivate = true`, the team-activity publisher suppresses
+     *  sensitive columns for this workspace and clears any previously
+     *  published values on its next flush. The new value is persisted
+     *  to `workspaces.json` so it survives app restart. */
+    setTeamActivityPrivate: (workspaceId: string, isPrivate: boolean): Promise<void> =>
+      invoke<void>('set_workspace_team_activity_private', { workspaceId, isPrivate }),
 
     /** Stream the unified diff for a workspace's worktree. The backend
      *  emits `text` chunks ≤ 64 KB, then a single `eof`. `error` is rare
@@ -262,6 +272,31 @@ export const api = {
       fieldId: string
     ): Promise<SingleSelectOption[]> =>
       invoke('list_lark_lookup_options', { appToken, tableId, fieldId }),
+  },
+
+  // ── Phase 3a-3 Task 15: Team activity publisher config ────────────
+
+  teamActivity: {
+    /** Returns the persisted publisher config, or `null` when no config
+     *  exists or the config's `app_token` is empty (backend treats an
+     *  empty token as "publisher disabled"). */
+    get: (): Promise<TeamActivityConfig | null> =>
+      invoke<TeamActivityConfig | null>('get_team_activity_config'),
+
+    /** Persists the publisher config atomically.
+     *
+     *  Note: changing the config does NOT restart the running publisher —
+     *  the new app_token / table_id / machine_label only takes effect on
+     *  next app launch. See the backend TODO in
+     *  `commands/team_activity.rs::set_team_activity_config_inner`. */
+    set: (cfg: TeamActivityConfig): Promise<void> =>
+      invoke<void>('set_team_activity_config', { cfg }),
+
+    /** Idempotently provisions the 12 canonical team-activity columns on
+     *  the user's Bitable. Returns the list of column names that were
+     *  created — empty when the table is already fully provisioned. */
+    setupTable: (appToken: string, tableId: string): Promise<string[]> =>
+      invoke<string[]>('setup_team_activity_table', { appToken, tableId }),
   },
 
   script: {

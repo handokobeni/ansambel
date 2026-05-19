@@ -337,6 +337,7 @@ mod tests {
                     created_at: 0,
                     updated_at: 0,
                     worktree_dir: std::path::PathBuf::new(),
+                    team_activity_private: false,
                 },
             );
         }

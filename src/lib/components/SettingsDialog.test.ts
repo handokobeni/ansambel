@@ -3,8 +3,9 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import SettingsDialog from './SettingsDialog.svelte';
 
-// LarkGlobalSettings calls invoke('get_lark_status') on mount — stub it so the
-// dialog renders without network.
+// LarkGlobalSettings calls invoke('get_lark_status') on mount and
+// TeamActivitySettings calls invoke('get_team_activity_config') — stub both
+// so the dialog renders without network.
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn((cmd: string) => {
     if (cmd === 'get_lark_status')
@@ -16,6 +17,7 @@ vi.mock('@tauri-apps/api/core', () => ({
         base_url: 'https://open.larksuite.com',
         has_secret: false,
       });
+    if (cmd === 'get_team_activity_config') return Promise.resolve(null);
     return Promise.resolve(undefined);
   }),
   Channel: class {},
@@ -33,6 +35,11 @@ describe('SettingsDialog', () => {
     expect(screen.getByRole('dialog')).toBeTruthy();
     expect(screen.getByText('Settings')).toBeTruthy();
     expect(screen.getByTestId('lark-settings')).toBeTruthy();
+  });
+
+  it('mounts TeamActivitySettings section below LarkSettings when open=true', () => {
+    render(SettingsDialog, { props: { open: true, onClose: vi.fn() } });
+    expect(screen.getByTestId('team-activity-settings')).toBeTruthy();
   });
 
   it('calls onClose when close button is clicked', async () => {

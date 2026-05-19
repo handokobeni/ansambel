@@ -6,13 +6,19 @@ vi.mock('$lib/ipc', () => ({
       create: vi.fn(),
       list: vi.fn(),
       remove: vi.fn(),
+      setTeamActivityPrivate: vi.fn(),
     },
   },
 }));
 
 import { api } from '$lib/ipc';
 import { WorkspacesStore } from './workspaces.svelte';
+import { getToasts, removeToast } from '$lib/stores/toasts.svelte';
 import type { WorkspaceInfo } from '$lib/types';
+
+function clearToasts(): void {
+  for (const id of Array.from(getToasts().keys())) removeToast(id);
+}
 
 const makeWorkspace = (overrides: Partial<WorkspaceInfo> = {}): WorkspaceInfo => ({
   id: 'ws_abc123',
@@ -32,6 +38,7 @@ const makeWorkspace = (overrides: Partial<WorkspaceInfo> = {}): WorkspaceInfo =>
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearToasts();
 });
 
 describe('WorkspacesStore', () => {
@@ -141,5 +148,57 @@ describe('WorkspacesStore', () => {
     await store.create({ repoId: 'repo_abc123', title: 'Second task', description: '' });
     // Both workspaces should be in the same inner map
     expect(store.byRepo.get('repo_abc123')?.size).toBe(2);
+  });
+
+  // ── Task 18: setTeamActivityPrivate ─────────────────────────────────
+  describe('setTeamActivityPrivate', () => {
+    it('optimistically toggles the workspace flag before the IPC resolves', async () => {
+      const ws = makeWorkspace({ team_activity_private: false });
+      vi.mocked(api.workspace.list).mockResolvedValue([ws]);
+      // Hold the IPC promise open so we can observe the optimistic update.
+      let resolveIpc!: () => void;
+      vi.mocked(api.workspace.setTeamActivityPrivate).mockImplementation(
+        () =>
+          new Promise<void>((r) => {
+            resolveIpc = r;
+          })
+      );
+      const store = new WorkspacesStore();
+      await store.loadForRepo('repo_abc123');
+      const p = store.setTeamActivityPrivate('ws_abc123', 'repo_abc123', true);
+      // Optimistic flip is visible immediately.
+      expect(store.byRepo.get('repo_abc123')?.get('ws_abc123')?.team_activity_private).toBe(true);
+      resolveIpc();
+      const ok = await p;
+      expect(ok).toBe(true);
+      expect(api.workspace.setTeamActivityPrivate).toHaveBeenCalledWith('ws_abc123', true);
+      // Stays toggled after the IPC resolves.
+      expect(store.byRepo.get('repo_abc123')?.get('ws_abc123')?.team_activity_private).toBe(true);
+    });
+
+    it('reverts the flag and surfaces a toast when the IPC rejects', async () => {
+      const ws = makeWorkspace({ team_activity_private: false });
+      vi.mocked(api.workspace.list).mockResolvedValue([ws]);
+      vi.mocked(api.workspace.setTeamActivityPrivate).mockRejectedValue('write fail');
+      const store = new WorkspacesStore();
+      await store.loadForRepo('repo_abc123');
+      const ok = await store.setTeamActivityPrivate('ws_abc123', 'repo_abc123', true);
+      expect(ok).toBe(false);
+      // Reverted to original value.
+      expect(store.byRepo.get('repo_abc123')?.get('ws_abc123')?.team_activity_private).toBe(false);
+      const toasts = Array.from(getToasts().values());
+      expect(toasts.some((t) => t.message.includes('write fail'))).toBe(true);
+    });
+
+    it('still calls IPC when the workspace is not yet in the local store', async () => {
+      // Deep-link / pre-hydration path: the store doesn't know about the
+      // workspace yet, but the IPC should still fire — the publisher will
+      // catch up when the sidebar finishes loading.
+      vi.mocked(api.workspace.setTeamActivityPrivate).mockResolvedValue(undefined);
+      const store = new WorkspacesStore();
+      const ok = await store.setTeamActivityPrivate('ws_unseen', 'repo_abc123', true);
+      expect(ok).toBe(true);
+      expect(api.workspace.setTeamActivityPrivate).toHaveBeenCalledWith('ws_unseen', true);
+    });
   });
 });

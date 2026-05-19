@@ -7,6 +7,7 @@ pub mod logging;
 pub mod panic;
 pub mod persistence;
 pub mod platform;
+pub mod sanitize;
 pub mod state;
 pub mod task_provider;
 
@@ -112,7 +113,17 @@ pub fn run() {
                 settings,
             };
 
-            app.manage(std::sync::Arc::new(std::sync::Mutex::new(state)));
+            let state_arc = std::sync::Arc::new(std::sync::Mutex::new(state));
+            app.manage(state_arc.clone());
+
+            // Phase 3a-3: broadcast channel that team-activity state publisher subscribes
+            // to. Capacity 256 — receivers that fall behind by more than this lose
+            // events, which is acceptable for an at-most-once telemetry stream.
+            let (workspace_event_tx, _) =
+                tokio::sync::broadcast::channel::<crate::state::WorkspaceEvent>(256);
+            let workspace_event_tx: crate::state::WorkspaceEventTx =
+                std::sync::Arc::new(workspace_event_tx);
+            app.manage(workspace_event_tx.clone());
 
             // Phase 3a-3 Task 6: TaskProviderHandle is now a per-repo HashMap.
             // Task 10 will populate it from persisted bindings; start empty.
@@ -165,6 +176,71 @@ pub fn run() {
                 );
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.emit("lark-migrated", repo_id);
+                }
+            }
+
+            // Phase 3a-3 Task 9: spawn team-activity state publisher if a
+            // team_activity_config.json is present AND the global Lark
+            // credentials are configured. Disabled (info-log only) when
+            // either is missing so first-launch / unconfigured installs
+            // don't pay the spawn cost or risk a noisy auth failure.
+            match crate::persistence::team_activity_config::load_team_activity_config(&data_dir) {
+                Ok(Some(team_cfg)) => {
+                    let store = crate::commands::lark_auth::KeyringStore;
+                    match crate::commands::lark_auth::load_lark_config_inner(&data_dir, &store) {
+                        Ok(mut lark_cfg) => {
+                            // Reuse the global app_id + app_secret; inject
+                            // the team-activity binding's app_token + table_id.
+                            lark_cfg.app_token = team_cfg.app_token.clone();
+                            lark_cfg.table_id = team_cfg.table_id.clone();
+                            let client = std::sync::Arc::new(
+                                crate::platform::lark_client::LarkClient::new(lark_cfg),
+                            );
+                            let row_id_cache: std::sync::Arc<
+                                tokio::sync::Mutex<std::collections::HashMap<String, String>>,
+                            > = std::sync::Arc::new(tokio::sync::Mutex::new(
+                                std::collections::HashMap::new(),
+                            ));
+                            let uploader = crate::commands::team_activity::build_lark_uploader(
+                                client,
+                                team_cfg.clone(),
+                                row_id_cache.clone(),
+                            );
+                            // Phase 3a-3 follow-up: enrich every snapshot with
+                            // repo_remote_url / repo_display_name / task_title
+                            // by looking them up in AppState. Without this, the
+                            // matching Bitable columns stayed empty (the
+                            // publisher only sees `WorkspaceEvent`s, which
+                            // carry the workspace_id and the changed value,
+                            // not the static repo + task context).
+                            let enricher =
+                                Some(crate::commands::team_activity::build_app_enricher(
+                                    state_arc.clone(),
+                                ));
+                            let publisher = crate::commands::team_activity::Publisher {
+                                cfg: team_cfg,
+                                row_id_cache,
+                                uploader,
+                                enricher,
+                                debounce: std::time::Duration::from_secs(3),
+                            };
+                            let rx = workspace_event_tx.subscribe();
+                            tauri::async_runtime::spawn(publisher.run(rx));
+                            tracing::info!("team-activity publisher spawned");
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "team-activity publisher skipped: global Lark credentials missing"
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("team-activity publisher disabled (no config)");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "team-activity config load failed");
                 }
             }
 
@@ -226,6 +302,7 @@ pub fn run() {
             crate::commands::workspace::create_workspace,
             crate::commands::workspace::list_workspaces,
             crate::commands::workspace::remove_workspace,
+            crate::commands::workspace::set_workspace_team_activity_private,
             crate::commands::task::add_task,
             crate::commands::task::list_tasks,
             crate::commands::task::update_task,
@@ -263,6 +340,9 @@ pub fn run() {
             crate::commands::lark_repo_binding::list_lark_fields,
             crate::commands::lark_repo_binding::list_lark_person_options,
             crate::commands::lark_repo_binding::list_lark_lookup_options,
+            crate::commands::team_activity::get_team_activity_config,
+            crate::commands::team_activity::set_team_activity_config,
+            crate::commands::team_activity::setup_team_activity_table,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -395,6 +475,28 @@ mod tests {
         let _ = std::any::type_name_of_val(&stop_agent);
         let _ = std::any::type_name_of_val(&list_messages);
         let _ = std::any::type_name_of_val(&reattach_agent);
+    }
+
+    #[test]
+    fn team_activity_config_commands_are_registered() {
+        // Symbol-existence checks — ensures both Task 15 commands are wired
+        // into `tauri::generate_handler!` and not silently dropped on a
+        // rebase / merge.
+        let _ =
+            std::any::type_name_of_val(&crate::commands::team_activity::get_team_activity_config);
+        let _ =
+            std::any::type_name_of_val(&crate::commands::team_activity::set_team_activity_config);
+        let _ =
+            std::any::type_name_of_val(&crate::commands::team_activity::setup_team_activity_table);
+    }
+
+    #[test]
+    fn set_workspace_team_activity_private_command_is_registered() {
+        // Task 18 — pin the new per-workspace privacy toggle command into
+        // the invoke handler so a future rebase can't silently drop it.
+        let _ = std::any::type_name_of_val(
+            &crate::commands::workspace::set_workspace_team_activity_private,
+        );
     }
 
     #[test]
