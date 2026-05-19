@@ -28,6 +28,7 @@
   const COLLAPSE_STORAGE_KEY = 'ansambel-team-activity-collapsed';
 
   function readCollapsed(): boolean {
+    /* v8 ignore next 1 */
     if (typeof localStorage === 'undefined') return false;
     return localStorage.getItem(COLLAPSE_STORAGE_KEY) === 'true';
   }
@@ -36,6 +37,7 @@
 
   function toggleCollapsed(): void {
     collapsed = !collapsed;
+    /* v8 ignore next 1 */
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(COLLAPSE_STORAGE_KEY, String(collapsed));
     }

@@ -8,6 +8,7 @@
     return teamActivity.rows.get(id) ?? null;
   });
 
+  /* v8 ignore next 1 — ternary null-branch is dead code: the {#if row} guard above prevents render when row is null */
   const branchUrl = $derived(row ? githubBranchUrl(row.repo_remote_url, row.branch_name) : null);
 
   function relativeTime(epochMs: number): string {

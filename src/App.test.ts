@@ -27,7 +27,12 @@ vi.mock('@tauri-apps/api/core', () => {
     onmessage?: (ev: unknown) => void;
   }
   return {
-    invoke: vi.fn().mockResolvedValue(undefined),
+    invoke: vi.fn((cmd: string) => {
+      if (cmd === 'fetch_team_activity_rows') {
+        return Promise.resolve({ kind: 'disabled' });
+      }
+      return Promise.resolve(undefined);
+    }),
     Channel: MockChannel,
   };
 });

@@ -124,4 +124,44 @@ describe('TeamActivityPanel', () => {
     await fireEvent.click(toggle);
     expect(localStorage.getItem('ansambel-team-activity-collapsed')).toBe('false');
   });
+
+  it('shows relative time in hours for activity older than 60 minutes', () => {
+    teamActivity.status = 'idle';
+    teamActivity.rows.set('ws_h', row({ last_activity_at: Date.now() - 3 * 60 * 60 * 1000 }));
+    const { getByText } = render(TeamActivityPanel);
+    expect(getByText(/3h ago/i)).toBeTruthy();
+  });
+
+  it('shows relative time in days for activity older than 24 hours', () => {
+    teamActivity.status = 'idle';
+    teamActivity.rows.set('ws_d', row({ last_activity_at: Date.now() - 2 * 24 * 60 * 60 * 1000 }));
+    const { getByText } = render(TeamActivityPanel);
+    expect(getByText(/2d ago/i)).toBeTruthy();
+  });
+
+  it('shows empty string for a zero epoch timestamp', () => {
+    teamActivity.status = 'idle';
+    teamActivity.rows.set('ws_z', row({ last_activity_at: 0 }));
+    const { container } = render(TeamActivityPanel);
+    // The time cell should be present but empty for epoch=0.
+    const timeSpans = container.querySelectorAll('[data-testid="team-activity-row"] span.shrink-0');
+    expect(timeSpans.length).toBeGreaterThan(0);
+    expect(timeSpans[0]?.textContent?.trim()).toBe('');
+  });
+
+  it('falls back to "—" as the repo group label when repo_display_name is empty', () => {
+    teamActivity.status = 'idle';
+    teamActivity.rows.set('ws_nd', row({ repo_display_name: '' }));
+    const { container } = render(TeamActivityPanel);
+    const group = container.querySelector('[data-testid="team-activity-repo-group"]');
+    expect(group?.getAttribute('data-repo')).toBe('—');
+  });
+
+  it('falls back to "idle" status dot when ansambel_status is empty', () => {
+    teamActivity.status = 'idle';
+    teamActivity.rows.set('ws_ns', row({ ansambel_status: '' }));
+    const { container } = render(TeamActivityPanel);
+    const dot = container.querySelector('[data-testid="team-activity-status-dot"]');
+    expect(dot?.getAttribute('data-status')).toBe('idle');
+  });
 });

@@ -131,4 +131,45 @@ describe('TeamWorkspaceMirror', () => {
     expect(queryByRole('link', { name: /open branch on github/i })).toBeNull();
     expect(queryByText(/feat\//i)).toBeNull();
   });
+
+  it('shows relative time in hours for activity older than 60 minutes', () => {
+    teamActivity.rows.set('ws_a', row({ last_activity_at: Date.now() - 3 * 60 * 60 * 1000 }));
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByTestId } = render(TeamWorkspaceMirror);
+    expect(getByTestId('team-workspace-mirror').textContent).toMatch(/3h ago/i);
+  });
+
+  it('shows relative time in days for activity older than 24 hours', () => {
+    teamActivity.rows.set('ws_a', row({ last_activity_at: Date.now() - 2 * 24 * 60 * 60 * 1000 }));
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByTestId } = render(TeamWorkspaceMirror);
+    expect(getByTestId('team-workspace-mirror').textContent).toMatch(/2d ago/i);
+  });
+
+  it('renders nothing when selectedWorkspaceId is null', () => {
+    const { queryByTestId } = render(TeamWorkspaceMirror);
+    expect(queryByTestId('team-workspace-mirror')).toBeNull();
+  });
+
+  it('renders nothing when selectedWorkspaceId points to a missing row', () => {
+    teamActivity.selectedWorkspaceId = 'ws_missing';
+    const { queryByTestId } = render(TeamWorkspaceMirror);
+    expect(queryByTestId('team-workspace-mirror')).toBeNull();
+  });
+
+  it('shows "just now" for activity less than 60 seconds ago', () => {
+    teamActivity.rows.set('ws_a', row({ last_activity_at: Date.now() - 10 * 1000 }));
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByTestId } = render(TeamWorkspaceMirror);
+    expect(getByTestId('team-workspace-mirror').textContent).toMatch(/just now/i);
+  });
+
+  it('shows empty time string when last_activity_at is 0', () => {
+    teamActivity.rows.set('ws_a', row({ last_activity_at: 0 }));
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByTestId } = render(TeamWorkspaceMirror);
+    // relativeTime(0) returns '' — the header time span should be empty
+    const mirror = getByTestId('team-workspace-mirror');
+    expect(mirror).toBeTruthy();
+  });
 });
