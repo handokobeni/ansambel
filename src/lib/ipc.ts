@@ -26,6 +26,7 @@ import type {
   BitableField,
   PersonOption,
   SingleSelectOption,
+  TeamActivityConfig,
 } from './types';
 
 export type ListMessagesOpts = {
@@ -262,6 +263,25 @@ export const api = {
       fieldId: string
     ): Promise<SingleSelectOption[]> =>
       invoke('list_lark_lookup_options', { appToken, tableId, fieldId }),
+  },
+
+  // ── Phase 3a-3 Task 15: Team activity publisher config ────────────
+
+  teamActivity: {
+    /** Returns the persisted publisher config, or `null` when no config
+     *  exists or the config's `app_token` is empty (backend treats an
+     *  empty token as "publisher disabled"). */
+    get: (): Promise<TeamActivityConfig | null> =>
+      invoke<TeamActivityConfig | null>('get_team_activity_config'),
+
+    /** Persists the publisher config atomically.
+     *
+     *  Note: changing the config does NOT restart the running publisher —
+     *  the new app_token / table_id / machine_label only takes effect on
+     *  next app launch. See the backend TODO in
+     *  `commands/team_activity.rs::set_team_activity_config_inner`. */
+    set: (cfg: TeamActivityConfig): Promise<void> =>
+      invoke<void>('set_team_activity_config', { cfg }),
   },
 
   script: {

@@ -9,6 +9,7 @@ import type {
   BitableBinding,
   FilterSpec,
   FilterOperator,
+  TeamActivityConfig,
 } from './types';
 
 describe('Phase 1c types', () => {
@@ -96,6 +97,18 @@ describe('FilterSpec types', () => {
     };
     expect(b.filters.conditions).toEqual([]);
     expect(b.filters.conjunction).toBe('and');
+  });
+
+  it('TeamActivityConfig has app_token / table_id / machine_label fields', () => {
+    const cfg: TeamActivityConfig = {
+      app_token: 'bascn_team',
+      table_id: 'tbl_team',
+      machine_label: 'handoko@laptop-1',
+    };
+    expectTypeOf(cfg.app_token).toBeString();
+    expectTypeOf(cfg.table_id).toBeString();
+    expectTypeOf(cfg.machine_label).toBeString();
+    expect(cfg.app_token).toBe('bascn_team');
   });
 
   it('FilterOperator literal type accepts all 10 operators', () => {

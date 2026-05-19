@@ -352,6 +352,19 @@ export type ProposedMapping = {
   suggested_status_values: StatusValueMapping;
 };
 
+// --- Phase 3a-3 Task 15: Team activity publisher config ---
+
+/** Persisted in `<data_dir>/team_activity_config.json`. Empty `app_token`
+ *  is treated as "publisher disabled" by the backend persister and surfaces
+ *  as `null` to the IPC caller. The Lark `app_id` / `app_secret` come from
+ *  the existing global Lark credentials (`api.lark.setCredentials`). */
+export type TeamActivityConfig = {
+  app_token: string;
+  table_id: string;
+  /** User-editable display label, e.g., "handoko@laptop-1". */
+  machine_label: string;
+};
+
 export type TurnState = {
   startedAt: number;
   /** Cumulative `input_tokens + cache_creation_input_tokens` — bytes

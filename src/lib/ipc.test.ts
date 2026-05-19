@@ -525,6 +525,45 @@ describe('api.lark.listFields', () => {
   });
 });
 
+describe('api.teamActivity', () => {
+  const mockCfg = {
+    app_token: 'bascn_team',
+    table_id: 'tbl_team',
+    machine_label: 'handoko@laptop-1',
+  };
+
+  it('get: invokes get_team_activity_config and returns config', async () => {
+    vi.mocked(invoke).mockResolvedValue(mockCfg);
+    const out = await api.teamActivity.get();
+    expect(invoke).toHaveBeenCalledWith('get_team_activity_config');
+    expect(out).toEqual(mockCfg);
+  });
+
+  it('get: returns null when no config persisted', async () => {
+    vi.mocked(invoke).mockResolvedValue(null);
+    const out = await api.teamActivity.get();
+    expect(out).toBeNull();
+  });
+
+  it('get: propagates rejection from backend', async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error('read fail'));
+    await expect(api.teamActivity.get()).rejects.toThrow('read fail');
+  });
+
+  it('set: forwards cfg payload under the cfg key', async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+    await api.teamActivity.set(mockCfg);
+    expect(invoke).toHaveBeenCalledWith('set_team_activity_config', {
+      cfg: mockCfg,
+    });
+  });
+
+  it('set: propagates rejection on disk error', async () => {
+    vi.mocked(invoke).mockRejectedValue(new Error('write fail'));
+    await expect(api.teamActivity.set(mockCfg)).rejects.toThrow('write fail');
+  });
+});
+
 describe('agentChannel', () => {
   it('returns a Tauri Channel-shaped object with onmessage setter', () => {
     const ch = agentChannel();

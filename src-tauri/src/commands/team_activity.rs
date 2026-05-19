@@ -357,6 +357,64 @@ pub fn build_lark_uploader(
     })
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// IPC commands (Task 15)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Returns the persisted `TeamActivityConfig`, or `Ok(None)` when no
+/// config file exists or its `app_token` is empty (the persister treats
+/// empty `app_token` as "publisher disabled"; see
+/// [`crate::persistence::team_activity_config::load_team_activity_config`]).
+///
+/// Wraps the inner persistence call so the Tauri command layer's
+/// `Result<_, String>` contract is honoured.
+pub(crate) fn get_team_activity_config_inner(
+    data_dir: &std::path::Path,
+) -> crate::error::Result<Option<crate::state::TeamActivityConfig>> {
+    crate::persistence::team_activity_config::load_team_activity_config(data_dir)
+}
+
+#[tauri::command]
+pub async fn get_team_activity_config(
+    app_handle: tauri::AppHandle,
+) -> std::result::Result<Option<crate::state::TeamActivityConfig>, String> {
+    let data_dir = data_dir_from(&app_handle)?;
+    get_team_activity_config_inner(&data_dir).map_err(|e| e.to_string())
+}
+
+/// Persists the team-activity config atomically.
+///
+/// TODO(phase-3a-3-followup): setting the config should ALSO restart the
+/// publisher with the new config so a fresh app_token/table_id/machine_label
+/// takes effect without a full app restart. This requires re-architecting
+/// the publisher to be restartable (current shape is fire-and-forget
+/// `tauri::async_runtime::spawn` from `lib.rs::setup`). For now, the
+/// change is persisted-only — the running publisher keeps its initial
+/// config until the user restarts the app.
+pub(crate) fn set_team_activity_config_inner(
+    data_dir: &std::path::Path,
+    cfg: &crate::state::TeamActivityConfig,
+) -> crate::error::Result<()> {
+    crate::persistence::team_activity_config::save_team_activity_config(data_dir, cfg)
+}
+
+#[tauri::command]
+pub async fn set_team_activity_config(
+    cfg: crate::state::TeamActivityConfig,
+    app_handle: tauri::AppHandle,
+) -> std::result::Result<(), String> {
+    let data_dir = data_dir_from(&app_handle)?;
+    set_team_activity_config_inner(&data_dir, &cfg).map_err(|e| e.to_string())
+}
+
+fn data_dir_from(app_handle: &tauri::AppHandle) -> std::result::Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("resolve app_data_dir: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,5 +823,62 @@ mod tests {
         // Second call: cache now has "ws_t" → "recNEW", uploader takes PUT path.
         let rec2 = (uploader)("ws_t".into(), snap).await.unwrap();
         assert_eq!(rec2, "recNEW");
+    }
+
+    // ── get/set_team_activity_config (Task 15) ────────────────────
+
+    #[test]
+    fn get_team_activity_config_returns_none_when_file_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = get_team_activity_config_inner(tmp.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn set_then_get_team_activity_config_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = TeamActivityConfig {
+            app_token: "bascn_set".into(),
+            table_id: "tbl_set".into(),
+            machine_label: "alice@host-1".into(),
+        };
+        set_team_activity_config_inner(tmp.path(), &cfg).unwrap();
+        let loaded = get_team_activity_config_inner(tmp.path()).unwrap();
+        assert_eq!(loaded, Some(cfg));
+    }
+
+    #[test]
+    fn set_team_activity_config_overwrites_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = TeamActivityConfig {
+            app_token: "bascn_a".into(),
+            table_id: "tbl_a".into(),
+            machine_label: "old@host".into(),
+        };
+        set_team_activity_config_inner(tmp.path(), &first).unwrap();
+        let second = TeamActivityConfig {
+            app_token: "bascn_b".into(),
+            table_id: "tbl_b".into(),
+            machine_label: "new@host".into(),
+        };
+        set_team_activity_config_inner(tmp.path(), &second).unwrap();
+        let loaded = get_team_activity_config_inner(tmp.path()).unwrap();
+        assert_eq!(loaded, Some(second));
+    }
+
+    #[test]
+    fn get_team_activity_config_returns_none_when_app_token_empty() {
+        // Mirrors the persistence-layer semantics: empty app_token = disabled =
+        // surfaced as `None` to the IPC caller so the UI can treat it the
+        // same as "no config".
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = TeamActivityConfig {
+            app_token: String::new(),
+            table_id: "tbl".into(),
+            machine_label: "m".into(),
+        };
+        set_team_activity_config_inner(tmp.path(), &cfg).unwrap();
+        let loaded = get_team_activity_config_inner(tmp.path()).unwrap();
+        assert!(loaded.is_none());
     }
 }

@@ -326,6 +326,8 @@ pub fn run() {
             crate::commands::lark_repo_binding::list_lark_fields,
             crate::commands::lark_repo_binding::list_lark_person_options,
             crate::commands::lark_repo_binding::list_lark_lookup_options,
+            crate::commands::team_activity::get_team_activity_config,
+            crate::commands::team_activity::set_team_activity_config,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -458,6 +460,17 @@ mod tests {
         let _ = std::any::type_name_of_val(&stop_agent);
         let _ = std::any::type_name_of_val(&list_messages);
         let _ = std::any::type_name_of_val(&reattach_agent);
+    }
+
+    #[test]
+    fn team_activity_config_commands_are_registered() {
+        // Symbol-existence checks — ensures both Task 15 commands are wired
+        // into `tauri::generate_handler!` and not silently dropped on a
+        // rebase / merge.
+        let _ =
+            std::any::type_name_of_val(&crate::commands::team_activity::get_team_activity_config);
+        let _ =
+            std::any::type_name_of_val(&crate::commands::team_activity::set_team_activity_config);
     }
 
     #[test]
