@@ -20,6 +20,57 @@ pub(crate) fn emit_workspace_event(tx: Option<&WorkspaceEventTx>, event: Workspa
     }
 }
 
+/// Char-bounded prefix used as the `text_preview` payload on
+/// `WorkspaceEvent::MessageAppended`. Mirrors the upstream guideline
+/// constant
+/// [`crate::commands::team_activity::EVENT_TEXT_PREVIEW_INPUT_MAX`]:
+/// the publisher re-trims and runs the credential sanitiser anyway, so this
+/// cap exists purely to keep the broadcast payload reasonable.
+const MESSAGE_APPENDED_PREVIEW_MAX_CHARS: usize =
+    crate::commands::team_activity::EVENT_TEXT_PREVIEW_INPUT_MAX;
+
+/// Returns the first `max` chars (NOT bytes — char-counted to keep
+/// multibyte text correct) of `s`. Used to build the `text_preview` field
+/// of `WorkspaceEvent::MessageAppended`.
+pub(crate) fn truncate_to_chars(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
+}
+
+/// If `event` is a final assistant `Message` (not a partial stream chunk),
+/// emit a `WorkspaceEvent::MessageAppended` carrying a char-bounded
+/// preview of the assistant text. No-op for tool events, partial
+/// streams, status, init, etc. — the publisher only surfaces assistant
+/// turns on the activity row.
+pub(crate) fn emit_assistant_message_appended(
+    publisher_tx: Option<&WorkspaceEventTx>,
+    workspace_id: &str,
+    event: &AgentEvent,
+) {
+    let AgentEvent::Message {
+        role,
+        text,
+        is_partial,
+        ..
+    } = event
+    else {
+        return;
+    };
+    if *is_partial {
+        return;
+    }
+    if !matches!(role, crate::state::MessageRole::Assistant) {
+        return;
+    }
+    emit_workspace_event(
+        publisher_tx,
+        WorkspaceEvent::MessageAppended {
+            workspace_id: workspace_id.to_string(),
+            role: "assistant".into(),
+            text_preview: truncate_to_chars(text, MESSAGE_APPENDED_PREVIEW_MAX_CHARS),
+        },
+    );
+}
+
 /// Owns the Claude agent child process and its stdout pipe.
 ///
 /// Claude's `--print --input-format stream-json` mode refuses TTY stdin and
@@ -2408,6 +2459,142 @@ mod tests {
         let (tx, mut rx) = make_publisher_tx();
         stop_agent_inner_with_publisher(state, "ws_no_ws", Some(&tx)).unwrap();
         assert!(rx.try_recv().is_err(), "no event expected");
+    }
+
+    // ── Task 11 — WorkspaceEvent::MessageAppended emissions ──────────────────
+
+    #[test]
+    fn truncate_to_chars_caps_at_max_chars_not_bytes() {
+        // Multibyte chars must NOT slice into a byte boundary; cap by char count.
+        let s = "héllo"; // 5 chars, 6 bytes
+        assert_eq!(truncate_to_chars(s, 3), "hél");
+        assert_eq!(truncate_to_chars(s, 100), "héllo");
+        assert_eq!(truncate_to_chars(s, 0), "");
+    }
+
+    #[test]
+    fn truncate_to_chars_uses_400_constant_matching_team_activity_module() {
+        // Regression guard: if someone edits the constant in team_activity.rs,
+        // this test catches the drift between the publisher's documented cap
+        // and the emitter's actual cap.
+        assert_eq!(MESSAGE_APPENDED_PREVIEW_MAX_CHARS, 400);
+    }
+
+    #[test]
+    fn emit_assistant_message_appended_emits_for_final_assistant_message() {
+        let (tx, mut rx) = make_publisher_tx();
+        let ev = crate::state::AgentEvent::Message {
+            id: "msg_a".into(),
+            role: crate::state::MessageRole::Assistant,
+            text: "Hello world".into(),
+            is_partial: false,
+        };
+        emit_assistant_message_appended(Some(&tx), "ws_msg", &ev);
+        let got = rx.try_recv().expect("MessageAppended should be emitted");
+        match got {
+            crate::state::WorkspaceEvent::MessageAppended {
+                workspace_id,
+                role,
+                text_preview,
+            } => {
+                assert_eq!(workspace_id, "ws_msg");
+                assert_eq!(role, "assistant");
+                assert_eq!(text_preview, "Hello world");
+            }
+            other => panic!("expected MessageAppended, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_assistant_message_appended_truncates_long_text_to_400_chars() {
+        let (tx, mut rx) = make_publisher_tx();
+        let long_text: String = "a".repeat(1_000);
+        let ev = crate::state::AgentEvent::Message {
+            id: "msg_long".into(),
+            role: crate::state::MessageRole::Assistant,
+            text: long_text,
+            is_partial: false,
+        };
+        emit_assistant_message_appended(Some(&tx), "ws_long", &ev);
+        let got = rx.try_recv().expect("event expected");
+        let crate::state::WorkspaceEvent::MessageAppended { text_preview, .. } = got else {
+            panic!("expected MessageAppended");
+        };
+        // The preview must be capped at MESSAGE_APPENDED_PREVIEW_MAX_CHARS (400).
+        // Comparing char count, not byte count.
+        assert_eq!(text_preview.chars().count(), 400);
+    }
+
+    #[test]
+    fn emit_assistant_message_appended_skips_partial_streams() {
+        // Partials arrive token-by-token during a turn; only the final
+        // message should hit the publisher (otherwise we'd flood the
+        // broadcast with N partial previews per turn).
+        let (tx, mut rx) = make_publisher_tx();
+        let ev = crate::state::AgentEvent::Message {
+            id: "msg_p".into(),
+            role: crate::state::MessageRole::Assistant,
+            text: "streaming…".into(),
+            is_partial: true,
+        };
+        emit_assistant_message_appended(Some(&tx), "ws_p", &ev);
+        assert!(rx.try_recv().is_err(), "partial chunks must not emit");
+    }
+
+    #[test]
+    fn emit_assistant_message_appended_skips_non_assistant_roles() {
+        let (tx, mut rx) = make_publisher_tx();
+        for role in [
+            crate::state::MessageRole::User,
+            crate::state::MessageRole::System,
+            crate::state::MessageRole::Tool,
+        ] {
+            let ev = crate::state::AgentEvent::Message {
+                id: "msg_x".into(),
+                role,
+                text: "hi".into(),
+                is_partial: false,
+            };
+            emit_assistant_message_appended(Some(&tx), "ws_role", &ev);
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "non-assistant roles must not emit MessageAppended"
+        );
+    }
+
+    #[test]
+    fn emit_assistant_message_appended_skips_non_message_variants() {
+        // Tool events and status updates flow through the same reader
+        // callback; the helper must ignore them.
+        let (tx, mut rx) = make_publisher_tx();
+        emit_assistant_message_appended(
+            Some(&tx),
+            "ws_v",
+            &crate::state::AgentEvent::Status {
+                status: crate::state::AgentStatus::Running,
+            },
+        );
+        emit_assistant_message_appended(
+            Some(&tx),
+            "ws_v",
+            &crate::state::AgentEvent::ToolUse {
+                message_id: "msg_v".into(),
+                tool_use: crate::state::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "Read".into(),
+                    input: serde_json::Value::Null,
+                },
+            },
+        );
+        emit_assistant_message_appended(
+            Some(&tx),
+            "ws_v",
+            &crate::state::AgentEvent::Error {
+                message: "boom".into(),
+            },
+        );
+        assert!(rx.try_recv().is_err(), "non-Message variants must not emit");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 // Thin Tauri command wrappers — excluded from unit-test coverage because they
 // require a live Tauri AppHandle / Channel, which cannot be constructed in unit
 // tests.  All business logic lives in `agent_core.rs` (fully covered).
+use crate::commands::agent_core::emit_assistant_message_appended;
 pub use crate::commands::agent_core::{
     build_system_prompt_prefix, event_to_persisted_message, process_reader_events,
     process_reader_events_with_cancel, process_reader_events_with_cancel_and_publisher,
@@ -218,7 +219,16 @@ fn spawn_reader_thread(
                             "agent reader: queue failed"
                         );
                     }
-                    // Task 11 emission point lives here in Task 11 commit.
+                    // Task 11: surface assistant turns on the team-activity
+                    // row. Helper filters partials, tool events, and
+                    // non-assistant roles internally; calling here keeps the
+                    // queue + emit ordering tight (publisher only sees text
+                    // that successfully persisted).
+                    emit_assistant_message_appended(
+                        Some(&publisher_for_reader),
+                        &workspace_id,
+                        &ev,
+                    );
                 }
                 let _ = event_tx_reader.send(ev);
             },
