@@ -43,6 +43,11 @@ pub struct FieldMapping {
     pub status: Option<FieldRef>,
     #[serde(default)]
     pub order: Option<FieldRef>,
+    /// Optional Person-type (Lark type 11) field whose names are surfaced
+    /// on task cards. `serde(default)` so bindings persisted before this
+    /// field existed deserialize without migration.
+    #[serde(default)]
+    pub pic: Option<FieldRef>,
 }
 
 /// Maps Bitable status field values to kanban columns. Keys are
@@ -65,17 +70,96 @@ impl Default for StatusValueMapping {
     }
 }
 
+/// Operator for a Bitable filter condition. Serializes to Lark's
+/// `records/search` operator string (camelCase).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FilterOperator {
+    Is,
+    IsNot,
+    Contains,
+    DoesNotContain,
+    IsEmpty,
+    IsNotEmpty,
+    IsGreater,
+    IsGreaterEqual,
+    IsLess,
+    IsLessEqual,
+}
+
+/// Conjunction joining multiple filter conditions (AND / OR).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FilterConjunction {
+    #[default]
+    And,
+    Or,
+}
+
+/// One filter condition matching Lark `records/search` schema.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct FilterCondition {
+    /// Bitable field id (stable lookup key — survives renames).
+    pub field_id: String,
+    /// Cached field name (UI display + outgoing API body). Refreshed from
+    /// the LarkProvider field cache before each send.
+    pub field_name: String,
+    pub operator: FilterOperator,
+    /// Per-type value (string for text, option name(s) for select,
+    /// ISO-8601 for date, number-as-string, email/display for person).
+    /// Empty Vec for unary operators (`isEmpty` / `isNotEmpty`).
+    pub value: Vec<String>,
+}
+
+/// Set of filter conditions joined by a single top-level conjunction.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct FilterSpec {
+    #[serde(default)]
+    pub conjunction: FilterConjunction,
+    #[serde(default)]
+    pub conditions: Vec<FilterCondition>,
+}
+
+impl FilterSpec {
+    pub fn is_empty(&self) -> bool {
+        self.conditions.is_empty()
+    }
+}
+
 /// One repo's binding to a Bitable: which table, plus how to map its
 /// fields and status options to Ansambel's task model.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct BitableBinding {
     pub app_token: String,
     pub table_id: String,
+    /// Optional filter applied at the Lark server side via the
+    /// `records/search` endpoint. Empty (default) → fetch all records
+    /// via the existing list endpoint.
+    #[serde(default)]
+    pub filters: FilterSpec,
     pub field_mapping: FieldMapping,
     #[serde(default)]
     pub status_value_mapping: StatusValueMapping,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+/// A person that appears in a Bitable Person-type field. Used by the
+/// FilterBar to build a dropdown of real users instead of a free-text
+/// input.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PersonOption {
+    pub open_id: String,
+    pub name: String,
+}
+
+/// One option resolved by following a Lookup field's chain to its source
+/// SingleSelect field. Used by the FilterBar to render a dropdown for
+/// Lookup (type 19) conditions instead of a free-text input.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SingleSelectOption {
+    pub option_id: String,
+    pub name: String,
 }
 
 /// What `BitableSchemaDetector::propose_mapping` returns to the wizard.
@@ -134,6 +218,11 @@ pub struct Task {
     pub order: i32,           // within-column sort order (higher = top)
     pub created_at: i64,
     pub updated_at: i64,
+    /// Person-in-charge names resolved from the optional `pic` field on the
+    /// repo's Lark binding. Empty when no PIC field is mapped or the record
+    /// has no assignees. `serde(default)` so older persisted tasks load.
+    #[serde(default)]
+    pub pic_names: Vec<String>,
 }
 
 /// One streamed slice of terminal output. Tagged so the frontend (and
@@ -724,6 +813,7 @@ mod tests {
             order: 1024,
             created_at: 1_776_000_000,
             updated_at: 1_776_099_000,
+            pic_names: Vec::new(),
         };
         let json = serde_json::to_string(&t).unwrap();
         let back: Task = serde_json::from_str(&json).unwrap();
@@ -742,6 +832,7 @@ mod tests {
             order: 2048,
             created_at: 0,
             updated_at: 0,
+            pic_names: Vec::new(),
         };
         let json = serde_json::to_string(&t).unwrap();
         assert!(json.contains("\"workspace_id\":\"ws_xyz\""));
@@ -755,6 +846,7 @@ mod tests {
             order: 0,
             created_at: 0,
             updated_at: 0,
+            pic_names: Vec::new(),
         };
         let none_json = serde_json::to_string(&none_task).unwrap();
         assert!(none_json.contains("\"workspace_id\":null"));
@@ -778,6 +870,7 @@ mod tests {
             order: 3072,
             created_at: 0,
             updated_at: 0,
+            pic_names: Vec::new(),
         };
         let json = serde_json::to_string(&t).unwrap();
         assert!(json.contains("\"column\":\"review\""));
@@ -1043,10 +1136,166 @@ mod tests {
     }
 
     #[test]
+    fn filter_operator_serializes_as_lark_camel_case() {
+        use serde_json::json;
+        assert_eq!(
+            serde_json::to_value(FilterOperator::Is).unwrap(),
+            json!("is")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::IsNot).unwrap(),
+            json!("isNot")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::Contains).unwrap(),
+            json!("contains")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::DoesNotContain).unwrap(),
+            json!("doesNotContain")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::IsEmpty).unwrap(),
+            json!("isEmpty")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::IsNotEmpty).unwrap(),
+            json!("isNotEmpty")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::IsGreater).unwrap(),
+            json!("isGreater")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::IsGreaterEqual).unwrap(),
+            json!("isGreaterEqual")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::IsLess).unwrap(),
+            json!("isLess")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterOperator::IsLessEqual).unwrap(),
+            json!("isLessEqual")
+        );
+    }
+
+    #[test]
+    fn filter_conjunction_default_is_and_lowercase() {
+        use serde_json::json;
+        assert_eq!(FilterConjunction::default(), FilterConjunction::And);
+        assert_eq!(
+            serde_json::to_value(FilterConjunction::And).unwrap(),
+            json!("and")
+        );
+        assert_eq!(
+            serde_json::to_value(FilterConjunction::Or).unwrap(),
+            json!("or")
+        );
+    }
+
+    #[test]
+    fn filter_spec_default_is_and_with_empty_conditions() {
+        let spec = FilterSpec::default();
+        assert_eq!(spec.conjunction, FilterConjunction::And);
+        assert!(spec.conditions.is_empty());
+        assert!(spec.is_empty());
+    }
+
+    #[test]
+    fn filter_spec_is_empty_false_when_has_condition() {
+        let spec = FilterSpec {
+            conjunction: FilterConjunction::And,
+            conditions: vec![FilterCondition {
+                field_id: "fld123".into(),
+                field_name: "Status".into(),
+                operator: FilterOperator::Is,
+                value: vec!["Done".into()],
+            }],
+        };
+        assert!(!spec.is_empty());
+    }
+
+    #[test]
+    fn filter_spec_roundtrips_through_json() {
+        let spec = FilterSpec {
+            conjunction: FilterConjunction::Or,
+            conditions: vec![
+                FilterCondition {
+                    field_id: "fld1".into(),
+                    field_name: "Sprint".into(),
+                    operator: FilterOperator::Is,
+                    value: vec!["S1".into()],
+                },
+                FilterCondition {
+                    field_id: "fld2".into(),
+                    field_name: "Owner".into(),
+                    operator: FilterOperator::IsEmpty,
+                    value: vec![],
+                },
+            ],
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        let back: FilterSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(spec, back);
+    }
+
+    #[test]
+    fn legacy_binding_without_filters_loads_as_default_empty() {
+        let legacy_json = r#"{
+            "app_token": "appXYZ",
+            "table_id": "tblABC",
+            "field_mapping": {
+                "title": { "field_id": "fld1", "field_name": "Title" }
+            },
+            "status_value_mapping": { "entries": {}, "default_column": "todo" },
+            "created_at": 1700000000,
+            "updated_at": 1700000000
+        }"#;
+        let binding: BitableBinding = serde_json::from_str(legacy_json).unwrap();
+        assert!(binding.filters.is_empty());
+        assert_eq!(binding.filters.conjunction, FilterConjunction::And);
+    }
+
+    #[test]
+    fn binding_with_filters_roundtrips() {
+        let binding = BitableBinding {
+            app_token: "appXYZ".into(),
+            table_id: "tblABC".into(),
+            filters: FilterSpec {
+                conjunction: FilterConjunction::And,
+                conditions: vec![FilterCondition {
+                    field_id: "fld1".into(),
+                    field_name: "Status".into(),
+                    operator: FilterOperator::Is,
+                    value: vec!["Done".into()],
+                }],
+            },
+            field_mapping: FieldMapping {
+                title: FieldRef {
+                    field_id: "fld1".into(),
+                    field_name: "Title".into(),
+                },
+                description: None,
+                status: None,
+                order: None,
+                pic: None,
+            },
+            status_value_mapping: StatusValueMapping::default(),
+            created_at: 1700000000,
+            updated_at: 1700000000,
+        };
+        let json = serde_json::to_string(&binding).unwrap();
+        let back: BitableBinding = serde_json::from_str(&json).unwrap();
+        assert_eq!(binding, back);
+    }
+
+    #[test]
     fn binding_serde_round_trip_preserves_fields() {
         let b = BitableBinding {
             app_token: "bascntest".into(),
             table_id: "tbltest".into(),
+            filters: FilterSpec::default(),
             field_mapping: FieldMapping {
                 title: FieldRef {
                     field_id: "fld_pri".into(),
@@ -1058,6 +1307,7 @@ mod tests {
                     field_name: "Task Status".into(),
                 }),
                 order: None,
+                pic: None,
             },
             status_value_mapping: StatusValueMapping {
                 entries: {

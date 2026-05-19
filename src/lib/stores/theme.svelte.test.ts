@@ -223,4 +223,16 @@ describe('theme store', () => {
     const { theme } = await freshStore();
     expect(() => theme.initTheme()).not.toThrow();
   });
+
+  it('applyCssVars sets colorScheme to "dark" on documentElement', async () => {
+    const { theme } = await freshStore();
+    theme.setColorMode('dark');
+    expect(document.documentElement.style.colorScheme).toBe('dark');
+  });
+
+  it('applyCssVars sets colorScheme to "light" on documentElement', async () => {
+    const { theme } = await freshStore();
+    theme.setColorMode('light');
+    expect(document.documentElement.style.colorScheme).toBe('light');
+  });
 });

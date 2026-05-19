@@ -23,6 +23,9 @@ import type {
   SetLarkCredentialsArgs,
   BitableBinding,
   ProposedMapping,
+  BitableField,
+  PersonOption,
+  SingleSelectOption,
 } from './types';
 
 export type ListMessagesOpts = {
@@ -234,6 +237,31 @@ export const api = {
     /** Inspect a Bitable table and propose a FieldMapping + StatusValueMapping. */
     detectSchema: (appToken: string, tableId: string): Promise<ProposedMapping> =>
       invoke('detect_lark_schema', { appToken, tableId }),
+
+    /** List all fields for a Bitable table. */
+    listFields: (appToken: string, tableId: string): Promise<BitableField[]> =>
+      invoke('list_lark_fields', { appToken, tableId }),
+
+    /** Enumerate distinct persons present in a Person-type field across all
+     *  records. Used by FilterBar to build a dropdown for type-11 conditions.
+     *  Returns persons sorted by name ascending. */
+    listPersonOptions: (
+      appToken: string,
+      tableId: string,
+      fieldName: string
+    ): Promise<PersonOption[]> =>
+      invoke('list_lark_person_options', { appToken, tableId, fieldName }),
+
+    /** Follow a Lookup (type 19) field's chain to its source SingleSelect
+     *  and return the options. Returns [] when the field is not a Lookup,
+     *  the source is not a SingleSelect, or options are absent — the
+     *  FilterBar falls back to a text input in those cases. */
+    listLookupOptions: (
+      appToken: string,
+      tableId: string,
+      fieldId: string
+    ): Promise<SingleSelectOption[]> =>
+      invoke('list_lark_lookup_options', { appToken, tableId, fieldId }),
   },
 
   script: {

@@ -894,6 +894,7 @@ mod tests {
                 order: 0,
                 created_at: 0,
                 updated_at: 0,
+                pic_names: Vec::new(),
             },
         );
     }

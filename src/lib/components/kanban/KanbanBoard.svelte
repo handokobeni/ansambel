@@ -3,6 +3,9 @@
   import { dndzone, SHADOW_ITEM_MARKER_PROPERTY_NAME } from 'svelte-dnd-action';
   import type { Task, KanbanColumn } from '$lib/types';
   import TaskCard from './TaskCard.svelte';
+  import FilterBar from './FilterBar.svelte';
+  import { larkBindings } from '$lib/stores/lark-bindings.svelte';
+  import { tasks as tasksStore } from '$lib/stores/tasks.svelte';
 
   const {
     repoId,
@@ -139,6 +142,36 @@
   }
 </script>
 
+{#if larkBindings.get(repoId)}
+  {@const binding = larkBindings.get(repoId)!}
+  {@const mappedFieldIds = new Set(
+    [
+      binding.field_mapping.title.field_id,
+      binding.field_mapping.description?.field_id,
+      binding.field_mapping.status?.field_id,
+      binding.field_mapping.order?.field_id,
+    ].filter((id): id is string => !!id)
+  )}
+  {@const mappedFieldNames = new Set(
+    [
+      binding.field_mapping.title?.field_name,
+      binding.field_mapping.description?.field_name,
+      binding.field_mapping.status?.field_name,
+      binding.field_mapping.order?.field_name,
+    ]
+      .filter((n): n is string => !!n)
+      .map((n) => n.toLowerCase().trim())
+  )}
+  <FilterBar
+    {repoId}
+    appToken={binding.app_token}
+    tableId={binding.table_id}
+    filters={binding.filters}
+    {mappedFieldIds}
+    {mappedFieldNames}
+  />
+{/if}
+
 <div
   class="kanban-board grid grid-cols-4 gap-3 p-3 h-full overflow-x-auto min-w-0"
   data-repo={repoId}
@@ -171,11 +204,19 @@
         onconsider={(e) => handleConsider(col.id, e)}
         onfinalize={(e) => handleFinalize(col.id, e)}
       >
-        {#each itemsFor(col.id) as task (task.id)}
-          <TaskCard {task} onRemove={onRemoveTask} />
+        {#if tasksStore.isLoading(repoId) && larkBindings.get(repoId)}
+          {@const hasActiveFilter =
+            (larkBindings.get(repoId)?.filters?.conditions?.length ?? 0) > 0}
+          <p class="text-xs text-[var(--text-muted)] text-center py-4 italic">
+            {hasActiveFilter ? 'Loading filtered view…' : 'Loading tasks…'}
+          </p>
         {:else}
-          <p class="text-xs text-[var(--text-muted)] text-center py-4 italic">No tasks</p>
-        {/each}
+          {#each itemsFor(col.id) as task (task.id)}
+            <TaskCard {task} onRemove={onRemoveTask} />
+          {:else}
+            <p class="text-xs text-[var(--text-muted)] text-center py-4 italic">No tasks</p>
+          {/each}
+        {/if}
       </div>
 
       {#if col.id === 'todo'}

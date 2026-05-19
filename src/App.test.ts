@@ -58,8 +58,10 @@ vi.mock('$lib/stores/tasks.svelte', () => ({
   tasks: {
     selectedTaskId: null as string | null,
     loadForRepo: vi.fn().mockResolvedValue(undefined),
+    refresh: vi.fn().mockResolvedValue(undefined),
     listForRepo: vi.fn(() => []),
     listForColumn: vi.fn(() => []),
+    isLoading: vi.fn(() => false),
     add: vi.fn(),
     update: vi.fn(),
     move: vi.fn().mockResolvedValue(undefined),

@@ -63,26 +63,33 @@ describe('TaskCard', () => {
     expect(screen.queryByTestId('task-description')).toBeNull();
   });
 
-  it('shows relative date in hours when task is 2 hours old', () => {
-    const twoHoursAgo = Math.floor(Date.now() / 1000) - 7200;
-    const task = makeTask({ created_at: twoHoursAgo });
-    render(TaskCard, { props: { task, onRemove: vi.fn() } });
-    expect(document.body.textContent).toMatch(/\d+h ago/);
+  it('shows em-dash placeholder when task has no PIC names', () => {
+    render(TaskCard, { props: { task: makeTask(), onRemove: vi.fn() } });
+    const pic = screen.getByTestId('task-pic');
+    expect(pic.textContent?.trim()).toBe('—');
+    expect(pic.getAttribute('title')).toBe('');
   });
 
-  it('shows relative date in days when task is more than 24 hours old', () => {
-    const twoDaysAgo = Math.floor(Date.now() / 1000) - 172800;
-    const task = makeTask({ created_at: twoDaysAgo });
+  it('shows the single name when task has one PIC', () => {
+    const task = makeTask({ pic_names: ['Alice'] });
     render(TaskCard, { props: { task, onRemove: vi.fn() } });
-    expect(document.body.textContent).toMatch(/\d+d ago/);
+    const pic = screen.getByTestId('task-pic');
+    expect(pic.textContent?.trim()).toBe('Alice');
+    expect(pic.getAttribute('title')).toBe('Alice');
   });
 
-  it('shows relative date in minutes when task is fresh (under an hour)', () => {
-    // Covers the diff < 3600 branch — without this, the minute path is dead
-    // in coverage even though it's the most common state for new tasks.
-    const fiveMinutesAgo = Math.floor(Date.now() / 1000) - 300;
-    const task = makeTask({ created_at: fiveMinutesAgo });
+  it('shows first name + "+N" when task has multiple PICs', () => {
+    const task = makeTask({ pic_names: ['Alice', 'Bob', 'Carol'] });
     render(TaskCard, { props: { task, onRemove: vi.fn() } });
-    expect(document.body.textContent).toMatch(/\d+m ago/);
+    const pic = screen.getByTestId('task-pic');
+    expect(pic.textContent?.trim()).toBe('Alice +2');
+    expect(pic.getAttribute('title')).toBe('Alice, Bob, Carol');
+  });
+
+  it('treats undefined pic_names (legacy persisted task) as empty', () => {
+    const task = makeTask();
+    delete (task as { pic_names?: string[] }).pic_names;
+    render(TaskCard, { props: { task, onRemove: vi.fn() } });
+    expect(screen.getByTestId('task-pic').textContent?.trim()).toBe('—');
   });
 });

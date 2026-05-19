@@ -8,12 +8,19 @@
     task.description.length > 80 ? task.description.slice(0, 80) + '...' : task.description
   );
 
-  const relativeDate = $derived(() => {
-    const diff = Date.now() / 1000 - task.created_at;
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    return `${Math.floor(diff / 86400)}d ago`;
-  });
+  // PIC display: first name + "+N" when multiple. Em-dash placeholder when
+  // the binding has a PIC field mapped but this record has no assignees, or
+  // when the binding has no PIC field at all. Full list goes in the title
+  // attribute for hover discovery.
+  const picList = $derived<string[]>(task.pic_names ?? []);
+  const picLabel = $derived(
+    picList.length === 0
+      ? '—'
+      : picList.length === 1
+        ? picList[0]
+        : `${picList[0]} +${picList.length - 1}`
+  );
+  const picTooltip = $derived(picList.length > 0 ? picList.join(', ') : '');
 </script>
 
 <div
@@ -51,6 +58,12 @@
     {:else}
       <span></span>
     {/if}
-    <span class="text-[10px] text-[var(--text-muted)]">{relativeDate()}</span>
+    <span
+      class="text-[10px] text-[var(--text-muted)] truncate max-w-[50%]"
+      data-testid="task-pic"
+      title={picTooltip}
+    >
+      {picLabel}
+    </span>
   </div>
 </div>

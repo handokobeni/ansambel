@@ -58,6 +58,10 @@ export type Task = {
   order: number;
   created_at: number;
   updated_at: number;
+  /** Person-in-charge names resolved from the optional `pic` field on the
+   *  repo's Lark binding. Empty array when no PIC field is mapped or the
+   *  record has no assignees. Optional so older persisted records load. */
+  pic_names?: string[];
 };
 
 export type CreateTaskArgs = {
@@ -272,6 +276,10 @@ export type FieldMapping = {
   description: FieldRef | null;
   status: FieldRef | null;
   order: FieldRef | null;
+  /** Optional Person-type (Lark type 11) field whose resolved names are
+   *  surfaced on task cards. Null when the user opted not to map a PIC
+   *  field in the wizard. */
+  pic: FieldRef | null;
 };
 
 export type KanbanColumnLiteral = 'todo' | 'in_progress' | 'review' | 'done';
@@ -281,9 +289,36 @@ export type StatusValueMapping = {
   default_column: KanbanColumnLiteral;
 };
 
+export type FilterOperator =
+  | 'is'
+  | 'isNot'
+  | 'contains'
+  | 'doesNotContain'
+  | 'isEmpty'
+  | 'isNotEmpty'
+  | 'isGreater'
+  | 'isGreaterEqual'
+  | 'isLess'
+  | 'isLessEqual';
+
+export type FilterConjunction = 'and' | 'or';
+
+export type FilterCondition = {
+  field_id: string;
+  field_name: string;
+  operator: FilterOperator;
+  value: string[];
+};
+
+export type FilterSpec = {
+  conjunction: FilterConjunction;
+  conditions: FilterCondition[];
+};
+
 export type BitableBinding = {
   app_token: string;
   table_id: string;
+  filters: FilterSpec;
   field_mapping: FieldMapping;
   status_value_mapping: StatusValueMapping;
   created_at: number;
@@ -299,6 +334,16 @@ export type BitableField = {
 };
 
 export type BitableOption = { id: string; name: string };
+
+/** A person returned by list_lark_person_options. Used by FilterBar to
+ *  populate the value picker for Person-type (type 11) fields. */
+export type PersonOption = { open_id: string; name: string };
+
+/** One option resolved by following a Lookup (type 19) field's chain to its
+ *  source SingleSelect. Used by FilterBar to render a dropdown for Lookup
+ *  conditions. The `option_id` is sent as the filter value — Lark stores
+ *  Lookup values as option_ids in records. */
+export type SingleSelectOption = { option_id: string; name: string };
 
 export type ProposedMapping = {
   fields: BitableField[];

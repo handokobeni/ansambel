@@ -724,6 +724,7 @@ mod tests {
                 order: 1024,
                 created_at: 0,
                 updated_at: 0,
+                pic_names: Vec::new(),
             };
             st.tasks.insert("tk_other1".into(), other);
         }
@@ -752,6 +753,7 @@ mod tests {
                     order: 1024,
                     created_at: 0,
                     updated_at: 0,
+                    pic_names: Vec::new(),
                 },
                 Task {
                     id: "tk_t2".into(),
@@ -763,6 +765,7 @@ mod tests {
                     order: 2048,
                     created_at: 0,
                     updated_at: 0,
+                    pic_names: Vec::new(),
                 },
                 Task {
                     id: "tk_ip1".into(),
@@ -774,6 +777,7 @@ mod tests {
                     order: 1024,
                     created_at: 0,
                     updated_at: 0,
+                    pic_names: Vec::new(),
                 },
             ];
             for t in tasks {
@@ -1252,6 +1256,7 @@ mod tests {
             order: 1024,
             created_at: 0,
             updated_at: 0,
+            pic_names: Vec::new(),
         };
         {
             let mut st = state.lock().unwrap();
@@ -1299,6 +1304,7 @@ mod tests {
             order: 1024,
             created_at: 0,
             updated_at: 0,
+            pic_names: Vec::new(),
         };
         {
             let mut st = state.lock().unwrap();
@@ -1431,6 +1437,7 @@ mod tests {
                 order: 0,
                 created_at: 0,
                 updated_at: 0,
+                pic_names: Vec::new(),
             })
         }
         async fn update_task(
@@ -1448,6 +1455,7 @@ mod tests {
                 order: 0,
                 created_at: 0,
                 updated_at: 0,
+                pic_names: Vec::new(),
             })
         }
         async fn move_task(
@@ -1466,6 +1474,7 @@ mod tests {
                 order,
                 created_at: 0,
                 updated_at: 0,
+                pic_names: Vec::new(),
             })
         }
         async fn delete_task(&self, _id: &str) -> crate::error::Result<()> {
@@ -1497,6 +1506,7 @@ mod tests {
                     order: 0,
                     created_at: 0,
                     updated_at: 0,
+                    pic_names: Vec::new(),
                 },
             );
         }
@@ -1559,6 +1569,7 @@ mod tests {
                     order: 0,
                     created_at: 0,
                     updated_at: 0,
+                    pic_names: Vec::new(),
                 },
             );
         }

@@ -9,17 +9,46 @@ use crate::state::{FieldMapping, FieldRef, KanbanColumn, ProposedMapping, Status
 use crate::task_provider::lark::parse_kanban_column;
 use std::sync::Arc;
 
-/// Reads a field's string value off a record by `field_id`. Bitable
+/// Extract text from a Bitable field value, accepting both shapes:
+/// - Plain string (returned by the list endpoint): `"text content"`
+/// - Segmented array (returned by the search endpoint): `[{"text": "...", "type": "text"}, ...]`
+///
+/// Segments are concatenated in order. Returns None if the value is neither shape
+/// or yields an empty string.
+pub(crate) fn extract_text(value: &serde_json::Value) -> Option<String> {
+    if let Some(s) = value.as_str() {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+        return None;
+    }
+    if let Some(arr) = value.as_array() {
+        let mut buf = String::new();
+        for seg in arr {
+            if let Some(t) = seg.get("text").and_then(serde_json::Value::as_str) {
+                buf.push_str(t);
+            }
+        }
+        let trimmed = buf.trim().to_string();
+        if !trimmed.is_empty() {
+            return Some(trimmed);
+        }
+    }
+    None
+}
+
+/// Reads a field's string value off a record by field name. Bitable
 /// returns record fields keyed by name in the JSON payload, so we look
 /// it up by name; the resolver passes the `field_name` cached on the
 /// `FieldRef`. Returns `None` if the field is missing/null/empty.
-fn read_string_by_name<'a>(record: &'a BitableRecord, field_name: &str) -> Option<&'a str> {
-    record
-        .fields
-        .as_object()
-        .and_then(|m| m.get(field_name))
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
+///
+/// Handles both shapes returned by Lark Bitable:
+/// - Plain string (list endpoint)
+/// - Segmented array `[{"text": "...", "type": "text"}, ...]` (search endpoint)
+fn read_string_by_name(record: &BitableRecord, field_name: &str) -> Option<String> {
+    let value = record.fields.as_object()?.get(field_name)?;
+    extract_text(value)
 }
 
 /// Reads a field as plain text, tolerating the several shapes Lark
@@ -114,11 +143,11 @@ pub fn resolve_title(
     primary_field_name: Option<&str>,
 ) -> Result<String> {
     if let Some(v) = read_string_by_name(record, &mapping.title.field_name) {
-        return Ok(v.to_string());
+        return Ok(v);
     }
     if let Some(p) = primary_field_name {
         if let Some(v) = read_string_by_name(record, p) {
-            return Ok(v.to_string());
+            return Ok(v);
         }
     }
     Err(AppError::Lark(format!(
@@ -141,51 +170,161 @@ pub fn resolve_description(record: &BitableRecord, mapping: &FieldMapping) -> St
         .unwrap_or_default()
 }
 
+/// Extract an `(option_id, option_name)` pair from a Bitable SingleSelect field
+/// value. Accepts all shapes Lark uses across endpoints:
+/// - Plain string: `"In Progress"` (id absent, name = the string)
+/// - Object: `{ "id": "opt_xxx", "text": "In Progress" }` or `{..., "name": "In Progress"}`
+/// - Array: `[{ "id": "opt_xxx", "text": "In Progress" }]` — first element
+/// - Plain-string array: `["Done"]` — take first element (Lookup-unwrapped values)
+/// - Segmented text array: `[{ "text": "...", "type": "text" }]` — concatenate text
+/// - Lookup field wrapper: `{ "type": N, "value": [<inner>] }` — unwrap and recurse
+pub(crate) fn extract_single_select(value: &serde_json::Value) -> Option<(Option<String>, String)> {
+    use serde_json::Value;
+    // Plain string
+    if let Some(s) = value.as_str() {
+        if s.is_empty() {
+            return None;
+        }
+        return Some((None, s.to_string()));
+    }
+    // Lookup field wrapper: { "type": N, "value": [<inner>] }
+    // Lark returns Lookup fields as { type, value } where `value` is an array of the
+    // resolved inner values. Detect by presence of both "type" and "value" keys (but
+    // NOT "id", which distinguishes it from a native SingleSelect object).
+    // Must be checked before the generic object branch below.
+    if let Some(obj) = value.as_object() {
+        if obj.contains_key("type") && obj.contains_key("value") && !obj.contains_key("id") {
+            if let Some(inner) = obj.get("value") {
+                if let Some(result) = extract_single_select(inner) {
+                    return Some(result);
+                }
+            }
+            return None;
+        }
+    }
+    // Object (native SingleSelect: { "id": "opt_xxx", "text": "..." })
+    if let Some(obj) = value.as_object() {
+        let id = obj.get("id").and_then(Value::as_str).map(str::to_string);
+        let name = obj
+            .get("text")
+            .or_else(|| obj.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_string)?;
+        return Some((id, name));
+    }
+    // Array of objects or plain strings
+    if let Some(arr) = value.as_array() {
+        // Try first element as option object
+        if let Some(first) = arr.first() {
+            if let Some(obj) = first.as_object() {
+                let id = obj.get("id").and_then(Value::as_str).map(str::to_string);
+                if let Some(name) = obj
+                    .get("text")
+                    .or_else(|| obj.get("name"))
+                    .and_then(Value::as_str)
+                {
+                    // Only treat as option object if id is present OR no "type" key
+                    // (distinguishes option objects from segmented-text segments).
+                    if id.is_some() || !obj.contains_key("type") {
+                        return Some((id, name.to_string()));
+                    }
+                }
+            }
+            // Plain string element (e.g. Lookup-unwrapped values: ["Done"])
+            if let Some(s) = first.as_str() {
+                if !s.is_empty() {
+                    return Some((None, s.to_string()));
+                }
+            }
+        }
+        // Segmented text concat (e.g. [{text: "In ", type: "text"}, {text: "Progress", type: "text"}])
+        let mut buf = String::new();
+        for seg in arr {
+            if let Some(t) = seg.get("text").and_then(Value::as_str) {
+                buf.push_str(t);
+            }
+        }
+        if !buf.is_empty() {
+            return Some((None, buf));
+        }
+    }
+    None
+}
+
 /// Resolves the kanban column for a record using the mapped status
 /// field + value mapping. Layered fallback:
 ///   1. If status field unmapped → `default_column`
 ///   2. Single-select object `{id, text}`: look up `id` in `entries`;
 ///      if absent, run `text` through the fuzzy parser
-///   3. Plain text value: look up lowercased text in `entries`; if
-///      absent, run raw text through the fuzzy parser
-///   4. Any fuzzy miss → `default_column`
+///   3. Array shape from search endpoint: extract first element or
+///      segmented text, then look up id/name in `entries`; fuzzy fallback
+///   4. When id is absent but name is known: look up name in `status_options`
+///      to recover the canonical option id, then check `entries`
+///   5. Case-insensitive name comparison against entries keys (handles legacy
+///      bindings where the wizard stored option names as keys instead of ids)
+///   6. Any fuzzy miss → `default_column`
+///
+/// `status_options` should be the cached `Vec<BitableOption>` for the status
+/// field (see `LarkProvider::status_options`). Pass an empty slice when
+/// unavailable — the function degrades gracefully to the fuzzy fallback.
+///
+/// Returns `(KanbanColumn, path_tag)` where `path_tag` is one of:
+/// `"id-exact"`, `"fuzzy-parse"`, `"options-name-match"`,
+/// `"entries-case-insensitive"`, or `"default"`.
 pub fn resolve_status(
     record: &BitableRecord,
     mapping: &FieldMapping,
     values: &StatusValueMapping,
-) -> KanbanColumn {
+    status_options: &[BitableOption],
+) -> (KanbanColumn, &'static str) {
     let Some(status_field) = &mapping.status else {
-        return values.default_column.clone();
+        return (values.default_column.clone(), "default");
     };
     let fields = match record.fields.as_object() {
         Some(o) => o,
-        None => return values.default_column.clone(),
+        None => return (values.default_column.clone(), "default"),
     };
     let raw = fields.get(&status_field.field_name);
     let Some(raw) = raw else {
-        return values.default_column.clone();
+        return (values.default_column.clone(), "default");
     };
-    if let Some(obj) = raw.as_object() {
-        if let Some(id) = obj.get("id").and_then(|v| v.as_str()) {
-            if let Some(col) = values.entries.get(id) {
-                return col.clone();
+    // Use the unified extractor that handles all Lark endpoint shapes.
+    if let Some((opt_id, opt_name)) = extract_single_select(raw) {
+        // 1. Try exact id lookup first.
+        if let Some(id) = &opt_id {
+            if let Some(col) = values.entries.get(id.as_str()) {
+                return (col.clone(), "id-exact");
             }
         }
-        if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
-            if let Some(col) = parse_kanban_column(text) {
-                return col;
+        // 2. Try fuzzy name parse.
+        if let Some(col) = parse_kanban_column(&opt_name) {
+            return (col, "fuzzy-parse");
+        }
+        // 3. When id is absent (e.g. segmented-text shape from search endpoint),
+        //    recover the canonical option id by matching name against status_options,
+        //    then check entries. This is the primary fix for the bug where search-
+        //    endpoint records always fell through to default_column.
+        if opt_id.is_none() {
+            let recovered_id = status_options
+                .iter()
+                .find(|o| o.name.eq_ignore_ascii_case(&opt_name))
+                .map(|o| o.id.as_str());
+            if let Some(id) = recovered_id {
+                if let Some(col) = values.entries.get(id) {
+                    return (col.clone(), "options-name-match");
+                }
+            }
+        }
+        // 4. Case-insensitive key comparison — handles legacy bindings where the
+        //    wizard stored option names (not ids) as entry keys.
+        let lowered = opt_name.to_lowercase();
+        for (key, col) in &values.entries {
+            if key.to_lowercase() == lowered {
+                return (col.clone(), "entries-case-insensitive");
             }
         }
     }
-    if let Some(s) = raw.as_str().filter(|s| !s.is_empty()) {
-        if let Some(col) = values.entries.get(&s.to_lowercase()) {
-            return col.clone();
-        }
-        if let Some(col) = parse_kanban_column(s) {
-            return col;
-        }
-    }
-    values.default_column.clone()
+    (values.default_column.clone(), "default")
 }
 
 /// Resolves the order value for sorting. Mapped `order` field wins;
@@ -206,6 +345,91 @@ pub fn resolve_order(record: &BitableRecord, mapping: &FieldMapping) -> i32 {
     // collapse to a constant than wrap and produce nonsense sort order.
     let clamped = created_secs.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
     -clamped
+}
+
+/// Resolves the Person-in-charge names for a record from the mapped Person
+/// field (Lark type 11). Empty `Vec` when no `pic` field is mapped, the
+/// record has no value, or the value yields no names.
+///
+/// Lark Person fields come back as an array of user objects. Across endpoints
+/// we've seen these shapes:
+///   - `[{"id": "ou_xxx", "name": "Alice"}, ...]` (list endpoint)
+///   - `[{"id": "ou_xxx", "name": "Alice", "en_name": "Alice"}]`
+///   - `[{"type": "user", "id": "ou_xxx", "name": "Alice", "text": "Alice"}]`
+///     (search endpoint mentions an object similar to segments)
+///
+/// Each item's display name is preferred from `name`, falling back to
+/// `en_name` then `text`. Items without any of those are skipped.
+pub fn resolve_pic(record: &BitableRecord, mapping: &FieldMapping) -> Vec<String> {
+    let Some(pic_ref) = mapping.pic.as_ref() else {
+        return Vec::new();
+    };
+    let Some(fields) = record.fields.as_object() else {
+        return Vec::new();
+    };
+    let Some(raw) = fields.get(&pic_ref.field_name) else {
+        return Vec::new();
+    };
+    extract_person_names(raw)
+}
+
+fn extract_person_names(value: &serde_json::Value) -> Vec<String> {
+    use serde_json::Value;
+    // Plain Text-field shape: single string. Some users keep a free-text
+    // "Assigned to" column with one name (or "Alice, Bob"). Split on common
+    // separators so multi-name text fields surface as multiple PICs.
+    if let Some(s) = value.as_str() {
+        return split_text_names(s);
+    }
+    let mut out: Vec<String> = Vec::new();
+    let items: &[Value] = match value {
+        Value::Array(arr) => arr.as_slice(),
+        Value::Object(_) => std::slice::from_ref(value),
+        _ => return out,
+    };
+    for item in items {
+        // Array of plain strings (rare, but defensive).
+        if let Some(s) = item.as_str() {
+            out.extend(split_text_names(s));
+            continue;
+        }
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
+        // Segmented text shape from the search endpoint: `{"type": "text",
+        // "text": "Alice, Bob"}`. Treat the text portion the same way as a
+        // plain Text field so comma-separated names split correctly.
+        if obj.get("type").and_then(Value::as_str) == Some("text") {
+            if let Some(t) = obj.get("text").and_then(Value::as_str) {
+                out.extend(split_text_names(t));
+                continue;
+            }
+        }
+        let name = obj
+            .get("name")
+            .or_else(|| obj.get("en_name"))
+            .or_else(|| obj.get("text"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(n) = name {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// Splits a free-text PIC value (Text-field case) into individual names.
+/// Recognises `,`, `;`, `/`, `&`, and ` and ` as separators — covers the
+/// usual ways people type multiple assignees in a plain text cell.
+fn split_text_names(s: &str) -> Vec<String> {
+    s.split([',', ';', '/', '&'])
+        .flat_map(|chunk| chunk.split(" and "))
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 pub(crate) struct BitableSchemaDetector {
@@ -286,6 +510,7 @@ impl BitableSchemaDetector {
                 field_name: f.field_name.clone(),
             }),
             order: None,
+            pic: None,
         };
         Ok(ProposedMapping {
             fields,
@@ -346,6 +571,245 @@ mod tests {
         let err = resolve_title(&r, &m, Some("Task name")).unwrap_err();
         assert!(err.to_string().contains("missing title"));
         assert!(err.to_string().contains("r1"));
+    }
+
+    // ── resolve_pic tests ──────────────────────────────────────────────────
+
+    fn pic_mapping(name: &str) -> FieldMapping {
+        FieldMapping {
+            title: FieldRef {
+                field_id: "fld_t".into(),
+                field_name: "Task name".into(),
+            },
+            pic: Some(FieldRef {
+                field_id: "fld_pic".into(),
+                field_name: name.into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_pic_returns_empty_when_pic_unmapped() {
+        let r = rec("r1", serde_json::json!({"PIC": [{"name": "Alice"}]}));
+        let m = title_mapping("Task name");
+        assert!(resolve_pic(&r, &m).is_empty());
+    }
+
+    #[test]
+    fn resolve_pic_returns_empty_when_field_missing_from_record() {
+        let r = rec("r1", serde_json::json!({"Task name": "x"}));
+        let m = pic_mapping("PIC");
+        assert!(resolve_pic(&r, &m).is_empty());
+    }
+
+    #[test]
+    fn resolve_pic_extracts_names_from_list_endpoint_array() {
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "PIC": [
+                    {"id": "ou_a", "name": "Alice"},
+                    {"id": "ou_b", "name": "Bob"}
+                ]
+            }),
+        );
+        let m = pic_mapping("PIC");
+        assert_eq!(
+            resolve_pic(&r, &m),
+            vec!["Alice".to_string(), "Bob".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_pic_falls_back_to_en_name_then_text() {
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "PIC": [
+                    {"id": "ou_a", "en_name": "Alice"},
+                    {"id": "ou_b", "text": "Bob"},
+                    {"id": "ou_c"}
+                ]
+            }),
+        );
+        let m = pic_mapping("PIC");
+        assert_eq!(
+            resolve_pic(&r, &m),
+            vec!["Alice".to_string(), "Bob".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_pic_handles_single_user_object_shape() {
+        let r = rec(
+            "r1",
+            serde_json::json!({"PIC": {"id": "ou_a", "name": "Alice"}}),
+        );
+        let m = pic_mapping("PIC");
+        assert_eq!(resolve_pic(&r, &m), vec!["Alice".to_string()]);
+    }
+
+    #[test]
+    fn resolve_pic_handles_plain_text_single_name() {
+        let r = rec("r1", serde_json::json!({"PIC": "Alice"}));
+        let m = pic_mapping("PIC");
+        assert_eq!(resolve_pic(&r, &m), vec!["Alice".to_string()]);
+    }
+
+    #[test]
+    fn resolve_pic_splits_plain_text_comma_separated() {
+        let r = rec(
+            "r1",
+            serde_json::json!({"PIC": "Alice, Bob; Carol / Dan & Eve"}),
+        );
+        let m = pic_mapping("PIC");
+        assert_eq!(
+            resolve_pic(&r, &m),
+            vec![
+                "Alice".to_string(),
+                "Bob".to_string(),
+                "Carol".to_string(),
+                "Dan".to_string(),
+                "Eve".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_pic_splits_plain_text_on_and() {
+        let r = rec("r1", serde_json::json!({"PIC": "Alice and Bob"}));
+        let m = pic_mapping("PIC");
+        assert_eq!(
+            resolve_pic(&r, &m),
+            vec!["Alice".to_string(), "Bob".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_pic_handles_segmented_text_from_search_endpoint() {
+        // Search endpoint returns Text fields as `[{"type": "text", "text": "..."}]`.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "PIC": [{"type": "text", "text": "Alice, Bob"}]
+            }),
+        );
+        let m = pic_mapping("PIC");
+        assert_eq!(
+            resolve_pic(&r, &m),
+            vec!["Alice".to_string(), "Bob".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_pic_skips_empty_and_whitespace_names() {
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "PIC": [
+                    {"id": "ou_a", "name": ""},
+                    {"id": "ou_b", "name": "  "},
+                    {"id": "ou_c", "name": "Carol"}
+                ]
+            }),
+        );
+        let m = pic_mapping("PIC");
+        assert_eq!(resolve_pic(&r, &m), vec!["Carol".to_string()]);
+    }
+
+    // ── extract_text unit tests ─────────────────────────────────────────────
+
+    #[test]
+    fn extract_text_handles_plain_string_from_list_endpoint() {
+        let value = serde_json::json!("Hello world");
+        assert_eq!(extract_text(&value), Some("Hello world".to_string()));
+    }
+
+    #[test]
+    fn extract_text_handles_segmented_array_from_search_endpoint() {
+        let value = serde_json::json!([
+            { "text": "Hello ", "type": "text" },
+            { "text": "world", "type": "text" }
+        ]);
+        assert_eq!(extract_text(&value), Some("Hello world".to_string()));
+    }
+
+    #[test]
+    fn extract_text_returns_none_for_null() {
+        let value = serde_json::Value::Null;
+        assert_eq!(extract_text(&value), None);
+    }
+
+    #[test]
+    fn extract_text_returns_none_for_empty_array() {
+        let value = serde_json::json!([]);
+        assert_eq!(extract_text(&value), None);
+    }
+
+    #[test]
+    fn extract_text_returns_none_for_array_without_text_keys() {
+        let value = serde_json::json!([{ "type": "user", "id": "ou_x" }]);
+        assert_eq!(extract_text(&value), None);
+    }
+
+    #[test]
+    fn extract_text_returns_none_for_empty_string() {
+        let value = serde_json::json!("   ");
+        assert_eq!(extract_text(&value), None);
+    }
+
+    // ── resolve_title with search-endpoint segmented array shape ────────────
+
+    #[test]
+    fn resolve_title_handles_segmented_array_from_search_endpoint() {
+        // The search endpoint returns text fields as segmented arrays.
+        // Before the fix, read_string_by_name called .as_str() which returned
+        // None for arrays, causing every search-result record to be skipped.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task name": [{ "text": "User bisa filter", "type": "text" }]
+            }),
+        );
+        let m = title_mapping("Task name");
+        assert_eq!(resolve_title(&r, &m, None).unwrap(), "User bisa filter");
+    }
+
+    #[test]
+    fn resolve_title_falls_back_to_segmented_primary_field() {
+        // Primary field also returns segmented shape from search endpoint.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "title": "",
+                "Task name": [
+                    { "text": "User bisa mendapatkan narasi", "type": "text" },
+                    { "text": " lebih lanjut", "type": "text" }
+                ]
+            }),
+        );
+        let m = title_mapping("title");
+        assert_eq!(
+            resolve_title(&r, &m, Some("Task name")).unwrap(),
+            "User bisa mendapatkan narasi lebih lanjut"
+        );
+    }
+
+    #[test]
+    fn resolve_title_handles_both_plain_string_and_segmented_parity() {
+        // Both shapes should yield the same title string — confirming list and
+        // search endpoint records are parsed identically.
+        let plain = rec("r1", serde_json::json!({"Task name": "User bisa filter"}));
+        let segmented = rec(
+            "r2",
+            serde_json::json!({"Task name": [{"text": "User bisa filter", "type": "text"}]}),
+        );
+        let m = title_mapping("Task name");
+        assert_eq!(
+            resolve_title(&plain, &m, None).unwrap(),
+            resolve_title(&segmented, &m, None).unwrap()
+        );
     }
 
     #[test]
@@ -539,7 +1003,8 @@ mod tests {
             default_column: KanbanColumn::Review,
             ..Default::default()
         };
-        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::Review);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::Review);
     }
 
     #[test]
@@ -555,7 +1020,8 @@ mod tests {
             default_column: KanbanColumn::Todo,
         };
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::Done);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::Done);
     }
 
     #[test]
@@ -563,7 +1029,8 @@ mod tests {
         let r = rec("r1", serde_json::json!({"Task Status": "In Progress"}));
         let v = StatusValueMapping::default();
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::InProgress);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::InProgress);
     }
 
     #[test]
@@ -574,7 +1041,8 @@ mod tests {
             ..Default::default()
         };
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::Review);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::Review);
     }
 
     #[test]
@@ -590,7 +1058,8 @@ mod tests {
             default_column: KanbanColumn::Todo,
         };
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::Done);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::Done);
     }
 
     #[test]
@@ -601,7 +1070,296 @@ mod tests {
             ..Default::default()
         };
         let m = status_mapping();
-        assert_eq!(resolve_status(&r, &m, &v), KanbanColumn::InProgress);
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::InProgress);
+    }
+
+    // ── extract_single_select unit tests ────────────────────────────────────
+
+    #[test]
+    fn extract_single_select_plain_string() {
+        let value = serde_json::json!("In Progress");
+        let result = extract_single_select(&value);
+        assert_eq!(result, Some((None, "In Progress".to_string())));
+    }
+
+    #[test]
+    fn extract_single_select_object_with_text_and_id() {
+        let value = serde_json::json!({"id": "opt_abc", "text": "Done"});
+        let result = extract_single_select(&value);
+        assert_eq!(
+            result,
+            Some((Some("opt_abc".to_string()), "Done".to_string()))
+        );
+    }
+
+    #[test]
+    fn extract_single_select_object_with_name_and_id() {
+        let value = serde_json::json!({"id": "opt_xyz", "name": "Review"});
+        let result = extract_single_select(&value);
+        assert_eq!(
+            result,
+            Some((Some("opt_xyz".to_string()), "Review".to_string()))
+        );
+    }
+
+    #[test]
+    fn extract_single_select_array_with_option_object() {
+        let value = serde_json::json!([{"id": "opt_ip", "text": "In Progress"}]);
+        let result = extract_single_select(&value);
+        assert_eq!(
+            result,
+            Some((Some("opt_ip".to_string()), "In Progress".to_string()))
+        );
+    }
+
+    #[test]
+    fn extract_single_select_segmented_text_array() {
+        let value = serde_json::json!([
+            {"text": "In ", "type": "text"},
+            {"text": "Progress", "type": "text"}
+        ]);
+        let result = extract_single_select(&value);
+        assert_eq!(result, Some((None, "In Progress".to_string())));
+    }
+
+    // ── Lookup field wrapper tests ──────────────────────────────────────────
+
+    #[test]
+    fn extract_single_select_unwraps_lookup_wrapper_with_singleselect_inner() {
+        // Lark Lookup field shape: { "type": 3, "value": ["Done"] }
+        let value = serde_json::json!({
+            "type": 3,
+            "value": ["Done"]
+        });
+        let result = extract_single_select(&value);
+        assert_eq!(result, Some((None, "Done".to_string())));
+    }
+
+    #[test]
+    fn extract_single_select_unwraps_lookup_wrapper_with_multi_value() {
+        // Lookup may return multiple resolved values; we take the first.
+        let value = serde_json::json!({
+            "type": 3,
+            "value": ["In Progress", "Done"]
+        });
+        let result = extract_single_select(&value);
+        assert_eq!(result, Some((None, "In Progress".to_string())));
+    }
+
+    #[test]
+    fn extract_single_select_handles_plain_string_array() {
+        // Plain-string array (e.g. after Lookup wrapper is unwrapped)
+        let value = serde_json::json!(["Done"]);
+        let result = extract_single_select(&value);
+        assert_eq!(result, Some((None, "Done".to_string())));
+    }
+
+    #[test]
+    fn extract_single_select_returns_none_for_lookup_wrapper_with_empty_value() {
+        let value = serde_json::json!({ "type": 3, "value": [] });
+        let result = extract_single_select(&value);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn resolve_status_handles_lookup_wrapped_status_field() {
+        // Lark Lookup field returns { "type": 3, "value": ["Done"] }.
+        // With no entries configured (Lookup fields can't populate the wizard),
+        // resolution must fall through to the fuzzy English parser.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task Status": { "type": 3, "value": ["Done"] }
+            }),
+        );
+        let v = StatusValueMapping {
+            entries: std::collections::HashMap::new(),
+            default_column: KanbanColumn::Todo,
+        };
+        let m = status_mapping();
+        let (col, path) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::Done);
+        assert_eq!(path, "fuzzy-parse");
+    }
+
+    #[test]
+    fn resolve_status_handles_segmented_array_from_search_endpoint() {
+        // The search endpoint returns SingleSelect as a segmented text array.
+        // Before the fix, this would fall through to default_column.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task Status": [{"text": "In Progress", "type": "text"}]
+            }),
+        );
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("opt_ip".into(), KanbanColumn::InProgress);
+        let v = StatusValueMapping {
+            entries,
+            default_column: KanbanColumn::Todo,
+        };
+        let m = status_mapping();
+        // "In Progress" is recognized by the fuzzy parser even without an id match
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::InProgress);
+    }
+
+    #[test]
+    fn resolve_status_handles_array_option_object_from_search_endpoint() {
+        // Array of option objects shape: [{id, text}]
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task Status": [{"id": "opt_done", "text": "Done"}]
+            }),
+        );
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("opt_done".into(), KanbanColumn::Done);
+        let v = StatusValueMapping {
+            entries,
+            default_column: KanbanColumn::Todo,
+        };
+        let m = status_mapping();
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::Done);
+    }
+
+    // ── Step 3: new tests for the name-lookup fallback chain ────────────────
+
+    #[test]
+    fn resolve_status_falls_back_to_name_lookup_via_status_options() {
+        // Scenario: search endpoint returns segmented text `[{text, type}]`
+        // so extract_single_select yields (None, "In Progress"). The option id
+        // is absent in `entries` keys (they're ids), so fuzzy fails for a custom
+        // label. But status_options has the canonical id for "In Progress", which
+        // IS in entries — so we should resolve to InProgress.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task Status": [{"text": "In Progress", "type": "text"}]
+            }),
+        );
+        let mut entries = std::collections::HashMap::new();
+        // Key is option id, NOT the name — that's what the binding wizard stores.
+        entries.insert("opt_x".into(), KanbanColumn::InProgress);
+        let v = StatusValueMapping {
+            entries,
+            default_column: KanbanColumn::Todo,
+        };
+        let opts = vec![BitableOption {
+            id: "opt_x".into(),
+            name: "In Progress".into(),
+        }];
+        let m = status_mapping();
+        // Without status_options the fuzzy parser still handles "In Progress",
+        // but with a custom label like "Sedang Berjalan" only the options lookup
+        // would succeed. This test uses "In Progress" to confirm the path works.
+        let (col, _) = resolve_status(&r, &m, &v, &opts);
+        assert_eq!(col, KanbanColumn::InProgress);
+    }
+
+    #[test]
+    fn resolve_status_falls_back_to_name_lookup_for_custom_untranslatable_label() {
+        // A custom Bitable label that the fuzzy parser doesn't recognise.
+        // The option id IS in entries; status_options provides the name→id link.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task Status": [{"text": "Sedang Berjalan", "type": "text"}]
+            }),
+        );
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("opt_x".into(), KanbanColumn::InProgress);
+        let v = StatusValueMapping {
+            entries,
+            default_column: KanbanColumn::Todo,
+        };
+        let opts = vec![BitableOption {
+            id: "opt_x".into(),
+            name: "Sedang Berjalan".into(),
+        }];
+        let m = status_mapping();
+        let (col, _) = resolve_status(&r, &m, &v, &opts);
+        assert_eq!(col, KanbanColumn::InProgress);
+    }
+
+    #[test]
+    fn resolve_status_falls_back_to_case_insensitive_name_match_on_entries() {
+        // Legacy bindings where the wizard stored option names as entry keys
+        // instead of option ids. Case-insensitive comparison should match.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task Status": "in progress"
+            }),
+        );
+        let mut entries = std::collections::HashMap::new();
+        // Key is the option name with Title Case — legacy binding artifact.
+        entries.insert("In Progress".into(), KanbanColumn::InProgress);
+        let v = StatusValueMapping {
+            entries,
+            default_column: KanbanColumn::Todo,
+        };
+        let m = status_mapping();
+        // fuzzy parse("in progress") → InProgress, so this also exercises
+        // the fuzzy path; to isolate the case-insensitive key path we use
+        // a value that fuzzy doesn't handle:
+        let r2 = rec(
+            "r2",
+            serde_json::json!({
+                "Task Status": "sedang berjalan"
+            }),
+        );
+        let mut entries2 = std::collections::HashMap::new();
+        entries2.insert("Sedang Berjalan".into(), KanbanColumn::InProgress);
+        let v2 = StatusValueMapping {
+            entries: entries2,
+            default_column: KanbanColumn::Todo,
+        };
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::InProgress);
+        let (col2, _) = resolve_status(&r2, &m, &v2, &[]);
+        assert_eq!(col2, KanbanColumn::InProgress);
+    }
+
+    #[test]
+    fn resolve_status_returns_default_when_no_match() {
+        // Empty entries, no status_options, non-fuzzy label → default_column.
+        let r = rec(
+            "r1",
+            serde_json::json!({
+                "Task Status": "some_unknown_xyz_label"
+            }),
+        );
+        let v = StatusValueMapping {
+            entries: std::collections::HashMap::new(),
+            default_column: KanbanColumn::Review,
+        };
+        let m = status_mapping();
+        let (col, _) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::Review);
+    }
+
+    #[test]
+    fn resolve_status_returns_id_exact_path_tag_when_id_matches() {
+        // When the option id from the record is present in entries, the function
+        // must return the "id-exact" path tag — confirming short-circuit on the
+        // fastest resolution path.
+        let r = rec(
+            "r1",
+            serde_json::json!({"Task Status": {"id": "opt_ip", "text": "Anything"}}),
+        );
+        let mut entries = std::collections::HashMap::new();
+        entries.insert("opt_ip".into(), KanbanColumn::InProgress);
+        let v = StatusValueMapping {
+            entries,
+            default_column: KanbanColumn::Todo,
+        };
+        let m = status_mapping();
+        let (col, path) = resolve_status(&r, &m, &v, &[]);
+        assert_eq!(col, KanbanColumn::InProgress);
+        assert_eq!(path, "id-exact");
     }
 
     #[test]

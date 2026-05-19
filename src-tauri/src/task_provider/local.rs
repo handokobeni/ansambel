@@ -89,6 +89,7 @@ impl TaskProvider for LocalProvider {
             order: max_order + 1024,
             created_at: now,
             updated_at: now,
+            pic_names: Vec::new(),
         };
         map.insert(task.id.clone(), task.clone());
         save_tasks(&self.data_dir, &map)?;

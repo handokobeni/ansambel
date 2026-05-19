@@ -38,6 +38,7 @@ fn maybe_migrate_to_per_repo_binding(
     let binding = crate::state::BitableBinding {
         app_token,
         table_id,
+        filters: crate::state::FilterSpec::default(),
         field_mapping: crate::state::FieldMapping {
             title: crate::state::FieldRef {
                 field_id: "PENDING_RESOLVE".into(),
@@ -46,6 +47,7 @@ fn maybe_migrate_to_per_repo_binding(
             description: None,
             status: None,
             order: None,
+            pic: None,
         },
         status_value_mapping: crate::state::StatusValueMapping::default(),
         created_at: std::time::SystemTime::now()
@@ -95,6 +97,11 @@ pub fn run() {
             // per-repo binding for the currently selected repo. Must run before
             // `settings` is moved into AppState.
             let migrated = maybe_migrate_to_per_repo_binding(&data_dir, &settings);
+
+            // Bump lark binding schema v1 → v3 (no v2 ever shipped).
+            if let Err(e) = persistence::lark_repo_bindings::migrate_v1_to_v3(&data_dir) {
+                tracing::warn!("lark binding schema migration failed: {e}");
+            }
 
             let state = crate::state::AppState {
                 repos,
@@ -253,6 +260,9 @@ pub fn run() {
             crate::commands::lark_repo_binding::delete_lark_repo_binding,
             crate::commands::lark_repo_binding::list_lark_repo_bindings,
             crate::commands::lark_repo_binding::detect_lark_schema,
+            crate::commands::lark_repo_binding::list_lark_fields,
+            crate::commands::lark_repo_binding::list_lark_person_options,
+            crate::commands::lark_repo_binding::list_lark_lookup_options,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -412,6 +422,7 @@ mod migration_tests {
         crate::state::BitableBinding {
             app_token: "x".into(),
             table_id: "y".into(),
+            filters: crate::state::FilterSpec::default(),
             field_mapping: crate::state::FieldMapping {
                 title: crate::state::FieldRef {
                     field_id: "fld_t".into(),
@@ -420,6 +431,7 @@ mod migration_tests {
                 description: None,
                 status: None,
                 order: None,
+                pic: None,
             },
             status_value_mapping: crate::state::StatusValueMapping::default(),
             created_at: 0,
@@ -760,5 +772,183 @@ mod migration_tests {
         let tasks = provider.list_tasks(Some("repo_x")).await.unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Primary-fallback task");
+    }
+
+    #[test]
+    fn setup_bumps_schema_to_v3_on_legacy_v1_file() {
+        use crate::persistence::lark_repo_bindings::{load_bindings, migrate_v1_to_v3};
+        use crate::platform::paths::lark_repo_bindings_file;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = lark_repo_bindings_file(tmp.path());
+        std::fs::write(&path, r#"{"schema_version":1,"bindings":{}}"#).unwrap();
+
+        let v = migrate_v1_to_v3(tmp.path()).unwrap();
+        assert_eq!(v, 3);
+        assert_eq!(load_bindings(tmp.path()).unwrap().schema_version, 3);
+    }
+
+    // ── Integration: filter routing end-to-end via LarkProvider ─────────────
+
+    #[tokio::test]
+    async fn binding_with_filters_hydrates_via_search_endpoint() {
+        use crate::state::{FilterCondition, FilterConjunction, FilterOperator, FilterSpec};
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        mount_token(&mock).await;
+
+        // Fields endpoint is called twice by LarkProvider:
+        // once for `field_name_by_id` (filter name refresh) and
+        // once for `primary_field_name` (title fallback). Mount without
+        // an expect count so both hits are satisfied.
+        Mock::given(method("GET"))
+            .and(path("/open-apis/bitable/v1/apps/appA/tables/tblA/fields"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": { "items": [
+                    { "field_id": "fld_title", "field_name": "Title", "type": 1,
+                      "is_primary": true, "property": null },
+                    { "field_id": "fld_status", "field_name": "Status", "type": 3,
+                      "is_primary": false, "property": null }
+                ], "has_more": false, "page_token": null }
+            })))
+            .mount(&mock)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
+            ))
+            .and(body_partial_json(serde_json::json!({
+                "filter": {
+                    "conjunction": "and",
+                    "conditions": [
+                        { "field_name": "Status", "operator": "is", "value": ["Done"] }
+                    ]
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": {
+                    "items": [
+                        { "record_id": "rec_done_1",
+                          "fields": { "Title": "Task A", "Status": "Done" } }
+                    ],
+                    "has_more": false, "page_token": null, "total": 1
+                }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let client = std::sync::Arc::new(crate::platform::lark_client::LarkClient::new(
+            crate::platform::lark_client::LarkConfig {
+                app_id: "id".into(),
+                app_secret: "sec".into(),
+                app_token: "appA".into(),
+                table_id: "tblA".into(),
+                base_url: mock.uri(),
+            },
+        ));
+        let provider = crate::task_provider::lark::LarkProvider::new(
+            client,
+            "appA".into(),
+            "tblA".into(),
+            FilterSpec {
+                conjunction: FilterConjunction::And,
+                conditions: vec![FilterCondition {
+                    field_id: "fld_status".into(),
+                    field_name: "Status".into(),
+                    operator: FilterOperator::Is,
+                    value: vec!["Done".into()],
+                }],
+            },
+            crate::state::FieldMapping {
+                title: crate::state::FieldRef {
+                    field_id: "fld_title".into(),
+                    field_name: "Title".into(),
+                },
+                description: None,
+                status: Some(crate::state::FieldRef {
+                    field_id: "fld_status".into(),
+                    field_name: "Status".into(),
+                }),
+                order: None,
+                pic: None,
+            },
+            crate::state::StatusValueMapping::default(),
+        );
+
+        use crate::task_provider::TaskProvider;
+        let tasks = provider.list_tasks(Some("repo-x")).await.unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Task A");
+    }
+
+    #[tokio::test]
+    async fn binding_with_empty_filters_uses_list_endpoint() {
+        use crate::state::{FilterConjunction, FilterSpec};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        mount_token(&mock).await;
+
+        Mock::given(method("GET"))
+            .and(path("/open-apis/bitable/v1/apps/appA/tables/tblA/records"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok",
+                "data": { "items": [
+                    { "record_id": "rec1", "fields": { "Title": "Any" } }
+                ], "has_more": false, "page_token": "", "total": 1 }
+            })))
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        // Search endpoint must NOT be called when filters are empty.
+        Mock::given(method("POST"))
+            .and(path(
+                "/open-apis/bitable/v1/apps/appA/tables/tblA/records/search",
+            ))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock)
+            .await;
+
+        let client = std::sync::Arc::new(crate::platform::lark_client::LarkClient::new(
+            crate::platform::lark_client::LarkConfig {
+                app_id: "id".into(),
+                app_secret: "sec".into(),
+                app_token: "appA".into(),
+                table_id: "tblA".into(),
+                base_url: mock.uri(),
+            },
+        ));
+        let provider = crate::task_provider::lark::LarkProvider::new(
+            client,
+            "appA".into(),
+            "tblA".into(),
+            FilterSpec {
+                conjunction: FilterConjunction::And,
+                conditions: vec![],
+            },
+            crate::state::FieldMapping {
+                title: crate::state::FieldRef {
+                    field_id: "fld_title".into(),
+                    field_name: "Title".into(),
+                },
+                description: None,
+                status: None,
+                order: None,
+                pic: None,
+            },
+            crate::state::StatusValueMapping::default(),
+        );
+
+        use crate::task_provider::TaskProvider;
+        let tasks = provider.list_tasks(Some("repo-x")).await.unwrap();
+        assert_eq!(tasks.len(), 1);
     }
 }

@@ -455,11 +455,13 @@ describe('api.lark', () => {
     const binding: BitableBinding = {
       app_token: 'bascn',
       table_id: 'tbl',
+      filters: { conjunction: 'and', conditions: [] },
       field_mapping: {
         title: { field_id: 'fld_t', field_name: 'Task name' },
         description: null,
         status: null,
         order: null,
+        pic: null,
       },
       status_value_mapping: { entries: {}, default_column: 'todo' },
       created_at: 0,
@@ -495,6 +497,7 @@ describe('api.lark', () => {
         description: null,
         status: null,
         order: null,
+        pic: null,
       },
       status_options: null,
       suggested_status_values: { entries: {}, default_column: 'todo' },
@@ -504,6 +507,21 @@ describe('api.lark', () => {
       appToken: 'bascn',
       tableId: 'tbl',
     });
+  });
+});
+
+describe('api.lark.listFields', () => {
+  it('invokes list_lark_fields with camelCase params and returns BitableField[]', async () => {
+    vi.mocked(invoke).mockResolvedValue([
+      { field_id: 'fld1', field_name: 'Title', type: 1, is_primary: true, property: null },
+    ]);
+    const result = await api.lark.listFields('appA', 'tblA');
+    expect(invoke).toHaveBeenCalledWith('list_lark_fields', {
+      appToken: 'appA',
+      tableId: 'tblA',
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0].field_name).toBe('Title');
   });
 });
 

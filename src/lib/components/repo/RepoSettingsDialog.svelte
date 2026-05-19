@@ -2,6 +2,7 @@
 <script lang="ts">
   import LarkBindingWizard from '$lib/components/lark/LarkBindingWizard.svelte';
   import { larkBindings } from '$lib/stores/lark-bindings.svelte';
+  import { tasks } from '$lib/stores/tasks.svelte';
   import { addToast } from '$lib/stores/toasts.svelte';
   import type { BitableBinding } from '$lib/types';
 
@@ -21,7 +22,6 @@
   let confirmDisconnect = $state(false);
 
   const binding = $derived(larkBindings.get(repoId));
-  const isConnected = $derived(!!binding);
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
@@ -36,6 +36,14 @@
     await larkBindings.setBinding(repoId, b);
     editingBinding = false;
     addToast(`Bitable connected for ${repoName}`, 'success');
+    // Backend rebuilds the LarkProvider on setBinding, but cached task rows
+    // still reflect the OLD field mapping. Refetch so newly-mapped fields
+    // (PIC, description, etc.) appear immediately without an app restart.
+    try {
+      await tasks.loadForRepo(repoId);
+    } catch (err) {
+      addToast(`Reload tasks failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
+    }
   }
 
   async function handleDisconnect() {
@@ -101,7 +109,7 @@
             onSave={handleSaveBinding}
             onCancel={() => (editingBinding = false)}
           />
-        {:else if isConnected && binding}
+        {:else if binding}
           <div class="flex flex-col gap-2 text-xs" data-testid="binding-summary">
             <div class="text-[var(--text-primary)]">✓ Connected: {binding.table_id}</div>
             <div class="text-[var(--text-muted)] text-[11px]">
