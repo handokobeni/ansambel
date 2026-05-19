@@ -1,6 +1,18 @@
 import { SvelteMap } from 'svelte/reactivity';
 import type { AgentEvent, AgentStatus, Attachment, Message, TurnState } from '../types';
 
+// TODO(phase-3a-3-publisher): Task 14 ships the frontend mirror of the
+// Rust credential sanitiser at `src/lib/sanitize.ts`. The current
+// messages flow has the backend (`agent_core` → `MessageWriter`) own
+// `messages.jsonl` so messages from the agent never round-trip through
+// the frontend before persisting — the backend's `sanitize_message_preview`
+// already covers them. If a future surface ever has the frontend write
+// previews directly (e.g., a "draft last response" feature or a
+// re-edit pipeline), call `sanitizeMessagePreview(text, 200)` here
+// before `upsert(...)` so the redacted form is what lands in the store
+// AND on disk. For now this is a no-op note; the publisher's backend
+// sanitiser is the active safety net.
+
 class MessagesStore {
   readonly byWorkspace = new SvelteMap<string, SvelteMap<string, Message>>();
   readonly status = new SvelteMap<string, AgentStatus>();
