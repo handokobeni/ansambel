@@ -344,6 +344,11 @@
         </div>
       </div>
 
+      <!-- Loading fields placeholder -->
+      {#if !fieldsLoaded}
+        <div class="px-4 py-3 text-xs text-[var(--text-muted)] italic">Loading fields…</div>
+      {/if}
+
       <!-- Conditions list -->
       <div class="flex flex-col divide-y divide-[var(--border)]">
         {#each filters.conditions as cond, idx (cond.field_id + idx)}
@@ -435,8 +440,8 @@
                       <option value={opt.open_id}>{opt.name}</option>
                     {/each}
                   </select>
-                {:else}
-                  <!-- Fallback: text input while loading or on error -->
+                {:else if personOptionsFailed.has(cond.field_name)}
+                  <!-- Fallback: text input on error -->
                   <input
                     type="text"
                     aria-label="value"
@@ -444,10 +449,29 @@
                     onchange={(e) => changeValue(idx, e.currentTarget.value)}
                     class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                   />
+                {:else if personOptionsCache.has(cond.field_name)}
+                  <!-- Fetched but empty (unusual) — fall back to text input -->
+                  <input
+                    type="text"
+                    aria-label="value"
+                    value={cond.value[0] ?? ''}
+                    onchange={(e) => changeValue(idx, e.currentTarget.value)}
+                    class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  />
+                {:else}
+                  <!-- Still loading: show placeholder -->
+                  <span
+                    class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs italic text-[var(--text-muted)]"
+                    data-testid="person-loading"
+                  >
+                    Loading options…
+                  </span>
                 {/if}
               {:else if fieldType === 19}
-                <!-- Lookup (type 19) → <select> when chain resolves to SingleSelect;
-                     value is option_id (Lark records store Lookup values as option_ids).
+                <!-- Lookup (type 19) → <select> when chain resolves to SingleSelect.
+                     value is the option NAME (Lark's records/search filter for
+                     Lookup→SingleSelect expects the display name string;
+                     option_id is rejected with InvalidFilter code 1254018).
                      Falls back to text input when options are empty/unresolved. -->
                 {@const lookupOpts = lookupOptionsCache.get(cond.field_id)}
                 {#if lookupOpts && lookupOpts.length > 0}
@@ -459,11 +483,11 @@
                     data-testid="lookup-select"
                   >
                     {#each lookupOpts as opt (opt.option_id)}
-                      <option value={opt.option_id}>{opt.name}</option>
+                      <option value={opt.name}>{opt.name}</option>
                     {/each}
                   </select>
-                {:else}
-                  <!-- Fallback: text input while loading or when chain doesn't resolve -->
+                {:else if lookupOptionsFailed.has(cond.field_id)}
+                  <!-- Fallback: text input on error -->
                   <input
                     type="text"
                     aria-label="value"
@@ -471,6 +495,23 @@
                     onchange={(e) => changeValue(idx, e.currentTarget.value)}
                     class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
                   />
+                {:else if lookupOptionsCache.has(cond.field_id)}
+                  <!-- Fetched but empty: chain doesn't resolve to SingleSelect — text input -->
+                  <input
+                    type="text"
+                    aria-label="value"
+                    value={cond.value[0] ?? ''}
+                    onchange={(e) => changeValue(idx, e.currentTarget.value)}
+                    class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs rounded-md border border-[var(--border-light)] bg-[var(--bg-base)] text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+                  />
+                {:else}
+                  <!-- Still loading: show placeholder -->
+                  <span
+                    class="flex-1 min-w-0 min-w-[10rem] px-2 py-1 text-xs italic text-[var(--text-muted)]"
+                    data-testid="lookup-loading"
+                  >
+                    Loading options…
+                  </span>
                 {/if}
               {:else}
                 <!-- Text (type 1), Formula (20), Created/Modified By (1003/1004), or unknown -->

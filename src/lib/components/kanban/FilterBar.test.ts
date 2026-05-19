@@ -1259,15 +1259,16 @@ describe('FilterBar new field types (Lookup, Formula, Created/Modified Time/By)'
     expect(screen.queryByText('In Progress')).toBeInTheDocument();
     expect(screen.queryByText('Upcoming +1')).toBeInTheDocument();
 
-    // Each <option> must use option_id as value (not name)
-    const doneOption = lookupSelect.querySelector('option[value="optDone"]') as HTMLOptionElement;
+    // Each <option> must use NAME as value (Lark records/search for
+    // Lookup→SingleSelect rejects option_id with InvalidFilter 1254018).
+    const doneOption = lookupSelect.querySelector('option[value="Done"]') as HTMLOptionElement;
     expect(doneOption).toBeTruthy();
     const inProgOption = lookupSelect.querySelector(
-      'option[value="optInProg"]'
+      'option[value="In Progress"]'
     ) as HTMLOptionElement;
     expect(inProgOption).toBeTruthy();
-    // Name must NOT be used as value
-    expect(lookupSelect.querySelector('option[value="Done"]')).toBeNull();
+    // option_id must NOT be used as value
+    expect(lookupSelect.querySelector('option[value="optDone"]')).toBeNull();
   });
 
   it('Lookup field falls back to text input when listLookupOptions returns empty', async () => {
@@ -1342,5 +1343,154 @@ describe('FilterBar new field types (Lookup, Formula, Created/Modified Time/By)'
     const optionValues = Array.from(fieldSelect.options).map((o) => o.value);
     // Lookup field must now appear in the picker
     expect(optionValues).toContain('fld_lookup');
+  });
+});
+
+// ─── 14. Loading placeholders ─────────────────────────────────────────────────
+
+describe('FilterBar loading placeholders', () => {
+  it('Shows "Loading fields…" placeholder while fields are being fetched', async () => {
+    // Use a slow-resolving promise so the popover renders before fields arrive
+    let resolveFields!: (v: never[]) => void;
+    const slowFields = new Promise<never[]>((res) => {
+      resolveFields = res;
+    });
+    vi.mocked(api.lark.listFields).mockReturnValueOnce(slowFields as never);
+
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fldT',
+              field_name: 'Title',
+              operator: 'is' as const,
+              value: ['x'],
+            },
+          ],
+        },
+      },
+    });
+
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+
+    // Placeholder must be visible before fields resolve
+    expect(screen.queryByText('Loading fields…')).toBeInTheDocument();
+
+    // Resolve the promise and let Svelte update
+    resolveFields([]);
+    await tick();
+    await tick();
+
+    // Placeholder must disappear once fields are loaded
+    expect(screen.queryByText('Loading fields…')).not.toBeInTheDocument();
+  });
+
+  it('Person field shows "Loading options…" while listPersonOptions is in flight', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fldPIC', field_name: 'PIC', type: 11, is_primary: false, property: null },
+    ]);
+
+    // Slow-resolving person options
+    let resolvePersonOpts!: (v: { open_id: string; name: string }[]) => void;
+    const slowPersonOpts = new Promise<{ open_id: string; name: string }[]>((res) => {
+      resolvePersonOpts = res;
+    });
+    vi.mocked(api.lark.listPersonOptions).mockReturnValueOnce(slowPersonOpts as never);
+
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fldPIC',
+              field_name: 'PIC',
+              operator: 'is' as const,
+              value: [''],
+            },
+          ],
+        },
+      },
+    });
+
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    // Wait for fields to load (but not person options yet)
+    await tick();
+    await tick();
+
+    // Loading placeholder must be visible while person options are still fetching
+    expect(screen.queryByText('Loading options…')).toBeInTheDocument();
+    expect(document.querySelector('[data-testid="person-select"]')).toBeNull();
+
+    // Resolve person options
+    resolvePersonOpts([{ open_id: 'ou_alice', name: 'Alice' }]);
+    await tick();
+    await tick();
+
+    // Placeholder disappears, select appears
+    expect(screen.queryByText('Loading options…')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-testid="person-select"]')).toBeTruthy();
+  });
+
+  it('Lookup field shows "Loading options…" while listLookupOptions is in flight', async () => {
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_lookup',
+        field_name: 'Sprint Status',
+        type: 19,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+
+    // Slow-resolving lookup options
+    let resolveLookupOpts!: (v: { option_id: string; name: string }[]) => void;
+    const slowLookupOpts = new Promise<{ option_id: string; name: string }[]>((res) => {
+      resolveLookupOpts = res;
+    });
+    vi.mocked(api.lark.listLookupOptions).mockReturnValueOnce(slowLookupOpts as never);
+
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_lookup',
+              field_name: 'Sprint Status',
+              operator: 'is' as const,
+              value: [''],
+            },
+          ],
+        },
+      },
+    });
+
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    // Wait for fields to load (but not lookup options yet)
+    await tick();
+    await tick();
+
+    // Loading placeholder must be visible while lookup options are still fetching
+    expect(screen.queryByText('Loading options…')).toBeInTheDocument();
+    expect(document.querySelector('[data-testid="lookup-select"]')).toBeNull();
+
+    // Resolve lookup options
+    resolveLookupOpts([
+      { option_id: 'optDone', name: 'Done' },
+      { option_id: 'optActive', name: 'Active' },
+    ]);
+    await tick();
+    await tick();
+
+    // Placeholder disappears, select appears
+    expect(screen.queryByText('Loading options…')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-testid="lookup-select"]')).toBeTruthy();
   });
 });
