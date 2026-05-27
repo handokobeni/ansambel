@@ -32,6 +32,12 @@ use tokio::sync::{broadcast, mpsc};
 /// `AgentHandle.event_tx` — slow consumers drop oldest with `Lagged`.
 const BROADCAST_CAPACITY: usize = 256;
 
+/// Maximum bytes kept in the per-terminal output ring buffer. On reattach
+/// the entire buffer is replayed to the new channel so a remounted xterm
+/// restores its visible scrollback. 256 KiB is plenty for a busy dev
+/// server without ballooning resident memory.
+const OUTPUT_BUFFER_CAP: usize = 256 * 1024;
+
 /// Default PTY dimensions when the frontend hasn't measured the
 /// container yet. xterm.js will call `terminal_resize` very shortly
 /// after attaching its FitAddon.
@@ -127,6 +133,7 @@ pub fn spawn_terminal_inner_with_pty(
     let (event_tx, event_rx) = broadcast::channel::<TerminalChunk>(BROADCAST_CAPACITY);
     let (stdin_tx, stdin_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let cancel = Arc::new(AtomicBool::new(false));
+    let output_buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
 
     spawn_writer_thread(writer, stdin_rx);
     spawn_reader_thread(
@@ -134,6 +141,7 @@ pub fn spawn_terminal_inner_with_pty(
         event_tx.clone(),
         Arc::clone(&cancel),
         Arc::clone(&session),
+        Arc::clone(&output_buffer),
     );
     // Windows ConPTY doesn't reliably deliver EOF when the child exits
     // cleanly (e.g., user types `exit\r`). The watchdog polls
@@ -147,6 +155,7 @@ pub fn spawn_terminal_inner_with_pty(
         event_tx,
         cancel,
         pty: session,
+        output_buffer,
     };
     state
         .lock()
@@ -215,13 +224,18 @@ pub fn kill_terminal_inner(terminal_id: &str, state: Arc<Mutex<AppState>>) -> Re
 pub fn reattach_terminal_inner(
     terminal_id: &str,
     state: Arc<Mutex<AppState>>,
-) -> Result<broadcast::Receiver<TerminalChunk>> {
+) -> Result<(Vec<u8>, broadcast::Receiver<TerminalChunk>)> {
     let st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
     let handle = st
         .terminals
         .get(terminal_id)
         .ok_or_else(|| AppError::NotFound(format!("no active terminal '{terminal_id}'")))?;
-    Ok(handle.event_tx.subscribe())
+    let snapshot = handle
+        .output_buffer
+        .lock()
+        .map(|b| b.clone())
+        .unwrap_or_default();
+    Ok((snapshot, handle.event_tx.subscribe()))
 }
 
 /// Kill every terminal belonging to a workspace. Used when the
@@ -313,8 +327,11 @@ pub async fn terminal_reattach(
     channel: Channel<TerminalChunk>,
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> std::result::Result<(), String> {
-    let rx =
+    let (snapshot, rx) =
         reattach_terminal_inner(&terminal_id, state.inner().clone()).map_err(|e| e.to_string())?;
+    if !snapshot.is_empty() {
+        let _ = channel.send(TerminalChunk::Bytes { bytes: snapshot });
+    }
     forward_to_channel(rx, channel);
     Ok(())
 }
@@ -399,6 +416,7 @@ fn spawn_reader_thread(
     event_tx: broadcast::Sender<TerminalChunk>,
     cancel: Arc<AtomicBool>,
     session: Arc<Mutex<Box<dyn pty::Pty + Send>>>,
+    output_buffer: Arc<Mutex<Vec<u8>>>,
 ) {
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -409,6 +427,16 @@ fn spawn_reader_thread(
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
+                    // Append to the ring buffer BEFORE broadcasting so
+                    // a concurrent reattach never misses bytes. Lock is
+                    // short — no blocking work while holding it.
+                    if let Ok(mut b) = output_buffer.lock() {
+                        b.extend_from_slice(&buf[..n]);
+                        let len = b.len();
+                        if len > OUTPUT_BUFFER_CAP {
+                            b.drain(0..len - OUTPUT_BUFFER_CAP);
+                        }
+                    }
                     let preview: String = buf[..n.min(80)]
                         .iter()
                         .map(|b| {
@@ -819,7 +847,7 @@ mod tests {
         // Subscribe a fresh receiver via reattach. Bytes pushed AFTER
         // the reattach must arrive on the new receiver — proves
         // reattach plugs into the broadcaster, not a private channel.
-        let rx = reattach_terminal_inner("ws_re", Arc::clone(&state)).unwrap();
+        let (_snapshot, rx) = reattach_terminal_inner("ws_re", Arc::clone(&state)).unwrap();
         mock.push_stdout(b"after-reattach\r\n");
         mock.set_exited(0);
 
@@ -900,6 +928,76 @@ mod tests {
             st.terminals.contains_key("term_b1"),
             "other workspace untouched"
         );
+    }
+
+    // ── output buffer / reattach replay ─────────────────────────────
+
+    #[test]
+    fn reattach_replays_recent_output_buffer() {
+        let (_tmp, wt) = make_worktree();
+        let state = make_state("ws_a", &wt);
+
+        let (mock, _handle) = crate::platform::pty::MockPty::new(1);
+        let rx = spawn_terminal_inner_with_pty(
+            "ws_a",
+            "term_1",
+            Box::new(mock),
+            80,
+            24,
+            Arc::clone(&state),
+        )
+        .unwrap();
+
+        // Push known bytes through the mock and wait until the broadcast
+        // delivers them — the same synchronization the existing streaming
+        // tests use via drain_until.
+        _handle.push_stdout(b"hello-from-dev-server");
+        let chunks = drain_until(rx, Duration::from_secs(3), |c| {
+            collected_bytes(c)
+                .windows(b"hello-from-dev-server".len())
+                .any(|w| w == b"hello-from-dev-server")
+        });
+        assert!(
+            collected_bytes(&chunks)
+                .windows(b"hello-from-dev-server".len())
+                .any(|w| w == b"hello-from-dev-server"),
+            "prerequisite: bytes must arrive on broadcast before testing buffer"
+        );
+
+        // Now reattach: the snapshot must contain the prior output.
+        let (snapshot, _rx2) = reattach_terminal_inner("term_1", Arc::clone(&state)).unwrap();
+        assert!(
+            String::from_utf8_lossy(&snapshot).contains("hello-from-dev-server"),
+            "reattach snapshot must replay recent output, got: {:?}",
+            String::from_utf8_lossy(&snapshot)
+        );
+
+        kill_terminal_inner("term_1", state).unwrap();
+    }
+
+    #[test]
+    fn reattach_terminal_inner_returns_snapshot_and_receiver() {
+        // Verify the new signature: Result<(Vec<u8>, Receiver)>.
+        let state = Arc::new(Mutex::new(AppState::default()));
+        let (initial_rx, mock) = spawn_with_mock("ws_sig", &state);
+
+        mock.push_stdout(b"sig-test");
+        // Drain on the initial receiver to ensure the reader thread has
+        // processed and buffered the bytes before we snapshot.
+        drain_until(initial_rx, Duration::from_secs(3), |c| {
+            collected_bytes(c)
+                .windows(b"sig-test".len())
+                .any(|w| w == b"sig-test")
+        });
+
+        let (snap, _rx2) = reattach_terminal_inner("ws_sig", Arc::clone(&state)).unwrap();
+        assert!(
+            String::from_utf8_lossy(&snap).contains("sig-test"),
+            "snapshot should contain sig-test, got: {:?}",
+            String::from_utf8_lossy(&snap)
+        );
+
+        kill_terminal_inner("ws_sig", state).unwrap();
     }
 
     #[test]

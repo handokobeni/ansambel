@@ -339,6 +339,10 @@ pub struct TerminalHandle {
     /// concrete PTY is `!Sync` (master is `Send` but not shared).
     /// Trait object so tests can inject `MockPty`.
     pub pty: std::sync::Arc<std::sync::Mutex<Box<dyn crate::platform::pty::Pty + Send>>>,
+    /// Bounded ring buffer of recent raw PTY output. Replayed to a fresh
+    /// channel on reattach so a remounted xterm restores its visible
+    /// scrollback (the broadcast itself does not replay history).
+    pub output_buffer: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
 /// Runtime-only handle to a spawned Claude agent process. Not persisted —
