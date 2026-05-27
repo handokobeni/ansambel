@@ -102,20 +102,28 @@ pub enum FetchResult {
 pub(crate) fn parse_record_to_row(
     record: crate::platform::lark_client::BitableRecord,
 ) -> TeamActivityRow {
+    use crate::task_provider::lark_field_resolver::{extract_single_select, extract_text};
     let f = &record.fields;
-    let s = |key: &str| -> String {
-        f.get(key)
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_default()
-    };
+    // The Bitable *search* endpoint returns text fields as segmented
+    // rich-text arrays (`[{"type":"text","text":"..."}]`), not the plain
+    // strings the list endpoint returns. `extract_text` handles both
+    // shapes; a naive `as_str()` silently drops every search-endpoint text
+    // field, which surfaces as empty rows in the Team Activity sidebar.
+    let s = |key: &str| -> String { f.get(key).and_then(extract_text).unwrap_or_default() };
     TeamActivityRow {
         workspace_id: s("workspace_id"),
         repo_remote_url: s("repo_remote_url"),
         repo_display_name: s("repo_display_name"),
         task_title: s("task_title"),
         assignee_machine: s("assignee_machine"),
-        ansambel_status: s("ansambel_status"),
+        // Single-select arrives as a bare string, an option object
+        // (`{"id","text"}`), or an array of either — `extract_single_select`
+        // normalises all three to the option's display text.
+        ansambel_status: f
+            .get("ansambel_status")
+            .and_then(extract_single_select)
+            .map(|(_, name)| name)
+            .unwrap_or_default(),
         last_activity_at: f
             .get("last_activity_at")
             .and_then(|v| v.as_i64())
@@ -439,7 +447,12 @@ fn snapshot_to_fields(snap: &RowSnapshot) -> serde_json::Map<String, serde_json:
         m.insert("diff_summary".into(), serde_json::json!(v));
     }
     if let Some(v) = &snap.pr_url {
-        m.insert("pr_url".into(), serde_json::json!(v));
+        // `pr_url` is a Bitable URL field (field_type 15), which the API
+        // only accepts as an object `{ "link", "text" }` — a bare string is
+        // rejected with 1254068 URLFieldConvFail, failing the whole row
+        // upsert. `text` doubles as the visible label; using the URL itself
+        // keeps the cell readable.
+        m.insert("pr_url".into(), serde_json::json!({ "link": v, "text": v }));
     }
     m.insert("private".into(), serde_json::json!(snap.private));
     m
@@ -723,6 +736,14 @@ pub(crate) async fn fetch_team_activity_rows_inner(
     let client = client.ok_or_else(|| {
         crate::error::AppError::Other("LarkClient required for non-disabled fetch".into())
     })?;
+    // The repo-overlap filter runs client-side (see below), NOT in this
+    // server filter. Lark's `is` operator only accepts a single value;
+    // `repo_remote_url is [urlA, urlB]` is rejected with 1254018
+    // InvalidFilter the moment a second repo is registered. The flat
+    // FilterSpec has no nested-OR group to express "is any of", so we let
+    // the server narrow by `assignee_machine` (teammate, not self) and
+    // intersect with the local repo set in Rust.
+    let local_repo_urls: std::collections::HashSet<String> = remote_urls.into_iter().collect();
     let filter = crate::state::FilterSpec {
         conjunction: crate::state::FilterConjunction::And,
         conditions: vec![
@@ -738,18 +759,30 @@ pub(crate) async fn fetch_team_activity_rows_inner(
                 operator: crate::state::FilterOperator::IsNot,
                 value: vec![cfg.machine_label.clone()],
             },
-            crate::state::FilterCondition {
-                field_id: String::new(),
-                field_name: "repo_remote_url".into(),
-                operator: crate::state::FilterOperator::Is,
-                value: remote_urls,
-            },
         ],
     };
     let records = client
         .bitable_search_records(&cfg.app_token, &cfg.table_id, &filter)
         .await?;
-    let rows = records.into_iter().map(parse_record_to_row).collect();
+    // Defense-in-depth privacy guard. The server-side filter excludes
+    // private workspaces indirectly: the publisher blanks `assignee_machine`
+    // when a workspace goes private, and `assignee_machine IsNotEmpty` drops
+    // those rows. That holds only if every writer is a current Ansambel
+    // publisher. A row carrying `private = true` with its columns still
+    // populated — manual Bitable edit, a publisher flush-lag window, or an
+    // older publisher — would otherwise leak. Dropping any flagged-private
+    // row here makes the read boundary the final authority on privacy,
+    // independent of how the row was written.
+    let rows = records
+        .into_iter()
+        .map(parse_record_to_row)
+        .filter(|r| !r.private)
+        // Repo-overlap filter (see the server-filter note above): keep only
+        // rows whose canonical `repo_remote_url` matches one of the user's
+        // locally-registered repos. Both sides are canonicalised by
+        // `canonicalise_remote_url`, so a direct set lookup is exact.
+        .filter(|r| local_repo_urls.contains(&r.repo_remote_url))
+        .collect();
     Ok(FetchResult::Rows { rows })
 }
 
@@ -1429,6 +1462,28 @@ mod tests {
         assert_eq!(fields.get("private"), Some(&serde_json::json!(true)));
     }
 
+    #[test]
+    fn snapshot_to_fields_serializes_pr_url_as_lark_url_field_object() {
+        // `pr_url` is created as a Bitable URL field (field_type 15). Writing
+        // a bare string makes Lark reject the *entire* upsert with
+        // 1254068 URLFieldConvFail — which also blocks every other column in
+        // the same row from updating. The URL field requires an object
+        // payload `{ "link", "text" }`.
+        let snap = RowSnapshot {
+            workspace_id: "ws_pr".into(),
+            pr_url: Some("https://github.com/o/r/pull/2".into()),
+            ..Default::default()
+        };
+        let fields = snapshot_to_fields(&snap);
+        assert_eq!(
+            fields.get("pr_url"),
+            Some(&serde_json::json!({
+                "link": "https://github.com/o/r/pull/2",
+                "text": "https://github.com/o/r/pull/2",
+            }))
+        );
+    }
+
     // ── build_lark_uploader integration (wiremock) ───────────────
 
     #[tokio::test]
@@ -1900,6 +1955,65 @@ mod tests {
     }
 
     #[test]
+    fn parse_record_to_row_extracts_segmented_array_shape_from_search_endpoint() {
+        // The Bitable *search* endpoint (the one the reader uses) returns
+        // text fields as segmented rich-text arrays — `[{"type":"text",
+        // "text":"..."}]` — not plain strings like the list endpoint. A
+        // naive `as_str()` parse silently drops every text field, which is
+        // exactly the "row shows up empty" bug. Single-select arrives as a
+        // bare option string. Date stays a millisecond number.
+        let record = crate::platform::lark_client::BitableRecord {
+            record_id: "recSeg".into(),
+            fields: serde_json::json!({
+                "workspace_id": [{"type": "text", "text": "ws_seg"}],
+                "repo_remote_url": [{"type": "text", "text": "https://github.com/x/y"}],
+                "repo_display_name": [{"type": "text", "text": "y"}],
+                "task_title": [{"type": "text", "text": "Fix bug"}],
+                "assignee_machine": [{"type": "text", "text": "alice@laptop"}],
+                "ansambel_status": "running",
+                "last_activity_at": 1_700_000_000_000_i64,
+                "last_message_preview": [{"type": "text", "text": "doing thing"}],
+                "branch_name": [{"type": "text", "text": "feat/x"}],
+                "diff_summary": [{"type": "text", "text": "+10 -3"}],
+                "pr_url": [{"type": "text", "text": "https://github.com/x/y/pull/42"}],
+                "private": false,
+            }),
+            extra: Default::default(),
+        };
+        let row = parse_record_to_row(record);
+        assert_eq!(row.workspace_id, "ws_seg");
+        assert_eq!(row.repo_remote_url, "https://github.com/x/y");
+        assert_eq!(row.repo_display_name, "y");
+        assert_eq!(row.task_title, "Fix bug");
+        assert_eq!(row.assignee_machine, "alice@laptop");
+        assert_eq!(row.ansambel_status, "running");
+        assert_eq!(row.last_activity_at, 1_700_000_000_000);
+        assert_eq!(row.last_message_preview, "doing thing");
+        assert_eq!(row.branch_name, "feat/x");
+        assert_eq!(row.diff_summary, "+10 -3");
+        assert_eq!(row.pr_url, "https://github.com/x/y/pull/42");
+        assert!(!row.private);
+    }
+
+    #[test]
+    fn parse_record_to_row_extracts_single_select_object_shape() {
+        // Single-select can also arrive as an option object
+        // `{"id":"opt_x","text":"pr_ready"}` (native search shape). The
+        // status must resolve to the option text, not empty.
+        let record = crate::platform::lark_client::BitableRecord {
+            record_id: "recSel".into(),
+            fields: serde_json::json!({
+                "workspace_id": [{"type": "text", "text": "ws_sel"}],
+                "ansambel_status": {"id": "optABC", "text": "pr_ready"},
+            }),
+            extra: Default::default(),
+        };
+        let row = parse_record_to_row(record);
+        assert_eq!(row.workspace_id, "ws_sel");
+        assert_eq!(row.ansambel_status, "pr_ready");
+    }
+
+    #[test]
     fn parse_record_to_row_defaults_missing_strings_to_empty() {
         let record = crate::platform::lark_client::BitableRecord {
             record_id: "recM".into(),
@@ -2212,6 +2326,229 @@ mod tests {
                 assert_eq!(rows.len(), 1);
                 assert_eq!(rows[0].workspace_id, "ws_remote");
                 assert_eq!(rows[0].assignee_machine, "bob@laptop");
+            }
+            other => panic!("expected Rows, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_team_activity_rows_inner_filters_repos_client_side_with_multiple_repos() {
+        // Regression: Lark's `is` operator rejects a multi-value array
+        // (`repo_remote_url is [urlA, urlB]` → 1254018 InvalidFilter), which
+        // broke the whole poll the moment a second repo was registered. The
+        // repo-overlap filter must therefore run client-side: the server
+        // filter keeps only the two `assignee_machine` conditions, and rows
+        // are narrowed to the local repo set in Rust.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok", "tenant_access_token": "tkn", "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        // The mock ignores the filter and returns three rows: two for local
+        // repos (bar, baz) and one for a repo the user does NOT have (other).
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(
+                r"^/open-apis/bitable/v1/apps/[^/]+/tables/[^/]+/records/search$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [
+                        { "record_id": "recBar", "fields": {
+                            "workspace_id": "ws_bar",
+                            "repo_remote_url": "https://github.com/foo/bar",
+                            "assignee_machine": "bob@laptop", "private": false } },
+                        { "record_id": "recBaz", "fields": {
+                            "workspace_id": "ws_baz",
+                            "repo_remote_url": "https://github.com/foo/baz",
+                            "assignee_machine": "carol@laptop", "private": false } },
+                        { "record_id": "recOther", "fields": {
+                            "workspace_id": "ws_other",
+                            "repo_remote_url": "https://github.com/foo/other",
+                            "assignee_machine": "dave@laptop", "private": false } },
+                    ],
+                    "has_more": false,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp_a = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(tmp_a.path(), "https://github.com/foo/bar.git");
+        let tmp_b = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(tmp_b.path(), "https://github.com/foo/baz.git");
+        let mk = |id: &str, name: &str, path: std::path::PathBuf| crate::state::RepoInfo {
+            id: id.into(),
+            name: name.into(),
+            path,
+            gh_profile: None,
+            default_branch: "main".into(),
+            created_at: 0,
+            updated_at: 0,
+            scripts: Vec::new(),
+        };
+        let state = Arc::new(std::sync::Mutex::new(crate::state::AppState {
+            repos: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "repo_a".into(),
+                    mk("repo_a", "bar", tmp_a.path().to_path_buf()),
+                );
+                m.insert(
+                    "repo_b".into(),
+                    mk("repo_b", "baz", tmp_b.path().to_path_buf()),
+                );
+                m
+            },
+            ..Default::default()
+        }));
+        let client = Arc::new(crate::platform::lark_client::LarkClient::new(
+            crate::platform::lark_client::LarkConfig {
+                app_id: "app".into(),
+                app_secret: "sec".into(),
+                app_token: "bascn".into(),
+                table_id: "tbl".into(),
+                base_url: server.uri(),
+            },
+        ));
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cfg = make_team_cfg("bascn", "alice@laptop");
+        let result = fetch_team_activity_rows_inner(state, Some(cfg), &cache, Some(client))
+            .await
+            .unwrap();
+        match result {
+            FetchResult::Rows { mut rows } => {
+                rows.sort_by(|a, b| a.workspace_id.cmp(&b.workspace_id));
+                let ids: Vec<&str> = rows.iter().map(|r| r.workspace_id.as_str()).collect();
+                assert_eq!(
+                    ids,
+                    vec!["ws_bar", "ws_baz"],
+                    "only rows for locally-registered repos should survive; ws_other must be dropped"
+                );
+            }
+            other => panic!("expected Rows, got {other:?}"),
+        }
+
+        // Lock the regression: the server filter must NOT carry a
+        // `repo_remote_url` condition (multi-value `is` → 1254018).
+        let reqs = server.received_requests().await.unwrap();
+        let search = reqs
+            .iter()
+            .find(|r| r.url.path().ends_with("/records/search"))
+            .expect("a search request was sent");
+        let body: serde_json::Value = serde_json::from_slice(&search.body).unwrap();
+        let conditions = body["filter"]["conditions"].as_array().unwrap();
+        assert!(
+            conditions
+                .iter()
+                .all(|c| c["field_name"].as_str() != Some("repo_remote_url")),
+            "repo_remote_url must be filtered client-side, not via a multi-value server `is`: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_team_activity_rows_inner_drops_rows_flagged_private() {
+        // Defense-in-depth: a row whose `private` checkbox is set must never
+        // reach the sidebar, even when its sensitive columns are still
+        // populated (manual Bitable edit, a publisher lag window, or an
+        // older publisher version). The normal privacy path relies on the
+        // publisher blanking `assignee_machine`, which the server-side
+        // `IsNotEmpty` filter then excludes; this read-boundary guard backs
+        // that up so a flagged-private row can never leak regardless of how
+        // it landed in the table.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok", "tenant_access_token": "tkn", "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(
+                r"^/open-apis/bitable/v1/apps/[^/]+/tables/[^/]+/records/search$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "record_id": "recPriv",
+                            "fields": {
+                                "workspace_id": "ws_priv",
+                                "repo_remote_url": "https://github.com/foo/bar",
+                                "repo_display_name": "bar",
+                                "task_title": "secret work",
+                                "assignee_machine": "bob@laptop",
+                                "ansambel_status": "running",
+                                "last_activity_at": 1_700_000_000_000_i64,
+                                "last_message_preview": "should not leak",
+                                "branch_name": "feat/secret",
+                                "diff_summary": "",
+                                "pr_url": "",
+                                "private": true,
+                            }
+                        }
+                    ],
+                    "has_more": false,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(tmp.path(), "https://github.com/foo/bar.git");
+        let state = Arc::new(std::sync::Mutex::new(crate::state::AppState {
+            repos: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "repo_real".into(),
+                    crate::state::RepoInfo {
+                        id: "repo_real".into(),
+                        name: "bar".into(),
+                        path: tmp.path().to_path_buf(),
+                        gh_profile: None,
+                        default_branch: "main".into(),
+                        created_at: 0,
+                        updated_at: 0,
+                        scripts: Vec::new(),
+                    },
+                );
+                m
+            },
+            ..Default::default()
+        }));
+        let client = Arc::new(crate::platform::lark_client::LarkClient::new(
+            crate::platform::lark_client::LarkConfig {
+                app_id: "app".into(),
+                app_secret: "sec".into(),
+                app_token: "bascn".into(),
+                table_id: "tbl".into(),
+                base_url: server.uri(),
+            },
+        ));
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cfg = make_team_cfg("bascn", "alice@laptop");
+        let result = fetch_team_activity_rows_inner(state, Some(cfg), &cache, Some(client))
+            .await
+            .unwrap();
+        match result {
+            FetchResult::Rows { rows } => {
+                assert!(
+                    rows.is_empty(),
+                    "private-flagged row leaked into the sidebar: {rows:?}"
+                );
             }
             other => panic!("expected Rows, got {other:?}"),
         }
