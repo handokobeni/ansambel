@@ -129,3 +129,53 @@ The publisher is now bi-directional: 3a-3 writes the row, 3a-4 reads it. The
 "who is working on what" awareness loop closes for teams whose members all run
 Ansambel against the same `team_activity_config.json`. Single-table assumption
 holds; multi-table membership UI is Phase 3a-7.
+
+## Manual smoke-test fixes (2026-05-27)
+
+Running the feature against a real Lark Bitable (not just mocks) surfaced a
+string of defects the unit/E2E mocks had hidden. Each was fixed TDD-style (red →
+green) with backend tests + the full clippy/check gate.
+
+- **Segmented rich-text parsing** — the Bitable _search_ endpoint returns text
+  fields as segmented arrays (`[{type,text}]`), not plain strings.
+  `parse_record_to_row` used `as_str()` and silently dropped every text field
+  (empty sidebar rows). Fixed by reusing `extract_text` /
+  `extract_single_select` from the Lark task provider. The mocks used plain
+  strings, which is why this only showed against the live API.
+- **`pr_url` URL-field serialisation** — `pr_url` is a Bitable URL field
+  (field*type 15); writing a bare string was rejected with
+  `1254068 URLFieldConvFail`, failing the \_entire* row upsert (which also froze
+  `last_message_preview`). Now serialised as `{ link, text }`. Latent since
+  3a-3; only triggered once `pr_url` was actually written.
+- **Multi-repo filter `1254018 InvalidFilter`** — Lark's `is` operator rejects a
+  multi-value array, so `repo_remote_url is [urlA, urlB]` broke the poll the
+  moment a second repo was registered. Repo-overlap filtering moved client-side;
+  the server filter keeps only the `assignee_machine` conditions. (The original
+  spec's "FilterOperator confusion" note made real.)
+- **Defense-in-depth privacy guard** — the reader now drops any row flagged
+  `private = true` at the read boundary, not relying solely on the publisher
+  having blanked `assignee_machine`.
+- **PR-URL detection → `PrCreated`** — the agent opens PRs via `gh pr create`,
+  so `emit_pr_created_if_detected` scans the agent's final message for a
+  `github.com/.../pull/N` URL and emits `PrCreated` (heuristic bridge until a
+  first-class `pr_create` flow; deferred to a later phase).
+- **External links via opener plugin** — a bare `<a target=_blank>` no-ops in a
+  Tauri webview. The watch view's "Open branch on GitHub" / "Open PR" now call
+  `openUrl()`; capability gained `opener:allow-open-url` **and**
+  `opener:allow-default-urls` (the http/https scope), and failures surface a
+  toast. README documents `wslu` as a WSL prerequisite (no `xdg-open`/`wslview`
+  → no browser).
+- **Sidebar dot follows live agent status** — the dot read the persisted
+  `Workspace.status` (which lags), so a running agent showed a non-green dot
+  while the title bar said "Running". It now overlays `messages.statusFor(id)`
+  like `WorkspaceView`.
+- **Friendly fetch-error copy** — `friendlyFetchError` maps raw IPC rejections
+  to actionable banner copy (network vs. credentials vs. generic) and keeps
+  internal Lark URLs out of the UI.
+- **Smoke E2E header locator** — the new sidebar panel adds a second `<header>`;
+  the smoke test's bare `locator('header')` tripped Playwright strict mode and
+  is now scoped to `header.titlebar`.
+
+Net effect after these fixes: 774 Rust tests + 931 vitest pass; clippy
+`-D warnings` and `bun run check` clean; CI E2E green on macOS + Windows (Ubuntu
+runner queue lag aside).
