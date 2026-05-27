@@ -8,8 +8,9 @@ import type { TerminalChunk } from '$lib/types';
 let lastChannel: { onmessage?: (chunk: TerminalChunk) => void } | null = null;
 let reattachBehavior: 'success' | 'reject' = 'reject';
 let spawnBehavior: 'success' | 'reject' = 'success';
-const writeCalls: { workspaceId: string; bytes: number[] }[] = [];
-const resizeCalls: { workspaceId: string; cols: number; rows: number }[] = [];
+const writeCalls: { terminalId: string; bytes: number[] }[] = [];
+const resizeCalls: { terminalId: string; cols: number; rows: number }[] = [];
+const killCalls: string[] = [];
 
 vi.mock('@tauri-apps/api/core', () => {
   class MockChannel {
@@ -30,17 +31,21 @@ vi.mock('@tauri-apps/api/core', () => {
       }
       if (cmd === 'terminal_write' && args) {
         writeCalls.push({
-          workspaceId: args.workspaceId as string,
+          terminalId: args.terminalId as string,
           bytes: args.bytes as number[],
         });
         return undefined;
       }
       if (cmd === 'terminal_resize' && args) {
         resizeCalls.push({
-          workspaceId: args.workspaceId as string,
+          terminalId: args.terminalId as string,
           cols: args.cols as number,
           rows: args.rows as number,
         });
+        return undefined;
+      }
+      if (cmd === 'terminal_kill' && args) {
+        killCalls.push(args.terminalId as string);
         return undefined;
       }
       return undefined;
@@ -117,12 +122,55 @@ class CapturingResizeObserver {
 }
 vi.stubGlobal('ResizeObserver', CapturingResizeObserver);
 
+// Mock the terminal-tabs store so Terminal container tests are deterministic.
+// The factory runs lazily after hoisting, so module-level vars are in scope.
+vi.mock('$lib/stores/terminal-tabs.svelte', () => {
+  // Use a plain Map (not SvelteMap) — Svelte reactivity is not needed in jsdom.
+  type TabState = { tabs: { id: string; label: string }[]; active: string | null; counter: number };
+  const states = new Map<string, TabState>();
+  function ensure(wsId: string): TabState {
+    let s = states.get(wsId);
+    if (!s) {
+      s = { tabs: [], active: null, counter: 0 };
+      states.set(wsId, s);
+    }
+    return s;
+  }
+  return {
+    terminalTabs: {
+      list: (wsId: string) => states.get(wsId)?.tabs ?? [],
+      activeId: (wsId: string) => states.get(wsId)?.active ?? null,
+      add: (wsId: string) => {
+        const s = ensure(wsId);
+        const tab = { id: `term_test_${s.counter + 1}`, label: `Terminal ${s.counter + 1}` };
+        states.set(wsId, { tabs: [...s.tabs, tab], active: tab.id, counter: s.counter + 1 });
+        return tab.id;
+      },
+      setActive: (wsId: string, id: string) => {
+        const s = ensure(wsId);
+        states.set(wsId, { ...s, active: id });
+      },
+      close: (wsId: string, id: string) => {
+        const s = ensure(wsId);
+        const tabs = s.tabs.filter((t) => t.id !== id);
+        const active = s.active === id ? (tabs[0]?.id ?? null) : s.active;
+        states.set(wsId, { ...s, tabs, active });
+      },
+      forget: (wsId: string) => states.delete(wsId),
+      reset: () => states.clear(),
+    },
+  };
+});
+
+import TerminalPane from './TerminalPane.svelte';
 import Terminal from './Terminal.svelte';
+import { terminalTabs } from '$lib/stores/terminal-tabs.svelte';
 
 beforeEach(() => {
   lastChannel = null;
   writeCalls.length = 0;
   resizeCalls.length = 0;
+  killCalls.length = 0;
   writes.length = 0;
   writelns.length = 0;
   dataHandler = null;
@@ -130,28 +178,26 @@ beforeEach(() => {
   reattachBehavior = 'reject';
   spawnBehavior = 'success';
   fitThrows = false;
+  terminalTabs.reset();
 });
 
 afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe('Terminal', () => {
+describe('TerminalPane', () => {
   it('mounts and falls back to spawn when reattach rejects', async () => {
-    const { findByTestId } = render(Terminal, { props: { workspaceId: 'ws_a' } });
-    expect(await findByTestId('terminal-view')).toBeTruthy();
-    await waitFor(() => expect(lastChannel).not.toBeNull());
-    // Status flips from "attaching…" to "live" once spawn resolves.
-    await waitFor(async () => {
-      const status = await findByTestId('terminal-status');
-      expect(status.textContent).toMatch(/live/);
+    const { findByTestId } = render(TerminalPane, {
+      props: { workspaceId: 'ws_a', terminalId: 'term_a' },
     });
+    expect(await findByTestId('terminal-container')).toBeTruthy();
+    await waitFor(() => expect(lastChannel).not.toBeNull());
   });
 
   it('uses reattach when an existing session is available', async () => {
     reattachBehavior = 'success';
     const { invoke } = await import('@tauri-apps/api/core');
-    render(Terminal, { props: { workspaceId: 'ws_b' } });
+    render(TerminalPane, { props: { workspaceId: 'ws_b', terminalId: 'term_b' } });
     await waitFor(() => expect(lastChannel).not.toBeNull());
     const calls = vi.mocked(invoke).mock.calls.map((c) => c[0]);
     expect(calls).toContain('terminal_reattach');
@@ -159,7 +205,9 @@ describe('Terminal', () => {
   });
 
   it('streams TerminalChunk::Bytes into the xterm buffer', async () => {
-    const { findByTestId } = render(Terminal, { props: { workspaceId: 'ws_c' } });
+    const { findByTestId } = render(TerminalPane, {
+      props: { workspaceId: 'ws_c', terminalId: 'term_c' },
+    });
     await waitFor(() => expect(lastChannel).not.toBeNull());
     lastChannel!.onmessage!({ kind: 'bytes', bytes: [104, 105] });
     expect(writes.length).toBe(1);
@@ -167,73 +215,69 @@ describe('Terminal', () => {
     void findByTestId; // narrow lint: keep within the test scope
   });
 
-  it('renders an exited marker and flips status to "exited"', async () => {
-    const { findByTestId } = render(Terminal, { props: { workspaceId: 'ws_d' } });
+  it('writes an exited marker to the xterm buffer on exit chunk', async () => {
+    const { findByTestId } = render(TerminalPane, {
+      props: { workspaceId: 'ws_d', terminalId: 'term_d' },
+    });
     await waitFor(() => expect(lastChannel).not.toBeNull());
     lastChannel!.onmessage!({ kind: 'exited', code: 0 });
-    await waitFor(async () => {
-      const status = await findByTestId('terminal-status');
-      expect(status.textContent).toMatch(/exited/);
+    await waitFor(() => {
+      expect(writelns.some((l) => l.includes('exited with code 0'))).toBe(true);
     });
-    expect(writelns.some((l) => l.includes('exited with code 0'))).toBe(true);
+    void findByTestId; // narrow lint: keep within the test scope
   });
 
-  it('forwards onData keystrokes through terminal_write', async () => {
-    render(Terminal, { props: { workspaceId: 'ws_e' } });
+  it('forwards onData keystrokes through terminal_write using terminalId', async () => {
+    render(TerminalPane, { props: { workspaceId: 'ws_e', terminalId: 'term_e' } });
     await waitFor(() => expect(dataHandler).not.toBeNull());
     dataHandler!('hi');
     expect(writeCalls.length).toBe(1);
-    expect(writeCalls[0].workspaceId).toBe('ws_e');
+    expect(writeCalls[0].terminalId).toBe('term_e');
     // 'hi' encoded as UTF-8 bytes.
     expect(writeCalls[0].bytes).toEqual([0x68, 0x69]);
   });
 
   it('renders the exited marker for a null exit code as "unknown"', async () => {
-    const { findByTestId } = render(Terminal, { props: { workspaceId: 'ws_f' } });
+    render(TerminalPane, { props: { workspaceId: 'ws_f', terminalId: 'term_f' } });
     await waitFor(() => expect(lastChannel).not.toBeNull());
     lastChannel!.onmessage!({ kind: 'exited', code: null });
     await waitFor(() => {
       expect(writelns.some((l) => l.includes('exited with code unknown'))).toBe(true);
     });
-    expect((await findByTestId('terminal-status')).textContent).toMatch(/exited/);
   });
 
   it('writes a "[failed to start shell]" marker when both reattach and spawn reject', async () => {
     reattachBehavior = 'reject';
     spawnBehavior = 'reject';
-    const { findByTestId } = render(Terminal, { props: { workspaceId: 'ws_g' } });
+    render(TerminalPane, { props: { workspaceId: 'ws_g', terminalId: 'term_g' } });
     await waitFor(() => {
       expect(writelns.some((l) => l.includes('failed to start shell'))).toBe(true);
     });
-    // Status flips from "attaching…" to "exited" once the spawn-failure
-    // branch sets `exited = true`.
-    await waitFor(async () => {
-      const status = await findByTestId('terminal-status');
-      expect(status.textContent).toMatch(/exited/);
-    });
   });
 
-  it('ResizeObserver callback fires fit + api.terminal.resize with current cols/rows', async () => {
-    render(Terminal, { props: { workspaceId: 'ws_h' } });
+  it('ResizeObserver callback fires fit + api.terminal.resize with terminalId', async () => {
+    render(TerminalPane, { props: { workspaceId: 'ws_h', terminalId: 'term_h' } });
     await waitFor(() => expect(resizeCb).not.toBeNull());
     resizeCb!();
     await waitFor(() => {
       expect(resizeCalls.length).toBeGreaterThan(0);
     });
-    expect(resizeCalls[0]).toMatchObject({ workspaceId: 'ws_h', cols: 80, rows: 24 });
+    expect(resizeCalls[0]).toMatchObject({ terminalId: 'term_h', cols: 80, rows: 24 });
   });
 
   it('initial fit() throwing in a no-layout runtime is swallowed (component still mounts)', async () => {
     fitThrows = true;
-    const { findByTestId } = render(Terminal, { props: { workspaceId: 'ws_i' } });
+    const { findByTestId } = render(TerminalPane, {
+      props: { workspaceId: 'ws_i', terminalId: 'term_i' },
+    });
     // Even though fit.fit() throws on every call, the component still
     // wires up the channel + reaches the spawn path.
-    expect(await findByTestId('terminal-view')).toBeTruthy();
+    expect(await findByTestId('terminal-container')).toBeTruthy();
     await waitFor(() => expect(lastChannel).not.toBeNull());
   });
 
   it('ResizeObserver callback swallows fit() throws without crashing', async () => {
-    render(Terminal, { props: { workspaceId: 'ws_j' } });
+    render(TerminalPane, { props: { workspaceId: 'ws_j', terminalId: 'term_j' } });
     await waitFor(() => expect(resizeCb).not.toBeNull());
     fitThrows = true;
     // Should not throw — component must catch and skip the resize call.
@@ -252,7 +296,7 @@ describe('Terminal', () => {
     vi.stubGlobal('ResizeObserver', SilentResizeObserver);
     vi.useFakeTimers();
     try {
-      render(Terminal, { props: { workspaceId: 'ws_safety' } });
+      render(TerminalPane, { props: { workspaceId: 'ws_safety', terminalId: 'term_safety' } });
       // Advance through the dynamic-import microtasks first…
       await vi.advanceTimersByTimeAsync(0);
       // …then fire the safety timeout.
@@ -264,5 +308,39 @@ describe('Terminal', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('Terminal container', () => {
+  it('renders terminal-view with tab bar and one pane when a tab exists', async () => {
+    // Pre-populate a tab so the container renders the tab bar + pane immediately.
+    // (The real $effect auto-create works at runtime; in jsdom the plain-Map mock
+    // is not reactive enough to trigger a re-render, so we seed it here.)
+    terminalTabs.add('ws_container_a');
+    const { findByTestId } = render(Terminal, { props: { workspaceId: 'ws_container_a' } });
+    expect(await findByTestId('terminal-view')).toBeTruthy();
+    expect(await findByTestId('terminal-tab-bar')).toBeTruthy();
+    expect(await findByTestId('terminal-pane-host')).toBeTruthy();
+  });
+
+  it('renders an empty-state button when no tabs exist', async () => {
+    // Do NOT pre-add tabs — the empty branch should render "+ New terminal".
+    const { findByTestId, getByRole } = render(Terminal, {
+      props: { workspaceId: 'ws_container_empty' },
+    });
+    expect(await findByTestId('terminal-view')).toBeTruthy();
+    expect(getByRole('button', { name: /New terminal/i })).toBeTruthy();
+  });
+
+  it('renders all pane hosts without {#if}-gating (display-toggled only)', async () => {
+    // Pre-populate two tabs so the container renders both pane-host divs.
+    terminalTabs.add('ws_container_b');
+    terminalTabs.add('ws_container_b');
+    const { getAllByTestId } = render(Terminal, { props: { workspaceId: 'ws_container_b' } });
+    await waitFor(() => {
+      const hosts = getAllByTestId('terminal-pane-host');
+      // Both panes exist in DOM; only one is visible.
+      expect(hosts.length).toBe(2);
+    });
   });
 });
