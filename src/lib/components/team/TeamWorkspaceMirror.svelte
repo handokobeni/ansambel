@@ -1,6 +1,28 @@
 <script lang="ts">
   import { teamActivity } from '$lib/stores/team-activity.svelte';
   import { githubBranchUrl } from '$lib/github-url';
+  import { openUrl } from '@tauri-apps/plugin-opener';
+  import { addToast } from '$lib/stores/toasts.svelte';
+
+  /// Open an external URL in the OS browser. A bare `<a target="_blank">`
+  /// click never reaches the system browser inside a Tauri webview — it
+  /// either no-ops or hijacks the app window — so we intercept the click,
+  /// suppress the default in-webview navigation, and hand the URL to the
+  /// opener plugin. Kept as a tiny wrapper so the `<a>` stays a real link
+  /// (right-click "copy link", middle-click, screen-reader role) while the
+  /// left-click path goes through Tauri.
+  ///
+  /// Surfacing the rejection is mandatory, not cosmetic: when the host has
+  /// no URL handler (e.g. WSL without `wslu`/`xdg-open`) the opener rejects,
+  /// and a silently-swallowed promise leaves the user clicking a dead link
+  /// with no feedback. The toast names the URL so it can still be copied.
+  function openExternal(event: MouseEvent, url: string): void {
+    event.preventDefault();
+    openUrl(url).catch((err: unknown) => {
+      const detail = err instanceof Error ? err.message : String(err);
+      addToast(`Couldn't open ${url} in your browser — ${detail}`, 'error');
+    });
+  }
 
   const row = $derived.by(() => {
     const id = teamActivity.selectedWorkspaceId;
@@ -74,6 +96,7 @@
             href={branchUrl}
             target="_blank"
             rel="noopener noreferrer"
+            onclick={(e) => openExternal(e, branchUrl)}
             class="text-blue-400 hover:underline"
           >
             Open branch on GitHub
@@ -102,6 +125,7 @@
           href={row.pr_url}
           target="_blank"
           rel="noopener noreferrer"
+          onclick={(e) => openExternal(e, row.pr_url)}
           class="mt-3 inline-block rounded bg-purple-600 px-3 py-1.5 text-sm text-white hover:bg-purple-500"
         >
           Open PR

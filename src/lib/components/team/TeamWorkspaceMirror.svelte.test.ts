@@ -2,9 +2,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, fireEvent } from '@testing-library/svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
-vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }));
+vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn(() => Promise.resolve()) }));
+vi.mock('$lib/stores/toasts.svelte', () => ({ addToast: vi.fn() }));
 
 import TeamWorkspaceMirror from './TeamWorkspaceMirror.svelte';
+import { openUrl } from '@tauri-apps/plugin-opener';
+import { addToast } from '$lib/stores/toasts.svelte';
 import { teamActivity } from '$lib/stores/team-activity.svelte';
 import type { TeamActivityRow } from '$lib/types';
 
@@ -30,6 +33,9 @@ describe('TeamWorkspaceMirror', () => {
   beforeEach(() => {
     teamActivity.rows.clear();
     teamActivity.selectedWorkspaceId = null;
+    vi.mocked(openUrl).mockReset();
+    vi.mocked(openUrl).mockResolvedValue(undefined);
+    vi.mocked(addToast).mockReset();
   });
 
   it('renders task_title, assignee_machine, status in the header', () => {
@@ -171,5 +177,48 @@ describe('TeamWorkspaceMirror', () => {
     // relativeTime(0) returns '' — the header time span should be empty
     const mirror = getByTestId('team-workspace-mirror');
     expect(mirror).toBeTruthy();
+  });
+
+  it('clicking "Open branch on GitHub" opens the URL via the Tauri opener, not in-webview nav', async () => {
+    // In a Tauri webview a plain `<a target="_blank">` does not reach the
+    // OS browser — the click must call the opener plugin. The handler also
+    // prevents the default in-webview navigation that would otherwise do
+    // nothing (or hijack the app window).
+    teamActivity.rows.set('ws_a', row());
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByRole } = render(TeamWorkspaceMirror);
+    const link = getByRole('link', { name: /open branch on github/i });
+    const ev = await fireEvent.click(link);
+    expect(ev).toBe(false); // preventDefault → fireEvent.click returns false
+    expect(openUrl).toHaveBeenCalledWith('https://github.com/foo/bar/tree/feat%2Fauth');
+  });
+
+  it('clicking "Open PR" opens the PR URL via the Tauri opener', async () => {
+    teamActivity.rows.set(
+      'ws_a',
+      row({ ansambel_status: 'pr_ready', pr_url: 'https://github.com/foo/bar/pull/9' })
+    );
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByRole } = render(TeamWorkspaceMirror);
+    const link = getByRole('link', { name: /open pr/i });
+    await fireEvent.click(link);
+    expect(openUrl).toHaveBeenCalledWith('https://github.com/foo/bar/pull/9');
+  });
+
+  it('shows an error toast when the opener rejects (no OS URL handler)', async () => {
+    // On a host without a URL handler (e.g. WSL without wslu/xdg-open) the
+    // opener rejects. The click must surface that, not swallow it.
+    vi.mocked(openUrl).mockRejectedValueOnce(new Error('no handler'));
+    teamActivity.rows.set('ws_a', row());
+    teamActivity.selectedWorkspaceId = 'ws_a';
+    const { getByRole } = render(TeamWorkspaceMirror);
+    await fireEvent.click(getByRole('link', { name: /open branch on github/i }));
+    // Let the rejected promise's .catch microtask run.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(addToast).toHaveBeenCalledWith(
+      expect.stringContaining('https://github.com/foo/bar/tree/feat%2Fauth'),
+      'error'
+    );
   });
 });
