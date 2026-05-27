@@ -191,26 +191,34 @@
   <main class="bg-[var(--bg-base)] overflow-auto" style="grid-column: 2; grid-row: 2;">
     {#if teamActivity.selectedWorkspaceId}
       <TeamWorkspaceMirror />
-    {:else if modeStore.mode === 'plan'}
-      {#if selectedRepo}
-        <KanbanBoard
-          repoId={selectedRepo.id}
-          tasks={boardTasks}
-          onMove={handleMove}
-          onAddTask={() => (showNewTask = true)}
-          onRemoveTask={handleRemoveTask}
-        />
-      {:else}
+    {:else}
+      <!-- Plan content: visible only in plan mode, but stays mounted. -->
+      <div class="h-full" class:hidden={modeStore.mode !== 'plan'}>
+        {#if selectedRepo}
+          <KanbanBoard
+            repoId={selectedRepo.id}
+            tasks={boardTasks}
+            onMove={handleMove}
+            onAddTask={() => (showNewTask = true)}
+            onRemoveTask={handleRemoveTask}
+          />
+        {:else}
+          <div class="h-full flex items-center justify-center text-sm text-[var(--text-muted)]">
+            Add a repo to start managing tasks.
+          </div>
+        {/if}
+      </div>
+      <!-- Work content: WorkspaceView stays mounted whenever a workspace is
+           selected, so toggling Plan<->Work never unmounts the terminals. -->
+      {#if selectedWorkspace}
+        <div class="h-full" class:hidden={modeStore.mode !== 'work'}>
+          <WorkspaceView workspace={selectedWorkspace} {highlightedFile} />
+        </div>
+      {:else if modeStore.mode === 'work'}
         <div class="h-full flex items-center justify-center text-sm text-[var(--text-muted)]">
-          Add a repo to start managing tasks.
+          Select or create a workspace
         </div>
       {/if}
-    {:else if selectedWorkspace}
-      <WorkspaceView workspace={selectedWorkspace} {highlightedFile} />
-    {:else}
-      <div class="h-full flex items-center justify-center text-sm text-[var(--text-muted)]">
-        Select or create a workspace
-      </div>
     {/if}
   </main>
 

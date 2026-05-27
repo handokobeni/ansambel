@@ -14,6 +14,11 @@ vi.mock('$lib/stores/toasts.svelte', () => ({
 // from tests without needing svelte-dnd-action in jsdom.
 vi.mock('$lib/components/kanban/KanbanBoard.svelte');
 
+// Stub WorkspaceView so xterm (which requires canvas) never instantiates in
+// jsdom. The manual mock at __mocks__/WorkspaceView.svelte renders a sentinel
+// div so mount-persistence tests can locate it.
+vi.mock('$lib/components/workspace/WorkspaceView.svelte');
+
 // Mock @tauri-apps/api/event so listen() calls in onMount don't fail without
 // a real Tauri runtime.
 vi.mock('@tauri-apps/api/event', () => ({
@@ -289,6 +294,43 @@ describe('App', () => {
     const workBtn = await screen.findByRole('button', { name: /^work$/i });
     await fireEvent.click(workBtn);
     expect(modeStore.set).toHaveBeenCalledWith('work');
+  });
+});
+
+describe('WorkspaceView mount-persistence across mode toggle', () => {
+  // Regression test for: toggling Plan↔Work must NOT unmount WorkspaceView.
+  // The fix wraps WorkspaceView in a `class:hidden` div so it stays mounted
+  // in the DOM even when plan mode is active.
+  const WS_FIXTURE = {
+    id: 'ws_persist',
+    repo_id: 'repo_persist',
+    title: 'Persist WS',
+    description: '',
+    branch: 'feat/persist',
+    base_branch: 'main',
+    custom_branch: false,
+    status: 'running' as const,
+    column: 'in_progress' as const,
+    created_at: 0,
+    updated_at: 0,
+    worktree_dir: '/tmp/ws_persist',
+    task_id: null,
+  };
+
+  it('WorkspaceView stub stays in DOM (hidden wrapper) when mode switches to plan', async () => {
+    // Start in plan mode (beforeEach default) with a workspace already selected.
+    // With the old {:else if} structure the stub would NOT be in the DOM at all
+    // in plan mode — this test asserts it IS present (just hidden).
+    vi.mocked(workspaces.getSelected).mockReturnValue(WS_FIXTURE);
+    render(App);
+
+    // The workspace-view-stub must be in the DOM even in plan mode.
+    const stub = screen.getByTestId('workspace-view-stub');
+    expect(stub).toBeInTheDocument();
+
+    // Its host wrapper must carry the `hidden` class so it is not visible.
+    const hostWrapper = stub.parentElement!;
+    expect(hostWrapper).toHaveClass('hidden');
   });
 });
 
