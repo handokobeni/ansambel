@@ -267,13 +267,31 @@ pub(crate) async fn refresh_tasks_inner(
         let mut st = state
             .lock()
             .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        // Snapshot local-only fields the provider can't know (LarkProvider
+        // blanks repo_id/workspace_id). Re-stamp them onto the fresh tasks
+        // so a refocus refresh never severs a card<->workspace link — the
+        // root cause of duplicate auto-created workspaces.
+        let preserved: std::collections::HashMap<String, (String, Option<String>)> = st
+            .tasks
+            .iter()
+            .map(|(id, t)| (id.clone(), (t.repo_id.clone(), t.workspace_id.clone())))
+            .collect();
         if let Some(rid) = repo_id.as_deref() {
             st.tasks.retain(|_, t| t.repo_id != rid);
         } else {
             st.tasks.clear();
         }
         for t in &tasks {
-            st.tasks.insert(t.id.clone(), t.clone());
+            let mut t = t.clone();
+            if let Some((repo, ws)) = preserved.get(&t.id) {
+                if t.repo_id.is_empty() {
+                    t.repo_id = repo.clone();
+                }
+                if t.workspace_id.is_none() {
+                    t.workspace_id = ws.clone();
+                }
+            }
+            st.tasks.insert(t.id.clone(), t);
         }
     }
     Ok(tasks)
@@ -1549,6 +1567,129 @@ mod tests {
             Some("ws_existing"),
             "workspace_id survives repeated moves"
         );
+    }
+
+    // ── Task 3: refresh_tasks preservation tests ────────────────────
+
+    /// Provider that returns a single task with workspace_id=None on
+    /// list_tasks — mimics LarkProvider re-hydrating a card whose local-only
+    /// link it cannot know.
+    #[derive(Debug)]
+    struct OneBlankTaskProvider;
+
+    #[async_trait::async_trait]
+    impl crate::task_provider::TaskProvider for OneBlankTaskProvider {
+        async fn list_tasks(
+            &self,
+            _: Option<&str>,
+        ) -> crate::error::Result<Vec<crate::state::Task>> {
+            Ok(vec![crate::state::Task {
+                id: "tk_a".into(),
+                repo_id: String::new(),
+                workspace_id: None,
+                title: "Card A".into(),
+                description: String::new(),
+                column: KanbanColumn::InProgress,
+                order: 0,
+                created_at: 0,
+                updated_at: 0,
+                pic_names: Vec::new(),
+            }])
+        }
+        async fn create_task(
+            &self,
+            a: crate::task_provider::CreateTaskArgs,
+        ) -> crate::error::Result<crate::state::Task> {
+            Ok(crate::state::Task {
+                id: "x".into(),
+                repo_id: String::new(),
+                workspace_id: None,
+                title: a.title,
+                description: a.description,
+                column: a.column.unwrap_or_default(),
+                order: 0,
+                created_at: 0,
+                updated_at: 0,
+                pic_names: Vec::new(),
+            })
+        }
+        async fn update_task(
+            &self,
+            id: &str,
+            _p: crate::task_provider::TaskPatch,
+        ) -> crate::error::Result<crate::state::Task> {
+            Ok(crate::state::Task {
+                id: id.into(),
+                repo_id: String::new(),
+                workspace_id: None,
+                title: "t".into(),
+                description: String::new(),
+                column: KanbanColumn::Todo,
+                order: 0,
+                created_at: 0,
+                updated_at: 0,
+                pic_names: Vec::new(),
+            })
+        }
+        async fn move_task(
+            &self,
+            id: &str,
+            column: KanbanColumn,
+            order: i32,
+        ) -> crate::error::Result<crate::state::Task> {
+            Ok(crate::state::Task {
+                id: id.into(),
+                repo_id: String::new(),
+                workspace_id: None,
+                title: "t".into(),
+                description: String::new(),
+                column,
+                order,
+                created_at: 0,
+                updated_at: 0,
+                pic_names: Vec::new(),
+            })
+        }
+        async fn delete_task(&self, _id: &str) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_tasks_preserves_workspace_id_link() {
+        let tmp = tempdir().unwrap();
+        let state = make_state_with_repo(tmp.path());
+        let repo_id = { state.lock().unwrap().repos.keys().next().unwrap().clone() };
+        {
+            let mut st = state.lock().unwrap();
+            st.tasks.insert(
+                "tk_a".into(),
+                crate::state::Task {
+                    id: "tk_a".into(),
+                    repo_id: repo_id.clone(),
+                    workspace_id: Some("ws_keep".into()),
+                    title: "Card A".into(),
+                    description: String::new(),
+                    column: KanbanColumn::InProgress,
+                    order: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                    pic_names: Vec::new(),
+                },
+            );
+        }
+        let provider: Arc<dyn crate::task_provider::TaskProvider> = Arc::new(OneBlankTaskProvider);
+        refresh_tasks_inner(Some(repo_id.clone()), Arc::clone(&state), provider)
+            .await
+            .unwrap();
+        let st = state.lock().unwrap();
+        let t = st.tasks.get("tk_a").unwrap();
+        assert_eq!(
+            t.workspace_id.as_deref(),
+            Some("ws_keep"),
+            "workspace_id must survive refresh"
+        );
+        assert_eq!(t.repo_id, repo_id, "repo_id must survive refresh");
     }
 
     #[tokio::test]
