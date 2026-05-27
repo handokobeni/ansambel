@@ -24,6 +24,11 @@ Prerequisites:
 - Rust stable (1.82+)
 - Bun latest
 - Linux only: `libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev`
+- WSL only: `wslu` (`sudo apt install wslu`) — provides `wslview`, the URL
+  handler the opener plugin shells out to. Without it (and without `xdg-open`),
+  external links such as the Team Activity watch view's "Open branch on GitHub"
+  / "Open PR" buttons silently fail to launch a browser; the app surfaces an
+  error toast in that case rather than opening the link.
 
 ```bash
 bun install             # also installs git hooks via husky
