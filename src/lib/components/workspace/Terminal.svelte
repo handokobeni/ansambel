@@ -2,6 +2,7 @@
   import TerminalTabBar from './TerminalTabBar.svelte';
   import TerminalPane from './TerminalPane.svelte';
   import { terminalTabs } from '$lib/stores/terminal-tabs.svelte';
+  import { terminalSnapshots } from '$lib/stores/terminal-snapshots';
   import { api } from '$lib/ipc';
 
   interface Props {
@@ -27,8 +28,10 @@
   }
 
   function closeTerminal(id: string): void {
-    // Kill the PTY first, then drop the tab.
+    // Kill the PTY first, drop any stashed screen snapshot (so a re-created
+    // terminal can't restore a stale grid), then drop the tab.
     void api.terminal.kill(id);
+    terminalSnapshots.drop(id);
     terminalTabs.close(workspaceId, id);
   }
 </script>

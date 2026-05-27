@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, waitFor } from '@testing-library/svelte';
+import { render, waitFor, fireEvent } from '@testing-library/svelte';
 import type { TerminalChunk } from '$lib/types';
 
 // Capture the Channel handed to terminal_spawn / terminal_reattach so
@@ -57,6 +57,7 @@ vi.mock('@tauri-apps/api/core', () => {
 // the component actually calls — open(), write(), writeln(), onData(),
 // dispose(), loadAddon, plus rows/cols accessors.
 const writes: Uint8Array[] = [];
+const stringWrites: string[] = [];
 const writelns: string[] = [];
 let dataHandler: ((data: string) => void) | null = null;
 
@@ -67,6 +68,7 @@ vi.mock('@xterm/xterm', () => {
     open = vi.fn();
     write = (data: string | Uint8Array) => {
       if (data instanceof Uint8Array) writes.push(data);
+      else if (typeof data === 'string') stringWrites.push(data);
     };
     writeln = (line: string) => {
       writelns.push(line);
@@ -78,6 +80,19 @@ vi.mock('@xterm/xterm', () => {
     dispose = vi.fn();
   }
   return { Terminal: MockTerminal };
+});
+
+// SerializeAddon stub: serialize() returns a per-test settable string so we
+// can assert the destroy path stashes the right snapshot.
+let serializeReturn = '';
+
+vi.mock('@xterm/addon-serialize', () => {
+  class SerializeAddon {
+    activate = vi.fn();
+    dispose = vi.fn();
+    serialize = vi.fn(() => serializeReturn);
+  }
+  return { SerializeAddon };
 });
 
 // `fitThrows` lets a single test simulate a no-layout runtime where
@@ -165,6 +180,7 @@ vi.mock('$lib/stores/terminal-tabs.svelte', () => {
 import TerminalPane from './TerminalPane.svelte';
 import Terminal from './Terminal.svelte';
 import { terminalTabs } from '$lib/stores/terminal-tabs.svelte';
+import { terminalSnapshots } from '$lib/stores/terminal-snapshots';
 
 beforeEach(() => {
   lastChannel = null;
@@ -172,13 +188,16 @@ beforeEach(() => {
   resizeCalls.length = 0;
   killCalls.length = 0;
   writes.length = 0;
+  stringWrites.length = 0;
   writelns.length = 0;
   dataHandler = null;
   resizeCb = null;
   reattachBehavior = 'reject';
   spawnBehavior = 'success';
   fitThrows = false;
+  serializeReturn = '';
   terminalTabs.reset();
+  terminalSnapshots.reset();
 });
 
 afterEach(() => {
@@ -309,6 +328,31 @@ describe('TerminalPane', () => {
       vi.useRealTimers();
     }
   });
+
+  it('restores a stored snapshot to the xterm on mount instead of the ready marker', async () => {
+    terminalSnapshots.set('term_restore', 'RESTORED-GRID');
+    render(TerminalPane, { props: { workspaceId: 'ws_r', terminalId: 'term_restore' } });
+    await waitFor(() => expect(stringWrites).toContain('RESTORED-GRID'));
+    // one-shot: consumed from the stash
+    expect(terminalSnapshots.take('term_restore')).toBeUndefined();
+    // fresh-spawn marker is NOT shown when restoring
+    expect(writelns.some((l) => l.includes('xterm ready'))).toBe(false);
+  });
+
+  it('writes the ready marker (not a restore) when no snapshot is stored', async () => {
+    render(TerminalPane, { props: { workspaceId: 'ws_fresh', terminalId: 'term_fresh' } });
+    await waitFor(() => expect(writelns.some((l) => l.includes('xterm ready'))).toBe(true));
+  });
+
+  it('serializes the screen into the stash on destroy', async () => {
+    serializeReturn = 'SERIALIZED-SCREEN';
+    const { unmount } = render(TerminalPane, {
+      props: { workspaceId: 'ws_s', terminalId: 'term_save' },
+    });
+    await waitFor(() => expect(lastChannel).not.toBeNull()); // ensure onMount finished
+    unmount(); // triggers onDestroy
+    expect(terminalSnapshots.take('term_save')).toBe('SERIALIZED-SCREEN');
+  });
 });
 
 describe('Terminal container', () => {
@@ -342,5 +386,17 @@ describe('Terminal container', () => {
       // Both panes exist in DOM; only one is visible.
       expect(hosts.length).toBe(2);
     });
+  });
+
+  it('drops the stored snapshot when a terminal tab is closed', async () => {
+    // Seed a tab, then stash a snapshot for it. Closing the tab via the UI
+    // must drop the stash so a re-created terminal can't restore a stale grid.
+    terminalTabs.add('ws_container_close');
+    const tabId = terminalTabs.list('ws_container_close')[0].id;
+    terminalSnapshots.set(tabId, 'STALE-GRID');
+    const { findByTestId } = render(Terminal, { props: { workspaceId: 'ws_container_close' } });
+    const closeBtn = await findByTestId('terminal-tab-close');
+    await fireEvent.click(closeBtn);
+    expect(terminalSnapshots.take(tabId)).toBeUndefined();
   });
 });

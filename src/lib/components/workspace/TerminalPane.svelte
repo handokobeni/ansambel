@@ -2,6 +2,7 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import { Channel } from '@tauri-apps/api/core';
   import { api } from '$lib/ipc';
+  import { terminalSnapshots } from '$lib/stores/terminal-snapshots';
   import type { TerminalChunk } from '$lib/types';
 
   interface Props {
@@ -17,6 +18,9 @@
   // also lets us swap the `Terminal` constructor in tests.
   type XTerm = import('@xterm/xterm').Terminal;
   let term: XTerm | undefined;
+  // The serialize addon snapshots the on-screen grid on destroy so the next
+  // mount can repaint it. Kept at module scope so onDestroy can reach it.
+  let serializer: import('@xterm/addon-serialize').SerializeAddon | undefined;
   let unmounted = false;
   let observer: ResizeObserver | undefined;
 
@@ -24,6 +28,7 @@
     if (!containerRef) return;
     const { Terminal: XTermCtor } = await import('@xterm/xterm');
     const { FitAddon } = await import('@xterm/addon-fit');
+    const { SerializeAddon } = await import('@xterm/addon-serialize');
     if (unmounted) return;
 
     const fit = new FitAddon();
@@ -35,6 +40,8 @@
       // ships the @xterm/xterm/css file via the import below.
     });
     term.loadAddon(fit);
+    serializer = new SerializeAddon();
+    term.loadAddon(serializer);
     // Hidden-mount means the Terminal component is created the first
     // time the workspace opens — but the surrounding tab panel is
     // `display:none` until the user clicks Terminal. Calling
@@ -57,11 +64,19 @@
     } catch {
       // jsdom-style runtimes without layout: skip the initial fit.
     }
-    // Visible marker so we can tell at a glance whether xterm is
-    // actually rendering. If this banner shows up, rendering works
-    // and any blank area afterwards is the shell being silent —
-    // otherwise the issue is xterm/CSS, not the PTY.
-    term.writeln('\x1b[2m[xterm ready — waiting for shell]\x1b[0m');
+    const restored = terminalSnapshots.take(terminalId);
+    if (restored) {
+      // Repaint the screen exactly as it was before the pane was last
+      // destroyed (serialized grid). No raw-byte replay → no full-screen
+      // program (vite) repaint artifacts.
+      term.write(restored);
+    } else {
+      // Visible marker so we can tell at a glance whether xterm is
+      // actually rendering. If this banner shows up, rendering works
+      // and any blank area afterwards is the shell being silent —
+      // otherwise the issue is xterm/CSS, not the PTY.
+      term.writeln('\x1b[2m[xterm ready — waiting for shell]\x1b[0m');
+    }
 
     // Forward keystrokes (and pasted content) into the backend's PTY.
     term.onData((data: string) => {
@@ -132,8 +147,17 @@
   onDestroy(() => {
     unmounted = true;
     observer?.disconnect();
+    if (term && serializer) {
+      try {
+        terminalSnapshots.set(terminalId, serializer.serialize());
+      } catch {
+        // serialize() can throw on a never-opened term — skip; the next
+        // mount just falls back to a fresh/blank screen + live reattach.
+      }
+    }
     term?.dispose();
     term = undefined;
+    serializer = undefined;
   });
 
   /** Resolve once the element actually has non-zero layout, or after a
