@@ -11,6 +11,28 @@ type Status =
   | 'machine_label_empty'
   | 'no_overlap_repos';
 
+/** Map a raw fetch error (the Rust IPC rejection string) to short, friendly
+ *  banner copy. Keeps reqwest noise and internal Lark URLs out of the UI
+ *  while still separating the two cases a user can act on: a dead network
+ *  connection vs. bad Lark credentials. Unknown errors fall back to a
+ *  generic retry prompt rather than leaking the raw message. */
+export function friendlyFetchError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  if (
+    /error sending request|offline|dns|connection|timed?\s?out|timeout|network|unreachable|failed to (connect|lookup)/i.test(
+      raw
+    )
+  ) {
+    return "Couldn't reach Lark — check your internet connection.";
+  }
+  if (
+    /access[_ ]?token|unauthor|invalid.*(token|secret|app)|app_secret|app_id|9999166\d/i.test(raw)
+  ) {
+    return 'Lark sign-in failed — check your Team Activity credentials in Settings.';
+  }
+  return 'Could not load team activity. Tap Retry to try again.';
+}
+
 class TeamActivityStore {
   /** Active rows keyed by workspace_id. */
   readonly rows = new SvelteMap<string, TeamActivityRow>();
@@ -37,7 +59,7 @@ class TeamActivityStore {
     try {
       result = await api.teamActivity.fetchRows();
     } catch (err) {
-      this.error = String(err);
+      this.error = friendlyFetchError(err);
       this.status = 'error';
       return;
     }

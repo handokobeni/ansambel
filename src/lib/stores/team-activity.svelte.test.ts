@@ -5,7 +5,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke } from '@tauri-apps/api/core';
-import { teamActivity } from './team-activity.svelte';
+import { teamActivity, friendlyFetchError } from './team-activity.svelte';
 import { removeToast, getToasts } from './toasts.svelte';
 import type { FetchResult, TeamActivityRow } from '../types';
 
@@ -122,7 +122,8 @@ describe('TeamActivityStore — core state', () => {
     await teamActivity.refresh();
     expect(teamActivity.rows.size).toBe(1);
     expect(teamActivity.status).toBe('error');
-    expect(teamActivity.error).toContain('offline');
+    // Friendly copy, not the raw error string.
+    expect(teamActivity.error).toMatch(/connection/i);
   });
 
   it('select sets selectedWorkspaceId', () => {
@@ -244,5 +245,32 @@ describe('TeamActivityStore — poll loop + visibility', () => {
     document.dispatchEvent(new Event('visibilitychange'));
     await vi.runOnlyPendingTimersAsync();
     expect(vi.mocked(invoke).mock.calls.length).toBe(callsAfterStart);
+  });
+});
+
+describe('friendlyFetchError', () => {
+  it('maps a connection failure (offline) to a connection hint', () => {
+    expect(friendlyFetchError('offline')).toMatch(/connection/i);
+    expect(
+      friendlyFetchError(
+        'Lark API: tenant_access_token request: error sending request for url (https://open.larksuite.com/...)'
+      )
+    ).toMatch(/connection/i);
+    // The raw internal URL must not leak into the friendly copy.
+    expect(
+      friendlyFetchError('error sending request for url (https://open.larksuite.com/x)')
+    ).not.toMatch(/https?:\/\//);
+  });
+
+  it('maps a Lark auth/credential failure to a settings hint', () => {
+    expect(friendlyFetchError('Lark API: code 99991663 invalid app_secret')).toMatch(
+      /credential|settings/i
+    );
+  });
+
+  it('falls back to a generic retry message for unknown errors', () => {
+    const msg = friendlyFetchError('something weird happened');
+    expect(msg.length).toBeGreaterThan(0);
+    expect(msg).not.toMatch(/something weird/);
   });
 });
