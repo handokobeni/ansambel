@@ -52,11 +52,19 @@ branch:
   `class:hidden` instead of mutually-exclusive `{:else if mode}` branches — so
   the toggle no longer remounts the panes. Lossless: xterm + scrollback +
   process all preserved.
-- **Cross-workspace scrollback (Fix B).** Each terminal now keeps a bounded (256
-  KiB) output ring buffer in `TerminalHandle`; `reattach` replays it before
-  forwarding live output. So ANY remount (workspace switch, mirror flow) now
-  restores the visible terminal, not just the process. Best-effort: the byte cap
-  may clip mid-escape at the buffer head. Fresh `spawn` does not replay.
+- **Cross-workspace scrollback (Fix B).** A remount (workspace switch, mirror
+  flow) used to restore only the process, not the visible screen. Now each
+  `TerminalPane` serializes its live xterm grid (`@xterm/addon-serialize`) into
+  a session-only stash (`stores/terminal-snapshots.ts`) on destroy, and the next
+  mount of the same `terminalId` repaints from that snapshot before
+  resubscribing to live PTY output (backend `reattach` is receiver-only). So ANY
+  remount now restores the visible terminal, not just the process. First tried a
+  backend 256 KiB raw-byte ring buffer replayed on reattach — discarded because
+  raw bytes re-execute a full-screen program's cursor/clear sequences against a
+  differently-sized terminal, which garbled vite's banner (a large blank gap) on
+  remount. A serialized grid has no such dependency. Trade-off: output emitted
+  in the brief dispose→reattach window is not restored (the live stream resumes
+  immediately); fresh `spawn` shows the `[xterm ready]` marker, not a restore.
 
 Together Fix A + Fix B resolve the original "terminal loses its `npm run dev`
 state on Plan↔Work" report: A makes the common toggle lossless, B restores the
@@ -73,5 +81,7 @@ view on any deeper remount.
 - Follow-ups: `detect_default_branch` offline tier (local-tracking-ref hit +
   ls-remote fallback when both Tier 1 and Tier 2 refs are removed); Fix A
   regression (`App.test.ts` asserts `WorkspaceView` stays mounted/hidden, not
-  removed, when toggling to Plan); Fix B (`reattach` returns + replays the
-  recent-output snapshot; fresh spawn does not replay).
+  removed, when toggling to Plan); Fix B (snapshot stash one-shot
+  `take`/`drop`/isolation; `TerminalPane` restores a stashed snapshot on mount
+  instead of the ready marker, serializes on destroy, and a tab close drops its
+  stash; backend reattach reverted to receiver-only).
