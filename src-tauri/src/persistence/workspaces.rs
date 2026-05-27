@@ -57,6 +57,7 @@ mod tests {
             updated_at: 1_000_001,
             worktree_dir: std::path::PathBuf::new(),
             team_activity_private: false,
+            task_id: None,
         }
     }
 

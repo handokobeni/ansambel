@@ -174,6 +174,7 @@ describe('App', () => {
       created_at: 1776000001,
       updated_at: 1776000001,
       worktree_dir: '/tmp/ws_abc',
+      task_id: null,
     });
     render(App);
     await waitFor(() => {
@@ -294,6 +295,7 @@ describe('App work mode', () => {
       created_at: 0,
       updated_at: 0,
       worktree_dir: '/tmp/ws_a',
+      task_id: null,
     });
     modeStore.set('work');
     const { getByText } = render(App);

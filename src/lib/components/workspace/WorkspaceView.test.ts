@@ -98,6 +98,7 @@ const ws = (overrides: Partial<WorkspaceInfo> = {}): WorkspaceInfo => ({
   created_at: 0,
   updated_at: 0,
   worktree_dir: '/tmp/ws_a',
+  task_id: null,
   ...overrides,
 });
 
