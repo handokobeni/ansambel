@@ -41,5 +41,25 @@ manual testing:
 - Rust: serde default round-trip; `is_workspace_empty` table (fresh / agent /
   commit / dirty / messages); refresh link preservation; reattach (no
   duplicate); empty-removed; non-empty-kept.
-- E2E: move In Progress -> Todo -> In Progress keeps exactly one workspace,
-  removed when empty, reattached not duplicated.
+- Frontend: `App.test.ts` covers the `handleMove` removal toast — fires on (had
+  workspace + move to Todo + backend returned `workspace_id: null`), and stays
+  silent on the no-toast paths (move to In Progress, card had no workspace,
+  backend kept the link). Driven via a minimal `KanbanBoard` test stub
+  (`__mocks__/KanbanBoard.svelte`) since svelte-dnd-action isn't triggerable in
+  jsdom.
+- E2E: `tests/e2e/phase-3b-workspace-lifecycle/lifecycle.spec.ts` — move In
+  Progress -> Todo -> In Progress keeps exactly one workspace, removed when
+  empty, reattached not duplicated.
+- Gates at merge: 785 Rust `cargo test --lib` + clippy `-D warnings` clean; 931
+  vitest + `bun run check` clean; E2E green. `App.svelte` is excluded from the
+  coverage report in `vite.config.ts` (thin orchestrator), so the
+  95%-on-changed-files gate did not flag it; the toast branch is tested
+  regardless.
+
+## Aftermath
+
+Built immediately after the Phase 3a-4 merge, on its own branch off `main` (PR
+#32). The just-added `WorkspaceInfo.task_id` is a single owner today; a likely
+next step (multi-card -> one shared workspace, for epics split into cards) would
+generalise it to reference-counted ownership and make the empty-on-Todo cleanup
+fire only when the last card unlinks.
