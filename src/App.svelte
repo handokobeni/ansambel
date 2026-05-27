@@ -135,8 +135,17 @@
   });
 
   async function handleMove(taskId: string, column: KanbanColumn, order: number) {
-    await tasks.move(taskId, column, order);
-    // After a move, workspaces may have been auto-created by the backend; re-sync.
+    const hadWorkspace =
+      (selectedRepo ? tasks.listForRepo(selectedRepo.id).find((t) => t.id === taskId) : undefined)
+        ?.workspace_id ?? null;
+    const updated = await tasks.move(taskId, column, order);
+    // The backend auto-removes an empty workspace when a card returns to
+    // Todo and clears the link. Surface it so the disappearance from the
+    // sidebar isn't mysterious.
+    if (hadWorkspace && column === 'todo' && updated.workspace_id === null) {
+      addToast('Removed empty workspace', 'info');
+    }
+    // Workspaces may have been auto-created / removed; re-sync the sidebar.
     if (selectedRepo) {
       await workspaces.loadForRepo(selectedRepo.id);
     }

@@ -450,6 +450,14 @@ pub struct WorkspaceInfo {
     /// workspaces persisted before Task 18 deserialise without migration.
     #[serde(default)]
     pub team_activity_private: bool,
+    /// Originating kanban task id when the workspace was auto-created by
+    /// moving a card into In Progress. `serde(default)` → workspaces
+    /// persisted before this change deserialise as `None`. Used to
+    /// reattach a card to its existing workspace instead of creating a
+    /// duplicate when the local `task.workspace_id` link is lost (e.g. a
+    /// Lark refresh blanks it).
+    #[serde(default)]
+    pub task_id: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -791,6 +799,7 @@ mod tests {
             updated_at: 1_776_099_500,
             worktree_dir: PathBuf::from("/data/workspaces/ws_abc123"),
             team_activity_private: false,
+            task_id: None,
         };
         let json = serde_json::to_string(&ws).unwrap();
         let back: WorkspaceInfo = serde_json::from_str(&json).unwrap();
@@ -1396,6 +1405,42 @@ mod tests {
         let json = serde_json::to_string(&binding).unwrap();
         let back: BitableBinding = serde_json::from_str(&json).unwrap();
         assert_eq!(binding, back);
+    }
+
+    #[test]
+    fn workspace_info_task_id_defaults_to_none_for_legacy_json() {
+        // Legacy workspaces.json predates task_id; it must deserialise as None.
+        let legacy = r#"{
+            "id": "ws_1", "repo_id": "repo_1", "branch": "ansambel/x",
+            "base_branch": "main", "custom_branch": false, "title": "T",
+            "description": "", "status": "not_started", "column": "todo",
+            "created_at": 0, "updated_at": 0
+        }"#;
+        let ws: WorkspaceInfo = serde_json::from_str(legacy).unwrap();
+        assert_eq!(ws.task_id, None);
+    }
+
+    #[test]
+    fn workspace_info_round_trips_task_id() {
+        let mut ws = WorkspaceInfo {
+            id: "ws_2".into(),
+            repo_id: "repo_1".into(),
+            branch: "ansambel/y".into(),
+            base_branch: "main".into(),
+            custom_branch: false,
+            title: "T".into(),
+            description: String::new(),
+            status: WorkspaceStatus::NotStarted,
+            column: KanbanColumn::Todo,
+            created_at: 0,
+            updated_at: 0,
+            worktree_dir: std::path::PathBuf::new(),
+            team_activity_private: false,
+            task_id: Some("tk_42".into()),
+        };
+        let json = serde_json::to_string(&ws).unwrap();
+        ws = serde_json::from_str(&json).unwrap();
+        assert_eq!(ws.task_id.as_deref(), Some("tk_42"));
     }
 
     #[tokio::test]

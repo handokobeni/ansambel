@@ -246,6 +246,7 @@ test.describe('Phase 3a-3 publisher — round-trip smoke', () => {
           created_at: 1_700_000_000,
           updated_at: 1_700_000_000,
           worktree_dir: `/mock/worktrees/${WORKSPACE_ID}`,
+          task_id: null,
         },
       ],
       initialTasks: [],

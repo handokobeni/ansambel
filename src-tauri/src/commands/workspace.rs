@@ -359,6 +359,7 @@ pub(crate) async fn create_workspace_inner_with_publisher(
         updated_at: now,
         worktree_dir: worktree_path.clone(),
         team_activity_private: false,
+        task_id: None,
     };
 
     {
@@ -380,7 +381,47 @@ pub(crate) async fn create_workspace_inner_with_publisher(
     Ok(ws)
 }
 
-async fn remove_workspace_inner(
+/// True only when a workspace holds no work and is safe to auto-delete:
+/// no chat messages, no commits ahead of its base branch, a clean
+/// worktree, and no live agent. `agent_live` is computed by the caller
+/// under the AppState lock (this fn shells out to git and must not hold
+/// it). Fail-safe: any git error or unreadable message log is treated as
+/// "not empty" so work is never destroyed on uncertainty.
+pub(crate) fn is_workspace_empty(data_dir: &Path, ws: &WorkspaceInfo, agent_live: bool) -> bool {
+    if agent_live {
+        return false;
+    }
+    let messages_empty = crate::persistence::messages::load_messages(data_dir, &ws.id)
+        .map(|m| m.is_empty())
+        .unwrap_or(false);
+    if !messages_empty {
+        return false;
+    }
+    let wt = ws.worktree_dir.to_string_lossy().to_string();
+    // Compare against the remote tracking ref (origin/<base>) so the check is
+    // correct whether the worktree branch is a new ansambel/* branch or a local
+    // tracking branch that git auto-created from origin during `worktree add`.
+    let range = format!("origin/{}..HEAD", ws.base_branch);
+    let no_commits = match std::process::Command::new("git")
+        .args(["-C", &wt, "rev-list", "--count", &range])
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim() == "0",
+        _ => false,
+    };
+    if !no_commits {
+        return false;
+    }
+    match std::process::Command::new("git")
+        .args(["-C", &wt, "status", "--porcelain"])
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().is_empty(),
+        _ => false,
+    }
+}
+
+pub(crate) async fn remove_workspace_inner(
     ws_id: String,
     data_dir: PathBuf,
     state: Arc<Mutex<AppState>>,
@@ -1214,6 +1255,174 @@ mod tests {
             }
             other => panic!("expected PrivacyChanged, got {other:?}"),
         }
+    }
+
+    // ── Task 2 — is_workspace_empty ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn is_workspace_empty_true_for_fresh_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repo = crate::commands::repo::add_repo_inner(
+            local.to_str().unwrap().to_string(),
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        let ws = create_workspace_inner(
+            repo.id,
+            "T".into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        assert!(is_workspace_empty(&data, &ws, false));
+    }
+
+    #[tokio::test]
+    async fn is_workspace_empty_false_when_agent_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repo = crate::commands::repo::add_repo_inner(
+            local.to_str().unwrap().to_string(),
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        let ws = create_workspace_inner(
+            repo.id,
+            "T".into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        assert!(!is_workspace_empty(&data, &ws, true));
+    }
+
+    #[tokio::test]
+    async fn is_workspace_empty_false_with_commit_ahead() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repo = crate::commands::repo::add_repo_inner(
+            local.to_str().unwrap().to_string(),
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        let ws = create_workspace_inner(
+            repo.id,
+            "T".into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        let wt = ws.worktree_dir.to_string_lossy().to_string();
+        std::fs::write(ws.worktree_dir.join("new.txt"), "x").unwrap();
+        for args in [
+            vec!["-C", &wt, "add", "."],
+            vec![
+                "-C",
+                &wt,
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-m",
+                "wip",
+            ],
+        ] {
+            Command::new("git").args(&args).output().unwrap();
+        }
+        assert!(!is_workspace_empty(&data, &ws, false));
+    }
+
+    #[tokio::test]
+    async fn is_workspace_empty_false_with_dirty_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repo = crate::commands::repo::add_repo_inner(
+            local.to_str().unwrap().to_string(),
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        let ws = create_workspace_inner(
+            repo.id,
+            "T".into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        std::fs::write(ws.worktree_dir.join("untracked.txt"), "x").unwrap();
+        assert!(!is_workspace_empty(&data, &ws, false));
+    }
+
+    #[tokio::test]
+    async fn is_workspace_empty_false_with_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repo = crate::commands::repo::add_repo_inner(
+            local.to_str().unwrap().to_string(),
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        let ws = create_workspace_inner(
+            repo.id,
+            "T".into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        let msg = crate::state::Message {
+            id: "m1".into(),
+            workspace_id: ws.id.clone(),
+            role: crate::state::MessageRole::User,
+            text: "hi".into(),
+            is_partial: false,
+            tool_use: None,
+            tool_result: None,
+            created_at: 0,
+            attachments: Vec::new(),
+        };
+        crate::persistence::messages::append_message(&data, &ws.id, &msg).unwrap();
+        assert!(!is_workspace_empty(&data, &ws, false));
     }
 
     #[tokio::test]

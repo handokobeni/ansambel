@@ -3,6 +3,17 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import App from './App.svelte';
 
+// Spy on addToast so handleMove toast assertion tests can assert it was called.
+vi.mock('$lib/stores/toasts.svelte', () => ({
+  addToast: vi.fn(),
+  removeToast: vi.fn(),
+  getToasts: vi.fn(() => new Map()),
+}));
+
+// Use the manual mock for KanbanBoard so its onMove prop can be triggered
+// from tests without needing svelte-dnd-action in jsdom.
+vi.mock('$lib/components/kanban/KanbanBoard.svelte');
+
 // Mock @tauri-apps/api/event so listen() calls in onMount don't fail without
 // a real Tauri runtime.
 vi.mock('@tauri-apps/api/event', () => ({
@@ -104,6 +115,7 @@ import { repos } from '$lib/stores/repos.svelte';
 import { workspaces } from '$lib/stores/workspaces.svelte';
 import { tasks } from '$lib/stores/tasks.svelte';
 import { modeStore } from '$lib/stores/mode.svelte';
+import { addToast } from '$lib/stores/toasts.svelte';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -174,6 +186,7 @@ describe('App', () => {
       created_at: 1776000001,
       updated_at: 1776000001,
       worktree_dir: '/tmp/ws_abc',
+      task_id: null,
     });
     render(App);
     await waitFor(() => {
@@ -294,6 +307,7 @@ describe('App work mode', () => {
       created_at: 0,
       updated_at: 0,
       worktree_dir: '/tmp/ws_a',
+      task_id: null,
     });
     modeStore.set('work');
     const { getByText } = render(App);
@@ -320,5 +334,118 @@ describe('App work mode', () => {
     });
     const { getByText } = render(App);
     await waitFor(() => expect(getByText(/Todo/)).toBeTruthy());
+  });
+});
+
+// Helper repo fixture reused across handleMove tests.
+const REPO_A = {
+  id: 'repo_a',
+  name: 'test-repo',
+  path: '/x',
+  gh_profile: null,
+  default_branch: 'main',
+  created_at: 0,
+  updated_at: 0,
+};
+
+// Helper task fixture with a workspace link.
+const TASK_WITH_WS = {
+  id: 'task_trigger',
+  repo_id: 'repo_a',
+  workspace_id: 'ws_x',
+  title: 'Some task',
+  description: '',
+  column: 'in_progress' as const,
+  order: 0,
+  created_at: 0,
+  updated_at: 0,
+};
+
+describe('App handleMove — empty-workspace removal toast', () => {
+  // Shared setup: plan mode with a selected repo so the mock KanbanBoard renders.
+  beforeEach(() => {
+    modeStore.set('plan');
+    vi.mocked(repos.getSelected).mockReturnValue(REPO_A);
+    (repos as { selectedRepoId: string | null }).selectedRepoId = REPO_A.id;
+  });
+
+  it('fires addToast when task had a workspace, moves to todo, and backend cleared workspace_id', async () => {
+    // Seed: the task currently has a workspace link.
+    vi.mocked(tasks.listForRepo).mockReturnValue([TASK_WITH_WS]);
+    // Backend move returns the task without a workspace link (empty WS removed).
+    vi.mocked(tasks.move).mockResolvedValue({
+      ...TASK_WITH_WS,
+      workspace_id: null,
+      column: 'todo',
+    });
+
+    render(App);
+
+    // Wait for the mock board's trigger button to appear then click it.
+    const btn = await screen.findByTestId('trigger-move-todo');
+    await fireEvent.click(btn);
+
+    await waitFor(() => {
+      expect(addToast).toHaveBeenCalledWith('Removed empty workspace', 'info');
+    });
+  });
+
+  it('does NOT fire the toast when moving to in_progress (not todo)', async () => {
+    vi.mocked(tasks.listForRepo).mockReturnValue([TASK_WITH_WS]);
+    vi.mocked(tasks.move).mockResolvedValue({
+      ...TASK_WITH_WS,
+      workspace_id: null,
+      column: 'in_progress',
+    });
+
+    render(App);
+
+    const btn = await screen.findByTestId('trigger-move-in-progress');
+    await fireEvent.click(btn);
+
+    await waitFor(() => {
+      expect(tasks.move).toHaveBeenCalled();
+    });
+    expect(addToast).not.toHaveBeenCalledWith('Removed empty workspace', 'info');
+  });
+
+  it('does NOT fire the toast when the task had no workspace to begin with', async () => {
+    // Task starts with no workspace.
+    vi.mocked(tasks.listForRepo).mockReturnValue([{ ...TASK_WITH_WS, workspace_id: null }]);
+    vi.mocked(tasks.move).mockResolvedValue({
+      ...TASK_WITH_WS,
+      workspace_id: null,
+      column: 'todo',
+    });
+
+    render(App);
+
+    const btn = await screen.findByTestId('trigger-move-todo');
+    await fireEvent.click(btn);
+
+    await waitFor(() => {
+      expect(tasks.move).toHaveBeenCalled();
+    });
+    expect(addToast).not.toHaveBeenCalledWith('Removed empty workspace', 'info');
+  });
+
+  it('does NOT fire the toast when the backend kept workspace_id non-null', async () => {
+    vi.mocked(tasks.listForRepo).mockReturnValue([TASK_WITH_WS]);
+    // Backend kept the workspace link (e.g. workspace was not empty).
+    vi.mocked(tasks.move).mockResolvedValue({
+      ...TASK_WITH_WS,
+      workspace_id: 'ws_x',
+      column: 'todo',
+    });
+
+    render(App);
+
+    const btn = await screen.findByTestId('trigger-move-todo');
+    await fireEvent.click(btn);
+
+    await waitFor(() => {
+      expect(tasks.move).toHaveBeenCalled();
+    });
+    expect(addToast).not.toHaveBeenCalledWith('Removed empty workspace', 'info');
   });
 });

@@ -32,6 +32,11 @@ export type Workspace = {
    *  `private_lock` semantics on the Rust side). Optional so workspaces
    *  persisted before Task 18 deserialise without the field. */
   team_activity_private?: boolean;
+  /** Originating kanban task id when the workspace was auto-created by
+   *  moving a card into In Progress. `null` for workspaces created before
+   *  this field existed or created manually. Used to reattach a card to
+   *  its existing workspace instead of creating a duplicate. */
+  task_id: string | null;
 };
 
 export type AppSettings = {
