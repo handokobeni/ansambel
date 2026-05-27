@@ -51,9 +51,11 @@ pub fn is_git_repo(path: &Path) -> bool {
 /// Detect the default branch from origin remote tracking refs.
 ///
 /// Tier 1: `git symbolic-ref --short refs/remotes/origin/HEAD`
-/// Tier 2: probe `git ls-remote --heads origin main` then `master`
+/// Tier 2: local remote-tracking ref `refs/remotes/origin/{main,master}` (offline)
+/// Tier 3: probe `git ls-remote --heads origin {main,master}` (network fallback)
 ///
-/// Never falls back to local branches — workspaces must always branch from origin.
+/// Never falls back to local *branches* — only origin remote-tracking refs, so
+/// workspaces always branch from origin.
 pub fn detect_default_branch(repo_path: &Path) -> Result<String> {
     // Tier 1: origin HEAD symref
     let tier1 = exec_git(
@@ -67,7 +69,21 @@ pub fn detect_default_branch(repo_path: &Path) -> Result<String> {
         }
     }
 
-    // Tier 2: probe ls-remote for known default names
+    // Tier 2: local remote-tracking ref (offline, instant). After any
+    // prior fetch the repo already records `refs/remotes/origin/main|master`
+    // — prefer that over a network round-trip so add-repo works offline (and
+    // when the remote needs auth that isn't available right now). These are
+    // remote-tracking refs, not local branches, so this stays within the
+    // "resolve from remote tracking refs only" rule.
+    for candidate in ["main", "master"] {
+        let local_ref = format!("refs/remotes/origin/{candidate}");
+        if exec_git(&["show-ref", "--verify", "--quiet", &local_ref], repo_path).is_ok() {
+            return Ok(candidate.to_string());
+        }
+    }
+
+    // Tier 3: probe ls-remote for known default names (network fallback for
+    // a freshly-added remote that hasn't been fetched yet).
     for candidate in ["main", "master"] {
         let ls = exec_git(&["ls-remote", "--heads", "origin", candidate], repo_path);
         if let Ok(out) = ls {
@@ -163,12 +179,62 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (local, _remote) = make_repo_with_origin_main(&tmp);
 
-        // Remove origin/HEAD symref to force tier-2 fallback
+        // Remove origin/HEAD (Tier 1) AND the local tracking ref (Tier 2)
+        // so detection must fall all the way through to the network
+        // ls-remote tier (Tier 3). The bare "remote" stays reachable, so
+        // ls-remote finds `main`.
         let _ = Command::new("git")
             .args(["remote", "set-head", "origin", "--delete"])
             .current_dir(&local)
             .output();
+        let _ = Command::new("git")
+            .args(["update-ref", "-d", "refs/remotes/origin/main"])
+            .current_dir(&local)
+            .output();
 
+        let branch = detect_default_branch(&local).unwrap();
+        assert_eq!(branch, "main");
+    }
+
+    #[test]
+    fn detect_default_branch_uses_local_tracking_ref_when_remote_unreachable() {
+        // Regression: detection must NOT require a network round-trip when
+        // the repo already records `refs/remotes/origin/main` from a prior
+        // fetch. Simulate an offline/unauthenticated remote: no origin/HEAD
+        // (Tier 1 fails) + an unreachable URL (network ls-remote fails),
+        // but the local tracking ref is intact.
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _remote) = make_repo_with_origin_main(&tmp);
+
+        // Drop origin/HEAD so the symref tier can't resolve.
+        let _ = Command::new("git")
+            .args(["remote", "set-head", "origin", "--delete"])
+            .current_dir(&local)
+            .output();
+        // Point origin at an unreachable path so any `ls-remote` fails,
+        // while the existing refs/remotes/origin/main tracking ref stays.
+        let _ = Command::new("git")
+            .args([
+                "remote",
+                "set-url",
+                "origin",
+                "/nonexistent/unreachable.git",
+            ])
+            .current_dir(&local)
+            .output();
+
+        // Precondition: the local tracking ref is still present.
+        let has_local = Command::new("git")
+            .args(["show-ref", "--verify", "refs/remotes/origin/main"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        assert!(
+            has_local.status.success(),
+            "precondition: local refs/remotes/origin/main present"
+        );
+
+        // Detection succeeds offline via the local tracking ref.
         let branch = detect_default_branch(&local).unwrap();
         assert_eq!(branch, "main");
     }
