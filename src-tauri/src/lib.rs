@@ -343,6 +343,7 @@ pub fn run() {
             crate::commands::team_activity::get_team_activity_config,
             crate::commands::team_activity::set_team_activity_config,
             crate::commands::team_activity::setup_team_activity_table,
+            crate::commands::team_activity::fetch_team_activity_rows,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -497,6 +498,15 @@ mod tests {
         let _ = std::any::type_name_of_val(
             &crate::commands::workspace::set_workspace_team_activity_private,
         );
+    }
+
+    #[test]
+    fn fetch_team_activity_rows_is_registered() {
+        // Mirror the pattern other Phase 3a-3 commands use to assert
+        // their registration with the Tauri invoke handler. We rely on
+        // the linker pulling in the function symbol; if the macro
+        // forgot to include it, this test would fail to compile.
+        let _ = crate::commands::team_activity::fetch_team_activity_rows;
     }
 
     #[test]

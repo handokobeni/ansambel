@@ -1,13 +1,13 @@
 // Thin Tauri command wrappers — excluded from unit-test coverage because they
 // require a live Tauri AppHandle / Channel, which cannot be constructed in unit
 // tests.  All business logic lives in `agent_core.rs` (fully covered).
-use crate::commands::agent_core::emit_assistant_message_appended;
 pub use crate::commands::agent_core::{
     build_system_prompt_prefix, event_to_persisted_message, process_reader_events,
     process_reader_events_with_cancel, process_reader_events_with_cancel_and_publisher,
     reattach_agent_inner, send_message_inner, send_message_inner_with_persist, spawn_agent_inner,
     stderr_line_to_event, stop_agent_inner, stop_agent_inner_with_publisher, AgentProcess,
 };
+use crate::commands::agent_core::{emit_assistant_message_appended, emit_pr_created_if_detected};
 
 use crate::persistence::message_writer::MessageWriter;
 use crate::persistence::messages::list_messages_paginated;
@@ -219,6 +219,11 @@ fn spawn_reader_thread(
             }
         };
         let publisher_for_reader = publisher_tx.clone();
+        // Emit PrCreated at most once per agent session: the agent restates
+        // the PR URL across later turns, and re-emitting would keep bumping
+        // the row back to `pr_ready`. `Cell` gives interior mutability so the
+        // event callback stays `Fn`; the reader thread is the sole owner.
+        let pr_emitted = std::cell::Cell::new(false);
         process_reader_events_with_cancel_and_publisher(
             reader,
             state,
@@ -248,6 +253,23 @@ fn spawn_reader_thread(
                         &workspace_id,
                         &ev,
                     );
+                    // Phase 3a-4 follow-up: the agent opens PRs itself via
+                    // `gh pr create`, so the only signal we get is the URL
+                    // echoed in its final message. Detect it and emit
+                    // PrCreated so the team-activity row gets a real `pr_url`
+                    // + `pr_ready` status. Deduped via `pr_emitted`. A
+                    // first-class `pr_create` command keyed off the real `gh`
+                    // exit (carrying the diff summary too) is the robust
+                    // replacement planned for Phase 3a-5/6.
+                    if !pr_emitted.get()
+                        && emit_pr_created_if_detected(
+                            Some(&publisher_for_reader),
+                            &workspace_id,
+                            &ev,
+                        )
+                    {
+                        pr_emitted.set(true);
+                    }
                 }
                 let _ = event_tx_reader.send(ev);
             },

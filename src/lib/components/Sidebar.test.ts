@@ -3,6 +3,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import Sidebar from './Sidebar.svelte';
 
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+
 vi.mock('$lib/stores/repos.svelte', () => ({
   repos: {
     selectedRepoId: 'repo_abc123' as string | null,
@@ -62,7 +64,9 @@ vi.mock('$lib/stores/workspaces.svelte', () => {
 
 import { workspaces } from '$lib/stores/workspaces.svelte';
 import { repos } from '$lib/stores/repos.svelte';
+import { messages } from '$lib/stores/messages.svelte';
 import { getToasts, removeToast } from '$lib/stores/toasts.svelte';
+import { teamActivity } from '$lib/stores/team-activity.svelte';
 
 const defaultRepo = {
   id: 'repo_abc123',
@@ -125,12 +129,28 @@ describe('Sidebar', () => {
     // The original mapping (running=amber, waiting=green) confused users
     // because green conventionally signals "active". Running is the most
     // active state — agent currently processing — so it owns green now.
+    messages.reset();
     const { container } = render(Sidebar);
     const dots = container.querySelectorAll('[data-status-dot]');
     expect(dots[0]).toHaveAttribute('data-status', 'running');
     expect(dots[0]?.className).toContain('var(--status-ok)');
     expect(dots[1]).toHaveAttribute('data-status', 'waiting');
     expect(dots[1]?.className).toContain('amber');
+  });
+
+  it('dot reflects the live agent status, overriding the lagging persisted status', () => {
+    // The persisted Workspace.status trails the live agent run state, so the
+    // sidebar must overlay the messages-store status the same way
+    // WorkspaceView does — otherwise a running agent shows a non-green dot
+    // in the sidebar while the title bar correctly says "Running".
+    messages.reset();
+    // ws_def456 is persisted as 'waiting'; the live agent status is 'running'.
+    messages.status.set('ws_def456', 'running');
+    const { container } = render(Sidebar);
+    const dots = container.querySelectorAll('[data-status-dot]');
+    expect(dots[1]).toHaveAttribute('data-status', 'running');
+    expect(dots[1]?.className).toContain('var(--status-ok)');
+    messages.reset();
   });
 
   it('selected workspace row shows a left-border accent so selection is unmistakable', () => {
@@ -643,5 +663,33 @@ describe('Sidebar resize', () => {
     const aside = container.querySelector<HTMLElement>('[data-sidebar]')!;
     // Default = 280 per the component constants.
     expect(aside.style.width).toBe('280px');
+  });
+});
+
+describe('Sidebar — Team Activity panel mount', () => {
+  beforeEach(() => {
+    teamActivity.rows.clear();
+    teamActivity.status = 'idle';
+    teamActivity.selectedWorkspaceId = null;
+  });
+
+  it('renders the TeamActivityPanel below WORKSPACES', () => {
+    const { getByTestId } = render(Sidebar);
+    expect(getByTestId('team-activity-panel')).toBeTruthy();
+  });
+
+  it('calls teamActivity.start() on mount', () => {
+    const startSpy = vi.spyOn(teamActivity, 'start');
+    render(Sidebar);
+    expect(startSpy).toHaveBeenCalled();
+    startSpy.mockRestore();
+  });
+
+  it('calls teamActivity.stop() on destroy', () => {
+    const stopSpy = vi.spyOn(teamActivity, 'stop');
+    const { unmount } = render(Sidebar);
+    unmount();
+    expect(stopSpy).toHaveBeenCalled();
+    stopSpy.mockRestore();
   });
 });

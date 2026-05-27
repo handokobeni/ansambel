@@ -8,6 +8,8 @@
   import NewTaskDialog from '$lib/components/kanban/NewTaskDialog.svelte';
   import WorkspaceView from '$lib/components/workspace/WorkspaceView.svelte';
   import SearchModal from '$lib/components/workspace/SearchModal.svelte';
+  import TeamWorkspaceMirror from '$lib/components/team/TeamWorkspaceMirror.svelte';
+  import { teamActivity } from '$lib/stores/team-activity.svelte';
   import { workspaceTabs } from '$lib/stores/workspace-tabs.svelte';
   import type { SearchMode } from '$lib/types';
   import { listen } from '@tauri-apps/api/event';
@@ -178,7 +180,9 @@
 
   <!-- Main: bottom-right -->
   <main class="bg-[var(--bg-base)] overflow-auto" style="grid-column: 2; grid-row: 2;">
-    {#if modeStore.mode === 'plan'}
+    {#if teamActivity.selectedWorkspaceId}
+      <TeamWorkspaceMirror />
+    {:else if modeStore.mode === 'plan'}
       {#if selectedRepo}
         <KanbanBoard
           repoId={selectedRepo.id}

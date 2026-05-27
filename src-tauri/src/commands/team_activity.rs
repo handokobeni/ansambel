@@ -53,6 +53,89 @@ pub struct RowSnapshot {
     pub private: bool,
 }
 
+/// One row in the Phase 3a-4 sidebar / mirror view, mirroring the columns
+/// the publisher (`RowSnapshot` → `snapshot_to_fields`) writes. All-string
+/// for IPC simplicity; the i64 `last_activity_at` is epoch ms (the same
+/// shape the publisher writes via `last_activity_at = Some(now_ms)`).
+///
+/// Missing or wrong-typed fields default to empty / 0 / false instead of
+/// erroring; teammates running older publisher versions may emit partial
+/// rows, and a partial row is more useful than no row at all.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct TeamActivityRow {
+    pub workspace_id: String,
+    pub repo_remote_url: String,
+    pub repo_display_name: String,
+    pub task_title: String,
+    pub assignee_machine: String,
+    pub ansambel_status: String,
+    pub last_activity_at: i64,
+    pub last_message_preview: String,
+    pub branch_name: String,
+    pub diff_summary: String,
+    pub pr_url: String,
+    pub private: bool,
+}
+
+/// What `fetch_team_activity_rows` returns. Tagged enum so the frontend
+/// can pattern-match without an extra discriminator. Each non-Rows variant
+/// drives a distinct sidebar empty/disabled state; see the spec's error
+/// handling matrix.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FetchResult {
+    /// `team_activity_config.json` absent or `app_token` empty.
+    Disabled,
+    /// Config exists but `machine_label` is blank — filter would over-match.
+    MachineLabelEmpty,
+    /// User has no local repos with an origin remote, so there's nothing to
+    /// scope the team-activity rows against.
+    NoOverlapRepos,
+    /// Success. Rows may be empty (filter matched zero records).
+    Rows { rows: Vec<TeamActivityRow> },
+}
+
+/// Maps one Bitable record into a `TeamActivityRow`. Defensive against
+/// missing keys and wrong types — see the contract note on
+/// [`TeamActivityRow`].
+pub(crate) fn parse_record_to_row(
+    record: crate::platform::lark_client::BitableRecord,
+) -> TeamActivityRow {
+    use crate::task_provider::lark_field_resolver::{extract_single_select, extract_text};
+    let f = &record.fields;
+    // The Bitable *search* endpoint returns text fields as segmented
+    // rich-text arrays (`[{"type":"text","text":"..."}]`), not the plain
+    // strings the list endpoint returns. `extract_text` handles both
+    // shapes; a naive `as_str()` silently drops every search-endpoint text
+    // field, which surfaces as empty rows in the Team Activity sidebar.
+    let s = |key: &str| -> String { f.get(key).and_then(extract_text).unwrap_or_default() };
+    TeamActivityRow {
+        workspace_id: s("workspace_id"),
+        repo_remote_url: s("repo_remote_url"),
+        repo_display_name: s("repo_display_name"),
+        task_title: s("task_title"),
+        assignee_machine: s("assignee_machine"),
+        // Single-select arrives as a bare string, an option object
+        // (`{"id","text"}`), or an array of either — `extract_single_select`
+        // normalises all three to the option's display text.
+        ansambel_status: f
+            .get("ansambel_status")
+            .and_then(extract_single_select)
+            .map(|(_, name)| name)
+            .unwrap_or_default(),
+        last_activity_at: f
+            .get("last_activity_at")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        last_message_preview: s("last_message_preview"),
+        branch_name: s("branch_name"),
+        diff_summary: s("diff_summary"),
+        pr_url: s("pr_url"),
+        private: f.get("private").and_then(|v| v.as_bool()).unwrap_or(false),
+    }
+}
+
 /// Per-workspace aggregation state held while the loop debounces.
 #[derive(Clone, Default)]
 struct AggregatedState {
@@ -364,7 +447,12 @@ fn snapshot_to_fields(snap: &RowSnapshot) -> serde_json::Map<String, serde_json:
         m.insert("diff_summary".into(), serde_json::json!(v));
     }
     if let Some(v) = &snap.pr_url {
-        m.insert("pr_url".into(), serde_json::json!(v));
+        // `pr_url` is a Bitable URL field (field_type 15), which the API
+        // only accepts as an object `{ "link", "text" }` — a bare string is
+        // rejected with 1254068 URLFieldConvFail, failing the whole row
+        // upsert. `text` doubles as the visible label; using the URL itself
+        // keeps the cell readable.
+        m.insert("pr_url".into(), serde_json::json!({ "link": v, "text": v }));
     }
     m.insert("private".into(), serde_json::json!(snap.private));
     m
@@ -557,9 +645,201 @@ async fn lookup_existing_record_id(
         .unwrap_or_default())
 }
 
+/// Returns the canonical `repo_remote_url` for `repo_id` — first call shells
+/// out to `git -C <path> remote get-url origin` (via
+/// [`crate::platform::repo_identity::read_origin_url`]), normalises with
+/// [`crate::platform::repo_identity::canonicalise_remote_url`], and caches
+/// the result keyed by `repo_id`. Subsequent calls return the cached value
+/// without touching the filesystem.
+///
+/// Empty results (repo has no origin, or the git invocation failed) are
+/// cached too — otherwise every 10-second poll would re-shell-out for
+/// every repo that doesn't have an origin remote.
+///
+/// The cache lives for the process lifetime. If the user re-points a
+/// repo's `origin` mid-session, the stale URL stays until app restart;
+/// acceptable per the spec's "enrichment refresh" deferred follow-up.
+///
+/// Poisoned-mutex case: returns an empty string and skips the cache
+/// write. A poisoned mutex means some other writer panicked, which is
+/// already a worse failure mode than a missed cache write here.
+pub(crate) fn read_remote_url_cached(
+    cache: &Arc<std::sync::Mutex<HashMap<String, String>>>,
+    repo_id: &str,
+    repo_path: &std::path::Path,
+) -> String {
+    if let Ok(guard) = cache.lock() {
+        if let Some(cached) = guard.get(repo_id) {
+            return cached.clone();
+        }
+    } else {
+        return String::new();
+    }
+    let raw = crate::platform::repo_identity::read_origin_url(repo_path).unwrap_or_default();
+    let canonical = if raw.is_empty() {
+        String::new()
+    } else {
+        crate::platform::repo_identity::canonicalise_remote_url(&raw)
+    };
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(repo_id.to_string(), canonical.clone());
+    }
+    canonical
+}
+
+/// Pure-Rust core of `fetch_team_activity_rows` — takes its dependencies
+/// (config, remote-URL cache, LarkClient) as explicit arguments so the
+/// Tauri wrapper stays thin and the inner logic is fully unit-testable
+/// against wiremock. See `fetch_team_activity_rows` below for the IPC
+/// glue.
+///
+/// Returns `Ok(FetchResult::…)` for the four reachable outcomes; `Err`
+/// is reserved for genuine Lark / network failures (HTTP error, timeout,
+/// parse error). The frontend store maps `Err` to `status='error'`.
+pub(crate) async fn fetch_team_activity_rows_inner(
+    state: Arc<std::sync::Mutex<crate::state::AppState>>,
+    cfg: Option<crate::state::TeamActivityConfig>,
+    remote_url_cache: &Arc<std::sync::Mutex<HashMap<String, String>>>,
+    client: Option<Arc<crate::platform::lark_client::LarkClient>>,
+) -> Result<FetchResult> {
+    // Config gates: Disabled when missing or token empty.
+    let cfg = match cfg {
+        Some(c) if !c.app_token.is_empty() => c,
+        _ => return Ok(FetchResult::Disabled),
+    };
+    if cfg.machine_label.is_empty() {
+        return Ok(FetchResult::MachineLabelEmpty);
+    }
+    // Snapshot (id, path) under lock then drop it before any shell-out —
+    // read_remote_url_cached may spawn `git` which we don't want under
+    // the AppState mutex.
+    let repos: Vec<(String, std::path::PathBuf)> = {
+        let s = state
+            .lock()
+            .map_err(|e| crate::error::AppError::Other(e.to_string()))?;
+        s.repos
+            .values()
+            .map(|r| (r.id.clone(), r.path.clone()))
+            .collect()
+    };
+    let mut remote_urls: Vec<String> = Vec::with_capacity(repos.len());
+    for (repo_id, repo_path) in repos {
+        let url = read_remote_url_cached(remote_url_cache, &repo_id, &repo_path);
+        if !url.is_empty() {
+            remote_urls.push(url);
+        }
+    }
+    if remote_urls.is_empty() {
+        return Ok(FetchResult::NoOverlapRepos);
+    }
+
+    let client = client.ok_or_else(|| {
+        crate::error::AppError::Other("LarkClient required for non-disabled fetch".into())
+    })?;
+    // The repo-overlap filter runs client-side (see below), NOT in this
+    // server filter. Lark's `is` operator only accepts a single value;
+    // `repo_remote_url is [urlA, urlB]` is rejected with 1254018
+    // InvalidFilter the moment a second repo is registered. The flat
+    // FilterSpec has no nested-OR group to express "is any of", so we let
+    // the server narrow by `assignee_machine` (teammate, not self) and
+    // intersect with the local repo set in Rust.
+    let local_repo_urls: std::collections::HashSet<String> = remote_urls.into_iter().collect();
+    let filter = crate::state::FilterSpec {
+        conjunction: crate::state::FilterConjunction::And,
+        conditions: vec![
+            crate::state::FilterCondition {
+                field_id: String::new(),
+                field_name: "assignee_machine".into(),
+                operator: crate::state::FilterOperator::IsNotEmpty,
+                value: vec![],
+            },
+            crate::state::FilterCondition {
+                field_id: String::new(),
+                field_name: "assignee_machine".into(),
+                operator: crate::state::FilterOperator::IsNot,
+                value: vec![cfg.machine_label.clone()],
+            },
+        ],
+    };
+    let records = client
+        .bitable_search_records(&cfg.app_token, &cfg.table_id, &filter)
+        .await?;
+    // Defense-in-depth privacy guard. The server-side filter excludes
+    // private workspaces indirectly: the publisher blanks `assignee_machine`
+    // when a workspace goes private, and `assignee_machine IsNotEmpty` drops
+    // those rows. That holds only if every writer is a current Ansambel
+    // publisher. A row carrying `private = true` with its columns still
+    // populated — manual Bitable edit, a publisher flush-lag window, or an
+    // older publisher — would otherwise leak. Dropping any flagged-private
+    // row here makes the read boundary the final authority on privacy,
+    // independent of how the row was written.
+    let rows = records
+        .into_iter()
+        .map(parse_record_to_row)
+        .filter(|r| !r.private)
+        // Repo-overlap filter (see the server-filter note above): keep only
+        // rows whose canonical `repo_remote_url` matches one of the user's
+        // locally-registered repos. Both sides are canonicalised by
+        // `canonicalise_remote_url`, so a direct set lookup is exact.
+        .filter(|r| local_repo_urls.contains(&r.repo_remote_url))
+        .collect();
+    Ok(FetchResult::Rows { rows })
+}
+
 // ─────────────────────────────────────────────────────────────────────
-// IPC commands (Task 15)
+// IPC commands (Task 15 + Task 4)
 // ─────────────────────────────────────────────────────────────────────
+
+/// Shared process-wide cache for canonical remote URLs used by the
+/// Phase 3a-4 reader. Distinct from the publisher's enricher cache so
+/// the read path doesn't depend on the write path's state.
+fn reader_remote_url_cache() -> &'static Arc<std::sync::Mutex<HashMap<String, String>>> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Arc<std::sync::Mutex<HashMap<String, String>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Arc::new(std::sync::Mutex::new(HashMap::new())))
+}
+
+/// Phase 3a-4: fetch the rows the Team Activity sidebar and mirror view
+/// should display. Builds the FilterSpec internally from AppState +
+/// `team_activity_config.json`; the frontend passes no arguments.
+///
+/// Returns a tagged [`FetchResult`] enum — see the spec's error handling
+/// matrix for what each variant maps to in the UI.
+#[tauri::command]
+pub async fn fetch_team_activity_rows(
+    state: tauri::State<'_, Arc<std::sync::Mutex<crate::state::AppState>>>,
+    app: tauri::AppHandle,
+) -> std::result::Result<FetchResult, String> {
+    let data_dir = data_dir_from(&app)?;
+    let cfg = crate::persistence::team_activity_config::load_team_activity_config(&data_dir)
+        .map_err(|e| format!("load team_activity_config: {e}"))?;
+
+    // Early exit before constructing LarkClient: cheap path when disabled.
+    let needs_client =
+        matches!(&cfg, Some(c) if !c.app_token.is_empty() && !c.machine_label.is_empty());
+    let client = if needs_client {
+        let store = crate::commands::lark_auth::KeyringStore;
+        match crate::commands::lark_auth::load_lark_config_inner(&data_dir, &store) {
+            Ok(mut lark_cfg) => {
+                if let Some(c) = &cfg {
+                    lark_cfg.app_token = c.app_token.clone();
+                    lark_cfg.table_id = c.table_id.clone();
+                }
+                Some(Arc::new(crate::platform::lark_client::LarkClient::new(
+                    lark_cfg,
+                )))
+            }
+            Err(_) => None, // global lark creds missing → inner treats as Disabled-equivalent
+        }
+    } else {
+        None
+    };
+
+    let cache = reader_remote_url_cache();
+    fetch_team_activity_rows_inner(state.inner().clone(), cfg, cache, client)
+        .await
+        .map_err(|e| e.to_string())
+}
 
 /// Returns the persisted `TeamActivityConfig`, or `Ok(None)` when no
 /// config file exists or its `app_token` is empty (the persister treats
@@ -1182,6 +1462,28 @@ mod tests {
         assert_eq!(fields.get("private"), Some(&serde_json::json!(true)));
     }
 
+    #[test]
+    fn snapshot_to_fields_serializes_pr_url_as_lark_url_field_object() {
+        // `pr_url` is created as a Bitable URL field (field_type 15). Writing
+        // a bare string makes Lark reject the *entire* upsert with
+        // 1254068 URLFieldConvFail — which also blocks every other column in
+        // the same row from updating. The URL field requires an object
+        // payload `{ "link", "text" }`.
+        let snap = RowSnapshot {
+            workspace_id: "ws_pr".into(),
+            pr_url: Some("https://github.com/o/r/pull/2".into()),
+            ..Default::default()
+        };
+        let fields = snapshot_to_fields(&snap);
+        assert_eq!(
+            fields.get("pr_url"),
+            Some(&serde_json::json!({
+                "link": "https://github.com/o/r/pull/2",
+                "text": "https://github.com/o/r/pull/2",
+            }))
+        );
+    }
+
     // ── build_lark_uploader integration (wiremock) ───────────────
 
     #[tokio::test]
@@ -1615,6 +1917,695 @@ mod tests {
         assert!(second.repo_remote_url.is_some());
     }
 
+    // ── Phase 3a-4: parse_record_to_row ─────────────────────────────
+
+    #[test]
+    fn parse_record_to_row_extracts_all_fields_with_correct_types() {
+        let record = crate::platform::lark_client::BitableRecord {
+            record_id: "recA".into(),
+            fields: serde_json::json!({
+                "workspace_id": "ws_a",
+                "repo_remote_url": "https://github.com/x/y",
+                "repo_display_name": "y",
+                "task_title": "Fix bug",
+                "assignee_machine": "alice@laptop",
+                "ansambel_status": "running",
+                "last_activity_at": 1_700_000_000_000_i64,
+                "last_message_preview": "doing thing",
+                "branch_name": "feat/x",
+                "diff_summary": "+10 -3",
+                "pr_url": "https://github.com/x/y/pull/42",
+                "private": false,
+            }),
+            extra: Default::default(),
+        };
+        let row = parse_record_to_row(record);
+        assert_eq!(row.workspace_id, "ws_a");
+        assert_eq!(row.repo_remote_url, "https://github.com/x/y");
+        assert_eq!(row.repo_display_name, "y");
+        assert_eq!(row.task_title, "Fix bug");
+        assert_eq!(row.assignee_machine, "alice@laptop");
+        assert_eq!(row.ansambel_status, "running");
+        assert_eq!(row.last_activity_at, 1_700_000_000_000);
+        assert_eq!(row.last_message_preview, "doing thing");
+        assert_eq!(row.branch_name, "feat/x");
+        assert_eq!(row.diff_summary, "+10 -3");
+        assert_eq!(row.pr_url, "https://github.com/x/y/pull/42");
+        assert!(!row.private);
+    }
+
+    #[test]
+    fn parse_record_to_row_extracts_segmented_array_shape_from_search_endpoint() {
+        // The Bitable *search* endpoint (the one the reader uses) returns
+        // text fields as segmented rich-text arrays — `[{"type":"text",
+        // "text":"..."}]` — not plain strings like the list endpoint. A
+        // naive `as_str()` parse silently drops every text field, which is
+        // exactly the "row shows up empty" bug. Single-select arrives as a
+        // bare option string. Date stays a millisecond number.
+        let record = crate::platform::lark_client::BitableRecord {
+            record_id: "recSeg".into(),
+            fields: serde_json::json!({
+                "workspace_id": [{"type": "text", "text": "ws_seg"}],
+                "repo_remote_url": [{"type": "text", "text": "https://github.com/x/y"}],
+                "repo_display_name": [{"type": "text", "text": "y"}],
+                "task_title": [{"type": "text", "text": "Fix bug"}],
+                "assignee_machine": [{"type": "text", "text": "alice@laptop"}],
+                "ansambel_status": "running",
+                "last_activity_at": 1_700_000_000_000_i64,
+                "last_message_preview": [{"type": "text", "text": "doing thing"}],
+                "branch_name": [{"type": "text", "text": "feat/x"}],
+                "diff_summary": [{"type": "text", "text": "+10 -3"}],
+                "pr_url": [{"type": "text", "text": "https://github.com/x/y/pull/42"}],
+                "private": false,
+            }),
+            extra: Default::default(),
+        };
+        let row = parse_record_to_row(record);
+        assert_eq!(row.workspace_id, "ws_seg");
+        assert_eq!(row.repo_remote_url, "https://github.com/x/y");
+        assert_eq!(row.repo_display_name, "y");
+        assert_eq!(row.task_title, "Fix bug");
+        assert_eq!(row.assignee_machine, "alice@laptop");
+        assert_eq!(row.ansambel_status, "running");
+        assert_eq!(row.last_activity_at, 1_700_000_000_000);
+        assert_eq!(row.last_message_preview, "doing thing");
+        assert_eq!(row.branch_name, "feat/x");
+        assert_eq!(row.diff_summary, "+10 -3");
+        assert_eq!(row.pr_url, "https://github.com/x/y/pull/42");
+        assert!(!row.private);
+    }
+
+    #[test]
+    fn parse_record_to_row_extracts_single_select_object_shape() {
+        // Single-select can also arrive as an option object
+        // `{"id":"opt_x","text":"pr_ready"}` (native search shape). The
+        // status must resolve to the option text, not empty.
+        let record = crate::platform::lark_client::BitableRecord {
+            record_id: "recSel".into(),
+            fields: serde_json::json!({
+                "workspace_id": [{"type": "text", "text": "ws_sel"}],
+                "ansambel_status": {"id": "optABC", "text": "pr_ready"},
+            }),
+            extra: Default::default(),
+        };
+        let row = parse_record_to_row(record);
+        assert_eq!(row.workspace_id, "ws_sel");
+        assert_eq!(row.ansambel_status, "pr_ready");
+    }
+
+    #[test]
+    fn parse_record_to_row_defaults_missing_strings_to_empty() {
+        let record = crate::platform::lark_client::BitableRecord {
+            record_id: "recM".into(),
+            fields: serde_json::json!({ "workspace_id": "ws_m" }),
+            extra: Default::default(),
+        };
+        let row = parse_record_to_row(record);
+        assert_eq!(row.workspace_id, "ws_m");
+        assert_eq!(row.repo_remote_url, "");
+        assert_eq!(row.repo_display_name, "");
+        assert_eq!(row.task_title, "");
+        assert_eq!(row.assignee_machine, "");
+        assert_eq!(row.ansambel_status, "");
+        assert_eq!(row.last_activity_at, 0);
+        assert_eq!(row.last_message_preview, "");
+        assert_eq!(row.branch_name, "");
+        assert_eq!(row.diff_summary, "");
+        assert_eq!(row.pr_url, "");
+        assert!(!row.private);
+    }
+
+    #[test]
+    fn parse_record_to_row_coerces_datetime_epoch_ms_to_i64() {
+        let record = crate::platform::lark_client::BitableRecord {
+            record_id: "recT".into(),
+            fields: serde_json::json!({
+                "workspace_id": "ws_t",
+                "last_activity_at": 1_705_000_000_000_i64,
+            }),
+            extra: Default::default(),
+        };
+        let row = parse_record_to_row(record);
+        assert_eq!(row.last_activity_at, 1_705_000_000_000);
+    }
+
+    #[test]
+    fn parse_record_to_row_handles_private_true_value() {
+        let record = crate::platform::lark_client::BitableRecord {
+            record_id: "recP".into(),
+            fields: serde_json::json!({
+                "workspace_id": "ws_p",
+                "private": true,
+            }),
+            extra: Default::default(),
+        };
+        let row = parse_record_to_row(record);
+        assert!(row.private);
+    }
+
+    #[test]
+    fn parse_record_to_row_handles_malformed_record_gracefully() {
+        let record = crate::platform::lark_client::BitableRecord {
+            record_id: "recX".into(),
+            fields: serde_json::json!({
+                "workspace_id": "ws_x",
+                "last_activity_at": "not a number",
+                "private": "not a bool",
+            }),
+            extra: Default::default(),
+        };
+        let row = parse_record_to_row(record);
+        assert_eq!(row.workspace_id, "ws_x");
+        assert_eq!(row.last_activity_at, 0);
+        assert!(!row.private);
+    }
+
+    // ── Phase 3a-4: read_remote_url_cached ─────────────────────────
+
+    #[test]
+    fn read_remote_url_cached_returns_canonical_url_for_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(tmp.path(), "git@github.com:Foo/Bar.git");
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let url = read_remote_url_cached(&cache, "repo_a", tmp.path());
+        assert!(
+            url.contains("github.com"),
+            "expected canonical github.com host, got {url:?}"
+        );
+        assert!(
+            !url.ends_with(".git"),
+            "canonicaliser strips .git, got {url:?}"
+        );
+    }
+
+    #[test]
+    fn read_remote_url_cached_returns_empty_string_when_no_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg(tmp.path())
+            .output()
+            .unwrap();
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let url = read_remote_url_cached(&cache, "repo_b", tmp.path());
+        assert_eq!(url, "");
+    }
+
+    #[test]
+    fn read_remote_url_cached_hits_cache_on_second_call() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(tmp.path(), "git@github.com:Foo/Bar.git");
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let first = read_remote_url_cached(&cache, "repo_c", tmp.path());
+        drop(tmp);
+        let second = read_remote_url_cached(&cache, "repo_c", std::path::Path::new("/tmp/gone"));
+        assert_eq!(first, second);
+        assert!(!second.is_empty());
+    }
+
+    #[test]
+    fn read_remote_url_cached_caches_empty_negative_results_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg(tmp.path())
+            .output()
+            .unwrap();
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let first = read_remote_url_cached(&cache, "repo_d", tmp.path());
+        assert_eq!(first, "");
+        assert_eq!(cache.lock().unwrap().get("repo_d"), Some(&"".to_string()));
+    }
+
+    // ── Phase 3a-4: fetch_team_activity_rows_inner ─────────────────
+
+    fn make_team_cfg(app_token: &str, machine_label: &str) -> TeamActivityConfig {
+        TeamActivityConfig {
+            app_token: app_token.into(),
+            table_id: "tbl_test".into(),
+            machine_label: machine_label.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_team_activity_rows_inner_returns_disabled_when_config_none() {
+        let state: Arc<std::sync::Mutex<crate::state::AppState>> =
+            Arc::new(std::sync::Mutex::new(crate::state::AppState::default()));
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let result = fetch_team_activity_rows_inner(state, None, &cache, None)
+            .await
+            .unwrap();
+        assert_eq!(result, FetchResult::Disabled);
+    }
+
+    #[tokio::test]
+    async fn fetch_team_activity_rows_inner_returns_disabled_when_app_token_empty() {
+        let state: Arc<std::sync::Mutex<crate::state::AppState>> =
+            Arc::new(std::sync::Mutex::new(crate::state::AppState::default()));
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cfg = make_team_cfg("", "alice@laptop");
+        let result = fetch_team_activity_rows_inner(state, Some(cfg), &cache, None)
+            .await
+            .unwrap();
+        assert_eq!(result, FetchResult::Disabled);
+    }
+
+    #[tokio::test]
+    async fn fetch_team_activity_rows_inner_returns_machine_label_empty_when_label_blank() {
+        let state: Arc<std::sync::Mutex<crate::state::AppState>> =
+            Arc::new(std::sync::Mutex::new(crate::state::AppState::default()));
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cfg = make_team_cfg("bascn_x", "");
+        let result = fetch_team_activity_rows_inner(state, Some(cfg), &cache, None)
+            .await
+            .unwrap();
+        assert_eq!(result, FetchResult::MachineLabelEmpty);
+    }
+
+    #[tokio::test]
+    async fn fetch_team_activity_rows_inner_returns_no_overlap_when_state_has_no_repos() {
+        let state: Arc<std::sync::Mutex<crate::state::AppState>> =
+            Arc::new(std::sync::Mutex::new(crate::state::AppState::default()));
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cfg = make_team_cfg("bascn_x", "alice@laptop");
+        let result = fetch_team_activity_rows_inner(state, Some(cfg), &cache, None)
+            .await
+            .unwrap();
+        assert_eq!(result, FetchResult::NoOverlapRepos);
+    }
+
+    #[tokio::test]
+    async fn fetch_team_activity_rows_inner_returns_no_overlap_when_repos_have_no_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .arg("init")
+            .arg(tmp.path())
+            .output()
+            .unwrap();
+        let state = Arc::new(std::sync::Mutex::new(crate::state::AppState {
+            repos: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "repo_x".into(),
+                    crate::state::RepoInfo {
+                        id: "repo_x".into(),
+                        name: "x".into(),
+                        path: tmp.path().to_path_buf(),
+                        gh_profile: None,
+                        default_branch: "main".into(),
+                        created_at: 0,
+                        updated_at: 0,
+                        scripts: Vec::new(),
+                    },
+                );
+                m
+            },
+            ..Default::default()
+        }));
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cfg = make_team_cfg("bascn_x", "alice@laptop");
+        let result = fetch_team_activity_rows_inner(state, Some(cfg), &cache, None)
+            .await
+            .unwrap();
+        assert_eq!(result, FetchResult::NoOverlapRepos);
+    }
+
+    #[tokio::test]
+    async fn fetch_team_activity_rows_inner_returns_rows_on_lark_success() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok", "tenant_access_token": "tkn", "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(
+                r"^/open-apis/bitable/v1/apps/[^/]+/tables/[^/]+/records/search$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "record_id": "rec1",
+                            "fields": {
+                                "workspace_id": "ws_remote",
+                                "repo_remote_url": "https://github.com/foo/bar",
+                                "repo_display_name": "bar",
+                                "task_title": "Hello",
+                                "assignee_machine": "bob@laptop",
+                                "ansambel_status": "running",
+                                "last_activity_at": 1_700_000_000_000_i64,
+                                "last_message_preview": "doing things",
+                                "branch_name": "feat/x",
+                                "diff_summary": "",
+                                "pr_url": "",
+                                "private": false,
+                            }
+                        }
+                    ],
+                    "has_more": false,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(tmp.path(), "https://github.com/foo/bar.git");
+        let state = Arc::new(std::sync::Mutex::new(crate::state::AppState {
+            repos: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "repo_real".into(),
+                    crate::state::RepoInfo {
+                        id: "repo_real".into(),
+                        name: "bar".into(),
+                        path: tmp.path().to_path_buf(),
+                        gh_profile: None,
+                        default_branch: "main".into(),
+                        created_at: 0,
+                        updated_at: 0,
+                        scripts: Vec::new(),
+                    },
+                );
+                m
+            },
+            ..Default::default()
+        }));
+        let client = Arc::new(crate::platform::lark_client::LarkClient::new(
+            crate::platform::lark_client::LarkConfig {
+                app_id: "app".into(),
+                app_secret: "sec".into(),
+                app_token: "bascn".into(),
+                table_id: "tbl".into(),
+                base_url: server.uri(),
+            },
+        ));
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cfg = make_team_cfg("bascn", "alice@laptop");
+        let result = fetch_team_activity_rows_inner(state, Some(cfg), &cache, Some(client))
+            .await
+            .unwrap();
+        match result {
+            FetchResult::Rows { rows } => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].workspace_id, "ws_remote");
+                assert_eq!(rows[0].assignee_machine, "bob@laptop");
+            }
+            other => panic!("expected Rows, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_team_activity_rows_inner_filters_repos_client_side_with_multiple_repos() {
+        // Regression: Lark's `is` operator rejects a multi-value array
+        // (`repo_remote_url is [urlA, urlB]` → 1254018 InvalidFilter), which
+        // broke the whole poll the moment a second repo was registered. The
+        // repo-overlap filter must therefore run client-side: the server
+        // filter keeps only the two `assignee_machine` conditions, and rows
+        // are narrowed to the local repo set in Rust.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok", "tenant_access_token": "tkn", "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        // The mock ignores the filter and returns three rows: two for local
+        // repos (bar, baz) and one for a repo the user does NOT have (other).
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(
+                r"^/open-apis/bitable/v1/apps/[^/]+/tables/[^/]+/records/search$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [
+                        { "record_id": "recBar", "fields": {
+                            "workspace_id": "ws_bar",
+                            "repo_remote_url": "https://github.com/foo/bar",
+                            "assignee_machine": "bob@laptop", "private": false } },
+                        { "record_id": "recBaz", "fields": {
+                            "workspace_id": "ws_baz",
+                            "repo_remote_url": "https://github.com/foo/baz",
+                            "assignee_machine": "carol@laptop", "private": false } },
+                        { "record_id": "recOther", "fields": {
+                            "workspace_id": "ws_other",
+                            "repo_remote_url": "https://github.com/foo/other",
+                            "assignee_machine": "dave@laptop", "private": false } },
+                    ],
+                    "has_more": false,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp_a = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(tmp_a.path(), "https://github.com/foo/bar.git");
+        let tmp_b = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(tmp_b.path(), "https://github.com/foo/baz.git");
+        let mk = |id: &str, name: &str, path: std::path::PathBuf| crate::state::RepoInfo {
+            id: id.into(),
+            name: name.into(),
+            path,
+            gh_profile: None,
+            default_branch: "main".into(),
+            created_at: 0,
+            updated_at: 0,
+            scripts: Vec::new(),
+        };
+        let state = Arc::new(std::sync::Mutex::new(crate::state::AppState {
+            repos: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "repo_a".into(),
+                    mk("repo_a", "bar", tmp_a.path().to_path_buf()),
+                );
+                m.insert(
+                    "repo_b".into(),
+                    mk("repo_b", "baz", tmp_b.path().to_path_buf()),
+                );
+                m
+            },
+            ..Default::default()
+        }));
+        let client = Arc::new(crate::platform::lark_client::LarkClient::new(
+            crate::platform::lark_client::LarkConfig {
+                app_id: "app".into(),
+                app_secret: "sec".into(),
+                app_token: "bascn".into(),
+                table_id: "tbl".into(),
+                base_url: server.uri(),
+            },
+        ));
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cfg = make_team_cfg("bascn", "alice@laptop");
+        let result = fetch_team_activity_rows_inner(state, Some(cfg), &cache, Some(client))
+            .await
+            .unwrap();
+        match result {
+            FetchResult::Rows { mut rows } => {
+                rows.sort_by(|a, b| a.workspace_id.cmp(&b.workspace_id));
+                let ids: Vec<&str> = rows.iter().map(|r| r.workspace_id.as_str()).collect();
+                assert_eq!(
+                    ids,
+                    vec!["ws_bar", "ws_baz"],
+                    "only rows for locally-registered repos should survive; ws_other must be dropped"
+                );
+            }
+            other => panic!("expected Rows, got {other:?}"),
+        }
+
+        // Lock the regression: the server filter must NOT carry a
+        // `repo_remote_url` condition (multi-value `is` → 1254018).
+        let reqs = server.received_requests().await.unwrap();
+        let search = reqs
+            .iter()
+            .find(|r| r.url.path().ends_with("/records/search"))
+            .expect("a search request was sent");
+        let body: serde_json::Value = serde_json::from_slice(&search.body).unwrap();
+        let conditions = body["filter"]["conditions"].as_array().unwrap();
+        assert!(
+            conditions
+                .iter()
+                .all(|c| c["field_name"].as_str() != Some("repo_remote_url")),
+            "repo_remote_url must be filtered client-side, not via a multi-value server `is`: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_team_activity_rows_inner_drops_rows_flagged_private() {
+        // Defense-in-depth: a row whose `private` checkbox is set must never
+        // reach the sidebar, even when its sensitive columns are still
+        // populated (manual Bitable edit, a publisher lag window, or an
+        // older publisher version). The normal privacy path relies on the
+        // publisher blanking `assignee_machine`, which the server-side
+        // `IsNotEmpty` filter then excludes; this read-boundary guard backs
+        // that up so a flagged-private row can never leak regardless of how
+        // it landed in the table.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "msg": "ok", "tenant_access_token": "tkn", "expire": 7200,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(
+                r"^/open-apis/bitable/v1/apps/[^/]+/tables/[^/]+/records/search$",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0,
+                "data": {
+                    "items": [
+                        {
+                            "record_id": "recPriv",
+                            "fields": {
+                                "workspace_id": "ws_priv",
+                                "repo_remote_url": "https://github.com/foo/bar",
+                                "repo_display_name": "bar",
+                                "task_title": "secret work",
+                                "assignee_machine": "bob@laptop",
+                                "ansambel_status": "running",
+                                "last_activity_at": 1_700_000_000_000_i64,
+                                "last_message_preview": "should not leak",
+                                "branch_name": "feat/secret",
+                                "diff_summary": "",
+                                "pr_url": "",
+                                "private": true,
+                            }
+                        }
+                    ],
+                    "has_more": false,
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(tmp.path(), "https://github.com/foo/bar.git");
+        let state = Arc::new(std::sync::Mutex::new(crate::state::AppState {
+            repos: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "repo_real".into(),
+                    crate::state::RepoInfo {
+                        id: "repo_real".into(),
+                        name: "bar".into(),
+                        path: tmp.path().to_path_buf(),
+                        gh_profile: None,
+                        default_branch: "main".into(),
+                        created_at: 0,
+                        updated_at: 0,
+                        scripts: Vec::new(),
+                    },
+                );
+                m
+            },
+            ..Default::default()
+        }));
+        let client = Arc::new(crate::platform::lark_client::LarkClient::new(
+            crate::platform::lark_client::LarkConfig {
+                app_id: "app".into(),
+                app_secret: "sec".into(),
+                app_token: "bascn".into(),
+                table_id: "tbl".into(),
+                base_url: server.uri(),
+            },
+        ));
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cfg = make_team_cfg("bascn", "alice@laptop");
+        let result = fetch_team_activity_rows_inner(state, Some(cfg), &cache, Some(client))
+            .await
+            .unwrap();
+        match result {
+            FetchResult::Rows { rows } => {
+                assert!(
+                    rows.is_empty(),
+                    "private-flagged row leaked into the sidebar: {rows:?}"
+                );
+            }
+            other => panic!("expected Rows, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_team_activity_rows_inner_propagates_lark_auth_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "code": 99991663, "msg": "invalid app_secret",
+            })))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo_with_origin(tmp.path(), "https://github.com/foo/bar.git");
+        let state = Arc::new(std::sync::Mutex::new(crate::state::AppState {
+            repos: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "repo_real".into(),
+                    crate::state::RepoInfo {
+                        id: "repo_real".into(),
+                        name: "bar".into(),
+                        path: tmp.path().to_path_buf(),
+                        gh_profile: None,
+                        default_branch: "main".into(),
+                        created_at: 0,
+                        updated_at: 0,
+                        scripts: Vec::new(),
+                    },
+                );
+                m
+            },
+            ..Default::default()
+        }));
+        let client = Arc::new(crate::platform::lark_client::LarkClient::new(
+            crate::platform::lark_client::LarkConfig {
+                app_id: "app".into(),
+                app_secret: "sec".into(),
+                app_token: "bascn".into(),
+                table_id: "tbl".into(),
+                base_url: server.uri(),
+            },
+        ));
+        let cache: Arc<std::sync::Mutex<HashMap<String, String>>> =
+            Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let cfg = make_team_cfg("bascn", "alice@laptop");
+        let result = fetch_team_activity_rows_inner(state, Some(cfg), &cache, Some(client)).await;
+        assert!(result.is_err(), "expected auth error, got {result:?}");
+    }
+
     // ── get/set_team_activity_config (Task 15) ────────────────────
 
     #[test]
@@ -1912,5 +2903,17 @@ mod tests {
         set_team_activity_config_inner(tmp.path(), &cfg).unwrap();
         let loaded = get_team_activity_config_inner(tmp.path()).unwrap();
         assert!(loaded.is_none());
+    }
+
+    // ── Phase 3a-4: Tauri command wiring ───────────────────────────
+
+    #[test]
+    fn fetch_team_activity_rows_is_a_tauri_command() {
+        // Symbol-presence check: confirms the function exists and is
+        // reachable as a public symbol. The #[tauri::command] macro wraps
+        // the function in generated glue so a direct fn-pointer coercion
+        // would not compile; we use the same type_name_of_val pattern as
+        // the other command registration tests.
+        let _ = std::any::type_name_of_val(&fetch_team_activity_rows);
     }
 }

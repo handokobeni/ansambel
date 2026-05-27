@@ -19,6 +19,7 @@ import type {
   TerminalChunk,
   FileReadResponse,
   FileWriteResponse,
+  FetchResult,
   LarkStatus,
   SetLarkCredentialsArgs,
   BitableBinding,
@@ -297,6 +298,14 @@ export const api = {
      *  created — empty when the table is already fully provisioned. */
     setupTable: (appToken: string, tableId: string): Promise<string[]> =>
       invoke<string[]>('setup_team_activity_table', { appToken, tableId }),
+
+    /** Phase 3a-4: fetch rows the Team Activity sidebar + mirror view
+     *  should display. Backend builds the FilterSpec from AppState +
+     *  team_activity_config — frontend passes no arguments. Returns a
+     *  tagged FetchResult: `disabled` / `machine_label_empty` /
+     *  `no_overlap_repos` / `rows`. See
+     *  `commands/team_activity.rs::fetch_team_activity_rows`. */
+    fetchRows: (): Promise<FetchResult> => invoke<FetchResult>('fetch_team_activity_rows'),
   },
 
   script: {

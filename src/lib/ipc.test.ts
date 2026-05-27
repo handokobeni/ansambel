@@ -609,6 +609,21 @@ describe('api.teamActivity', () => {
     vi.mocked(invoke).mockRejectedValue(new Error('Lark API: code 99991663'));
     await expect(api.teamActivity.setupTable('appA', 'tblA')).rejects.toThrow('99991663');
   });
+
+  describe('api.teamActivity.fetchRows', () => {
+    it('invokes fetch_team_activity_rows with no arguments', async () => {
+      vi.mocked(invoke).mockResolvedValueOnce({ kind: 'rows', rows: [] });
+      const result = await api.teamActivity.fetchRows();
+      expect(invoke).toHaveBeenCalledWith('fetch_team_activity_rows');
+      expect(result).toEqual({ kind: 'rows', rows: [] });
+    });
+
+    it('passes through the disabled FetchResult variant unchanged', async () => {
+      vi.mocked(invoke).mockResolvedValueOnce({ kind: 'disabled' });
+      const result = await api.teamActivity.fetchRows();
+      expect(result).toEqual({ kind: 'disabled' });
+    });
+  });
 });
 
 describe('agentChannel', () => {
