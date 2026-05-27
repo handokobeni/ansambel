@@ -387,7 +387,6 @@ pub(crate) async fn create_workspace_inner_with_publisher(
 /// under the AppState lock (this fn shells out to git and must not hold
 /// it). Fail-safe: any git error or unreadable message log is treated as
 /// "not empty" so work is never destroyed on uncertainty.
-#[allow(dead_code)] // called from Task 4 (move_task_inner) — not wired yet
 pub(crate) fn is_workspace_empty(data_dir: &Path, ws: &WorkspaceInfo, agent_live: bool) -> bool {
     if agent_live {
         return false;

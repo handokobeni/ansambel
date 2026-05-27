@@ -344,12 +344,14 @@ pub(crate) async fn move_task_inner(
     provider: Arc<dyn crate::task_provider::TaskProvider>,
     state: Arc<Mutex<AppState>>,
 ) -> Result<Task> {
-    // Extract auto-workspace conditions before any async work. The
-    // auto-workspace path predates the TaskProvider abstraction; it
-    // still lives in the command layer because it crosses subsystems
-    // (workspace creation + task mutation) — providers only own task
-    // persistence.
-    let (repo_id, existing_workspace_id, task_title, task_desc, needs_workspace) = {
+    // Snapshot under one lock, then drop it before git / async work.
+    // reattach_ws_id: the workspace this card should link to when entering
+    //   In Progress — a still-valid existing link, else a workspace already
+    //   tagged with this task_id (link may have been wiped by a Lark
+    //   refresh). None → create a fresh workspace.
+    // todo_cleanup: (workspace, agent_live) when the linked workspace still
+    //   exists — used by the empty check on the way to Todo.
+    let (repo_id, task_title, task_desc, reattach_ws_id, todo_cleanup, needs_create) = {
         let st = state
             .lock()
             .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
@@ -357,68 +359,111 @@ pub(crate) async fn move_task_inner(
             .tasks
             .get(&task_id)
             .ok_or_else(|| AppError::NotFound(format!("task '{}' not found", task_id)))?;
-        let needs = column == KanbanColumn::InProgress && task.workspace_id.is_none();
+        let repo_id = task.repo_id.clone();
+        let linked = task.workspace_id.clone();
+
+        let reattach_ws_id = match linked.as_ref() {
+            Some(id) if st.workspaces.contains_key(id) => Some(id.clone()),
+            _ => st
+                .workspaces
+                .values()
+                .find(|w| w.repo_id == repo_id && w.task_id.as_deref() == Some(task_id.as_str()))
+                .map(|w| w.id.clone()),
+        };
+
+        let todo_cleanup = linked
+            .as_ref()
+            .and_then(|id| st.workspaces.get(id))
+            .map(|w| (w.clone(), st.agents.contains_key(&w.id)));
+
+        // Only create a fresh workspace if moving to InProgress AND there is
+        // no reattach target AND the task carries no workspace_id at all.
+        // A stale link (workspace_id set but not present in state.workspaces)
+        // is left as-is — we don't know why it's missing, so we leave it
+        // untouched rather than creating a duplicate.
+        let needs_create =
+            column == KanbanColumn::InProgress && reattach_ws_id.is_none() && linked.is_none();
         (
-            task.repo_id.clone(),
-            task.workspace_id.clone(),
+            repo_id,
             task.title.clone(),
             task.description.clone(),
-            needs,
+            reattach_ws_id,
+            todo_cleanup,
+            needs_create,
         )
     };
-    // Lock is dropped here.
 
-    // Auto-create workspace if moving into InProgress with no linked workspace.
-    let maybe_ws_id: Option<String> = if needs_workspace {
+    // (A) Auto-create when entering In Progress with no reattach target.
+    let created_ws_id: Option<String> = if needs_create {
         let ws = crate::commands::workspace::create_workspace_inner(
             repo_id.clone(),
             task_title,
             task_desc,
-            None, // auto-branch
+            None,
             data_dir.clone(),
             Arc::clone(&state),
         )
         .await?;
+        {
+            let mut st = state
+                .lock()
+                .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+            if let Some(w) = st.workspaces.get_mut(&ws.id) {
+                w.task_id = Some(task_id.clone());
+            }
+            crate::persistence::workspaces::save_workspaces(&data_dir, &st.workspaces)?;
+        }
         tracing::info!(task_id = %task_id, workspace_id = %ws.id, "Auto-created workspace for task");
         Some(ws.id)
     } else {
         None
     };
 
-    // Route the column/order update through the provider so persistence
-    // is owned by it (tasks.json for LocalProvider, Bitable for Lark).
-    let mut updated = provider.move_task(&task_id, column, order).await?;
-
-    // Preserve local-only fields. LarkProvider can't know repo_id (not
-    // stored on Bitable rows) or workspace_id (local-only concept) — it
-    // returns them as "" / None. Stamping them from the mirror prevents
-    // the mirror entry from regressing to repo_id="" / workspace_id=None
-    // on subsequent operations (e.g., re-moving the same card).
-    updated.repo_id = repo_id.clone();
-    updated.workspace_id = existing_workspace_id.clone();
-
-    // If we auto-created a workspace, stamp the workspace_id onto the
-    // task. The TaskProvider trait doesn't model workspace_id (it's a
-    // local-only concept for the orchestrator), so we patch the
-    // in-memory mirror here and re-save tasks.json directly so
-    // workspace_id is durable on disk. LarkProvider ignores
-    // workspace_id on its remote anyway, so this stays a local-only
-    // concern.
-    if let Some(ws_id) = maybe_ws_id {
-        updated.workspace_id = Some(ws_id);
-        let map = {
-            let mut st = state
-                .lock()
-                .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
-            st.tasks.insert(updated.id.clone(), updated.clone());
-            st.tasks.clone()
-        };
-        crate::persistence::tasks::save_tasks(&data_dir, &map)?;
+    // (B) Auto-remove an EMPTY linked workspace when returning to Todo.
+    let removed_ws = if column == KanbanColumn::Todo {
+        match todo_cleanup.as_ref() {
+            Some((ws, agent_live))
+                if crate::commands::workspace::is_workspace_empty(&data_dir, ws, *agent_live) =>
+            {
+                crate::commands::workspace::remove_workspace_inner(
+                    ws.id.clone(),
+                    data_dir.clone(),
+                    Arc::clone(&state),
+                )
+                .await?;
+                tracing::info!(task_id = %task_id, workspace_id = %ws.id, "Removed empty workspace on return to Todo");
+                Some(ws.id.clone())
+            }
+            _ => None,
+        }
     } else {
+        None
+    };
+
+    // Route the column/order change through the provider.
+    let mut updated = provider.move_task(&task_id, column, order).await?;
+    updated.repo_id = repo_id.clone();
+
+    // Final link: removal wins; else created/reattached id; else preserve.
+    updated.workspace_id = if removed_ws.is_some() {
+        None
+    } else if let Some(id) = created_ws_id.or(reattach_ws_id) {
+        Some(id)
+    } else {
+        let st = state
+            .lock()
+            .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
+        st.tasks.get(&task_id).and_then(|t| t.workspace_id.clone())
+    };
+
+    // Persist updated task (mirror + tasks.json so the link is durable).
+    {
         let mut st = state
             .lock()
             .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
         st.tasks.insert(updated.id.clone(), updated.clone());
+        let map = st.tasks.clone();
+        crate::persistence::tasks::save_tasks(&data_dir, &map)?;
     }
     Ok(updated)
 }
@@ -1567,6 +1612,267 @@ mod tests {
             Some("ws_existing"),
             "workspace_id survives repeated moves"
         );
+    }
+
+    // ── Task 4: move_task lifecycle tests ───────────────────────────
+
+    fn init_bare_repo_for_task_tests(tmp: &tempfile::TempDir) -> PathBuf {
+        use std::process::Command as Cmd;
+        let remote = tmp.path().join("task_remote.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        Cmd::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&remote)
+            .output()
+            .unwrap();
+        let local = tmp.path().join("task_local");
+        Cmd::new("git")
+            .args(["clone", remote.to_str().unwrap(), local.to_str().unwrap()])
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["config", "user.email", "t@t.com"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["config", "user.name", "T"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        std::fs::write(local.join("f"), b"x").unwrap();
+        Cmd::new("git")
+            .args(["add", "."])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["push", "origin", "HEAD:main"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        Cmd::new("git")
+            .args(["remote", "set-head", "origin", "main"])
+            .current_dir(&local)
+            .output()
+            .unwrap();
+        local
+    }
+
+    fn make_state_with_real_repo(
+        tmp: &tempfile::TempDir,
+        local_path: &std::path::Path,
+    ) -> Arc<Mutex<AppState>> {
+        let mut state = AppState::default();
+        state.repos.insert(
+            "repo_r1".into(),
+            RepoInfo {
+                id: "repo_r1".into(),
+                name: "my-repo".into(),
+                path: local_path.to_path_buf(),
+                gh_profile: None,
+                default_branch: "main".into(),
+                created_at: 1_776_000_000,
+                updated_at: 1_776_000_000,
+                scripts: Vec::new(),
+            },
+        );
+        let _ = tmp;
+        Arc::new(Mutex::new(state))
+    }
+
+    #[tokio::test]
+    async fn move_to_in_progress_reattaches_instead_of_duplicating() {
+        let tmp = tempdir().unwrap();
+        let local = init_bare_repo_for_task_tests(&tmp);
+        let data = tmp.path().join("data4a");
+        std::fs::create_dir_all(&data).unwrap();
+        let state = make_state_with_real_repo(&tmp, &local);
+        let repo_id = { state.lock().unwrap().repos.keys().next().unwrap().clone() };
+        let ws = crate::commands::workspace::create_workspace_inner(
+            repo_id.clone(),
+            "Card A".into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        {
+            let mut st = state.lock().unwrap();
+            st.workspaces.get_mut(&ws.id).unwrap().task_id = Some("tk_a".into());
+            st.tasks.insert(
+                "tk_a".into(),
+                crate::state::Task {
+                    id: "tk_a".into(),
+                    repo_id: repo_id.clone(),
+                    workspace_id: None,
+                    title: "Card A".into(),
+                    description: String::new(),
+                    column: KanbanColumn::Todo,
+                    order: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                    pic_names: Vec::new(),
+                },
+            );
+        }
+        let provider: Arc<dyn crate::task_provider::TaskProvider> = Arc::new(BlankRepoIdProvider);
+        let updated = move_task_inner(
+            "tk_a".into(),
+            KanbanColumn::InProgress,
+            0,
+            data.clone(),
+            provider,
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            updated.workspace_id.as_deref(),
+            Some(ws.id.as_str()),
+            "reattached to existing ws"
+        );
+        let st = state.lock().unwrap();
+        assert_eq!(st.workspaces.len(), 1, "must NOT create a second workspace");
+    }
+
+    #[tokio::test]
+    async fn move_to_todo_removes_empty_workspace_and_unlinks() {
+        let tmp = tempdir().unwrap();
+        let local = init_bare_repo_for_task_tests(&tmp);
+        let data = tmp.path().join("data4b");
+        std::fs::create_dir_all(&data).unwrap();
+        let state = make_state_with_real_repo(&tmp, &local);
+        let repo_id = { state.lock().unwrap().repos.keys().next().unwrap().clone() };
+        let ws = crate::commands::workspace::create_workspace_inner(
+            repo_id.clone(),
+            "Card A".into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        {
+            let mut st = state.lock().unwrap();
+            st.workspaces.get_mut(&ws.id).unwrap().task_id = Some("tk_a".into());
+            st.tasks.insert(
+                "tk_a".into(),
+                crate::state::Task {
+                    id: "tk_a".into(),
+                    repo_id: repo_id.clone(),
+                    workspace_id: Some(ws.id.clone()),
+                    title: "Card A".into(),
+                    description: String::new(),
+                    column: KanbanColumn::InProgress,
+                    order: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                    pic_names: Vec::new(),
+                },
+            );
+        }
+        let provider: Arc<dyn crate::task_provider::TaskProvider> = Arc::new(BlankRepoIdProvider);
+        let updated = move_task_inner(
+            "tk_a".into(),
+            KanbanColumn::Todo,
+            0,
+            data.clone(),
+            provider,
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.workspace_id, None, "empty workspace unlinked");
+        let st = state.lock().unwrap();
+        assert!(st.workspaces.is_empty(), "empty workspace removed");
+        assert!(!ws.worktree_dir.exists(), "worktree deleted from disk");
+    }
+
+    #[tokio::test]
+    async fn move_to_todo_keeps_non_empty_workspace() {
+        let tmp = tempdir().unwrap();
+        let local = init_bare_repo_for_task_tests(&tmp);
+        let data = tmp.path().join("data4c");
+        std::fs::create_dir_all(&data).unwrap();
+        let state = make_state_with_real_repo(&tmp, &local);
+        let repo_id = { state.lock().unwrap().repos.keys().next().unwrap().clone() };
+        let ws = crate::commands::workspace::create_workspace_inner(
+            repo_id.clone(),
+            "Card A".into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        let wt = ws.worktree_dir.to_string_lossy().to_string();
+        std::fs::write(ws.worktree_dir.join("f.txt"), "x").unwrap();
+        for args in [
+            vec!["-C", &wt, "add", "."],
+            vec![
+                "-C",
+                &wt,
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-m",
+                "wip",
+            ],
+        ] {
+            std::process::Command::new("git")
+                .args(&args)
+                .output()
+                .unwrap();
+        }
+        {
+            let mut st = state.lock().unwrap();
+            st.workspaces.get_mut(&ws.id).unwrap().task_id = Some("tk_a".into());
+            st.tasks.insert(
+                "tk_a".into(),
+                crate::state::Task {
+                    id: "tk_a".into(),
+                    repo_id: repo_id.clone(),
+                    workspace_id: Some(ws.id.clone()),
+                    title: "Card A".into(),
+                    description: String::new(),
+                    column: KanbanColumn::InProgress,
+                    order: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                    pic_names: Vec::new(),
+                },
+            );
+        }
+        let provider: Arc<dyn crate::task_provider::TaskProvider> = Arc::new(BlankRepoIdProvider);
+        let updated = move_task_inner(
+            "tk_a".into(),
+            KanbanColumn::Todo,
+            0,
+            data.clone(),
+            provider,
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            updated.workspace_id.as_deref(),
+            Some(ws.id.as_str()),
+            "non-empty ws kept + linked"
+        );
+        let st = state.lock().unwrap();
+        assert_eq!(st.workspaces.len(), 1, "non-empty workspace not removed");
     }
 
     // ── Task 3: refresh_tasks preservation tests ────────────────────
