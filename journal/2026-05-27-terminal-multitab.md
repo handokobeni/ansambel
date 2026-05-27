@@ -35,15 +35,32 @@ restored across an app restart.
 - Session-only; no restart restore; no detached processes.
 - No per-tab rename; auto "Terminal N", numbers not reused. Cap 6.
 
-## Known limitation
+## Follow-up fixes (same branch)
 
-App renders one `WorkspaceView` for the selected workspace (no per-workspace
-`{#key}`), so switching to a different workspace and back remounts the panes:
-the backend PTYs survive and `reattach` reconnects (processes keep running), but
-xterm **scrollback is lost across a workspace switch**. Within a single
-workspace, tab switching preserves scrollback + processes. This is a
-pre-existing architectural property surfaced by the refactor, not introduced by
-it; preserving cross-workspace scrollback is a future polish.
+Three issues surfaced after the multi-tab tasks landed were fixed on this
+branch:
+
+- **`detect_default_branch` offline failure.** `add_repo` failed offline because
+  detection went straight to a network `ls-remote`. Added a true offline tier: a
+  local remote-tracking ref check
+  (`git show-ref --verify refs/remotes/origin/{main,master}`) before the network
+  fallback, so add-repo works offline / when the remote needs auth. Still never
+  falls back to local _branches_.
+- **Plan↔Work state loss (Fix A).** Toggling Work→Plan→Work used to blank a
+  running terminal. `App.svelte` now keeps both the Plan content (Kanban) and
+  the Work content (`WorkspaceView`) mounted as siblings, toggled with
+  `class:hidden` instead of mutually-exclusive `{:else if mode}` branches — so
+  the toggle no longer remounts the panes. Lossless: xterm + scrollback +
+  process all preserved.
+- **Cross-workspace scrollback (Fix B).** Each terminal now keeps a bounded (256
+  KiB) output ring buffer in `TerminalHandle`; `reattach` replays it before
+  forwarding live output. So ANY remount (workspace switch, mirror flow) now
+  restores the visible terminal, not just the process. Best-effort: the byte cap
+  may clip mid-escape at the buffer head. Fresh `spawn` does not replay.
+
+Together Fix A + Fix B resolve the original "terminal loses its `npm run dev`
+state on Plan↔Work" report: A makes the common toggle lossless, B restores the
+view on any deeper remount.
 
 ## Tests
 
@@ -53,3 +70,8 @@ it; preserving cross-workspace scrollback is a future polish.
 - Frontend: terminal-tabs store (add/cap/close/neighbour/labels/isolation);
   TerminalTabBar (render/active/＋disabled/×); TerminalPane + container tests.
 - E2E: open Terminal → auto-spawn one → "+" → two panes mounted and live.
+- Follow-ups: `detect_default_branch` offline tier (local-tracking-ref hit +
+  ls-remote fallback when both Tier 1 and Tier 2 refs are removed); Fix A
+  regression (`App.test.ts` asserts `WorkspaceView` stays mounted/hidden, not
+  removed, when toggling to Plan); Fix B (`reattach` returns + replays the
+  recent-output snapshot; fresh spawn does not replay).
