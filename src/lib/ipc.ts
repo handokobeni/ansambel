@@ -158,26 +158,27 @@ export const api = {
      *  raw bytes (xterm.js needs them ANSI-intact) over the channel. */
     spawn: (
       workspaceId: string,
+      terminalId: string,
       channel: Channel<TerminalChunk>,
       cols?: number,
       rows?: number
-    ): Promise<void> => invoke('terminal_spawn', { workspaceId, channel, cols, rows }),
+    ): Promise<void> => invoke('terminal_spawn', { workspaceId, terminalId, channel, cols, rows }),
 
     /** Push raw bytes (typically keystrokes) onto the terminal's stdin. */
-    write: (workspaceId: string, bytes: number[]): Promise<void> =>
-      invoke('terminal_write', { workspaceId, bytes }),
+    write: (terminalId: string, bytes: number[]): Promise<void> =>
+      invoke('terminal_write', { terminalId, bytes }),
 
     /** Reflow the PTY to new dimensions. Backend clamps to [1, 1000]. */
-    resize: (workspaceId: string, cols: number, rows: number): Promise<void> =>
-      invoke('terminal_resize', { workspaceId, cols, rows }),
+    resize: (terminalId: string, cols: number, rows: number): Promise<void> =>
+      invoke('terminal_resize', { terminalId, cols, rows }),
 
-    /** Kill the workspace's terminal. Idempotent. */
-    kill: (workspaceId: string): Promise<void> => invoke('terminal_kill', { workspaceId }),
+    /** Kill the terminal by its id. Idempotent. */
+    kill: (terminalId: string): Promise<void> => invoke('terminal_kill', { terminalId }),
 
     /** Subscribe a fresh channel to the existing broadcaster — used on
      *  workspace switch + back, the same shape as agent reattach. */
-    reattach: (workspaceId: string, channel: Channel<TerminalChunk>): Promise<void> =>
-      invoke('terminal_reattach', { workspaceId, channel }),
+    reattach: (terminalId: string, channel: Channel<TerminalChunk>): Promise<void> =>
+      invoke('terminal_reattach', { terminalId, channel }),
   },
 
   file: {

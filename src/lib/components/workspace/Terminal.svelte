@@ -65,6 +65,7 @@
     term.writeln('\x1b[2m[xterm ready — waiting for shell]\x1b[0m');
 
     // Forward keystrokes (and pasted content) into the backend's PTY.
+    // workspaceId used as terminalId here — Task 5 replaces this component.
     term.onData((data: string) => {
       const bytes = Array.from(new TextEncoder().encode(data));
       void api.terminal.write(workspaceId, bytes);
@@ -118,11 +119,12 @@
     // Try reattach first — the backend may already have a session for
     // this workspace from a prior mount. Spawn fresh on rejection,
     // each call with its own Channel id.
+    // workspaceId used as terminalId here — Task 5 replaces this component.
     try {
       await api.terminal.reattach(workspaceId, makeChannel());
     } catch {
       try {
-        await api.terminal.spawn(workspaceId, makeChannel(), term.cols, term.rows);
+        await api.terminal.spawn(workspaceId, workspaceId, makeChannel(), term.cols, term.rows);
       } catch (err) {
         if (term) {
           term.writeln(`\r\n[failed to start shell: ${String(err)}]`);

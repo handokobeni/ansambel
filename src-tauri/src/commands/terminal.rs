@@ -226,7 +226,6 @@ pub fn reattach_terminal_inner(
 
 /// Kill every terminal belonging to a workspace. Used when the
 /// workspace is removed. Idempotent.
-#[allow(dead_code)] // Task 2 removes this when remove_workspace_inner calls it
 pub fn kill_workspace_terminals_inner(
     workspace_id: &str,
     state: Arc<Mutex<AppState>>,
@@ -257,6 +256,7 @@ pub fn kill_workspace_terminals_inner(
 #[tauri::command]
 pub async fn terminal_spawn(
     workspace_id: String,
+    terminal_id: String,
     cols: Option<u16>,
     rows: Option<u16>,
     channel: Channel<TerminalChunk>,
@@ -264,54 +264,57 @@ pub async fn terminal_spawn(
 ) -> std::result::Result<(), String> {
     let cols = cols.unwrap_or(DEFAULT_COLS);
     let rows = rows.unwrap_or(DEFAULT_ROWS);
-    let inner_state = state.inner().clone();
-    // TODO(Task 2): replace &workspace_id with a real terminal_id arg from the frontend
-    let rx = spawn_terminal_inner(&workspace_id, &workspace_id, cols, rows, inner_state).map_err(
-        |e| {
-            tracing::error!(error = %e, "terminal_spawn failed");
-            e.to_string()
-        },
-    )?;
+    let rx = spawn_terminal_inner(
+        &workspace_id,
+        &terminal_id,
+        cols,
+        rows,
+        state.inner().clone(),
+    )
+    .map_err(|e| {
+        tracing::error!(error = %e, "terminal_spawn failed");
+        e.to_string()
+    })?;
     forward_to_channel(rx, channel);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn terminal_write(
-    workspace_id: String,
+    terminal_id: String,
     bytes: Vec<u8>,
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> std::result::Result<(), String> {
-    write_terminal_inner(&workspace_id, bytes, state.inner().clone()).map_err(|e| e.to_string())
+    write_terminal_inner(&terminal_id, bytes, state.inner().clone()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn terminal_resize(
-    workspace_id: String,
+    terminal_id: String,
     cols: u16,
     rows: u16,
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> std::result::Result<(), String> {
-    resize_terminal_inner(&workspace_id, cols, rows, state.inner().clone())
+    resize_terminal_inner(&terminal_id, cols, rows, state.inner().clone())
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn terminal_kill(
-    workspace_id: String,
+    terminal_id: String,
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> std::result::Result<(), String> {
-    kill_terminal_inner(&workspace_id, state.inner().clone()).map_err(|e| e.to_string())
+    kill_terminal_inner(&terminal_id, state.inner().clone()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn terminal_reattach(
-    workspace_id: String,
+    terminal_id: String,
     channel: Channel<TerminalChunk>,
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> std::result::Result<(), String> {
     let rx =
-        reattach_terminal_inner(&workspace_id, state.inner().clone()).map_err(|e| e.to_string())?;
+        reattach_terminal_inner(&terminal_id, state.inner().clone()).map_err(|e| e.to_string())?;
     forward_to_channel(rx, channel);
     Ok(())
 }
