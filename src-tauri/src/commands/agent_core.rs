@@ -7,7 +7,7 @@ use crate::state::{
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::mpsc;
 
 /// Fire-and-forget emission of a [`WorkspaceEvent`] to the team-activity
@@ -50,7 +50,6 @@ pub(crate) fn truncate_to_chars(s: &str, max: usize) -> String {
 ///
 /// Empty `url` is rejected because the publisher would write a blank
 /// hyperlink into Bitable, which presents as a broken link in the UI.
-#[allow(dead_code)] // Wired into tests only until a PR-creation Tauri handler lands.
 pub(crate) fn emit_pr_created(
     publisher_tx: Option<&WorkspaceEventTx>,
     workspace_id: &str,
@@ -70,6 +69,62 @@ pub(crate) fn emit_pr_created(
             url: url.to_string(),
         },
     );
+}
+
+/// GitHub pull-request URL, e.g. `https://github.com/owner/repo/pull/42`.
+/// The pattern ends at the numeric PR id, so markdown wrapping (`**<url>**`)
+/// and trailing punctuation fall away naturally. `.unwrap()` on this
+/// compile-time-constant pattern is the documented exception to the
+/// no-unwrap rule (mirrors `sanitize.rs`); the unit tests exercise it so a
+/// malformed literal fails CI immediately.
+static GITHUB_PR_URL: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/\d+").unwrap()
+});
+
+/// Extract the first GitHub pull-request URL from `text`, if present.
+pub(crate) fn extract_pr_url(text: &str) -> Option<String> {
+    GITHUB_PR_URL.find(text).map(|m| m.as_str().to_string())
+}
+
+/// If `event` is a final assistant `Message` whose text contains a GitHub
+/// PR URL, emit [`WorkspaceEvent::PrCreated`] so the publisher fills the
+/// `pr_url` column and flips the row to `pr_ready`. Returns `true` when it
+/// emitted, letting the caller dedupe (the agent often restates the URL in
+/// later turns).
+///
+/// This is a heuristic bridge until a first-class PR-creation flow lands
+/// (Phase 3a-5/6 follow-up): the agent opens PRs itself via `gh pr create`,
+/// so the only signal the reader sees is the URL echoed in its final
+/// message. A dedicated `pr_create` command that emits `PrCreated` directly
+/// — keyed off the actual `gh` exit, carrying the diff summary too — would
+/// be the robust, scalable replacement.
+pub(crate) fn emit_pr_created_if_detected(
+    publisher_tx: Option<&WorkspaceEventTx>,
+    workspace_id: &str,
+    event: &AgentEvent,
+) -> bool {
+    let AgentEvent::Message {
+        role,
+        text,
+        is_partial,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    if *is_partial {
+        return false;
+    }
+    if !matches!(role, crate::state::MessageRole::Assistant) {
+        return false;
+    }
+    match extract_pr_url(text) {
+        Some(url) => {
+            emit_pr_created(publisher_tx, workspace_id, &url);
+            true
+        }
+        None => false,
+    }
 }
 
 /// If `event` is a final assistant `Message` (not a partial stream chunk),
@@ -2665,6 +2720,106 @@ mod tests {
         // No publisher (tests / unconfigured installs) → silent no-op,
         // not a panic.
         emit_pr_created(None, "ws_pr_none", "https://example.com/pr/1");
+    }
+
+    // ── Phase 3a-4 follow-up — detect PR URL in the agent's own output ──────
+
+    #[test]
+    fn extract_pr_url_finds_plain_github_pr_url() {
+        assert_eq!(
+            extract_pr_url("Opened https://github.com/handoko78/kelola-ansambel/pull/1 for review"),
+            Some("https://github.com/handoko78/kelola-ansambel/pull/1".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_pr_url_unwraps_markdown_bold_and_trailing_punctuation() {
+        // The agent commonly emits `**<url>**.` — the pattern stops at the
+        // numeric PR id, so the surrounding `**` and trailing `.` fall away.
+        assert_eq!(
+            extract_pr_url("PR berhasil dibuat: **https://github.com/o/r/pull/42**."),
+            Some("https://github.com/o/r/pull/42".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_pr_url_returns_none_without_a_pr_url() {
+        assert_eq!(extract_pr_url("no link here"), None);
+        // A repo/tree URL is not a PR URL.
+        assert_eq!(extract_pr_url("https://github.com/o/r/tree/main"), None);
+    }
+
+    #[test]
+    fn emit_pr_created_if_detected_emits_for_final_assistant_message_with_pr_url() {
+        let (tx, mut rx) = make_publisher_tx();
+        let emitted = emit_pr_created_if_detected(
+            Some(&tx),
+            "ws_det",
+            &crate::state::AgentEvent::Message {
+                id: "m1".into(),
+                role: crate::state::MessageRole::Assistant,
+                text: "Done. PR: https://github.com/o/r/pull/7".into(),
+                is_partial: false,
+            },
+        );
+        assert!(emitted);
+        match rx.try_recv().expect("PrCreated should be emitted") {
+            crate::state::WorkspaceEvent::PrCreated { workspace_id, url } => {
+                assert_eq!(workspace_id, "ws_det");
+                assert_eq!(url, "https://github.com/o/r/pull/7");
+            }
+            other => panic!("expected PrCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emit_pr_created_if_detected_ignores_partial_non_assistant_and_urlless() {
+        let (tx, mut rx) = make_publisher_tx();
+        // Partial stream chunk — never emit (the final message carries the URL).
+        assert!(!emit_pr_created_if_detected(
+            Some(&tx),
+            "ws_x",
+            &crate::state::AgentEvent::Message {
+                id: "m1".into(),
+                role: crate::state::MessageRole::Assistant,
+                text: "https://github.com/o/r/pull/7".into(),
+                is_partial: true,
+            },
+        ));
+        // User message that quotes a PR URL — not the agent's doing.
+        assert!(!emit_pr_created_if_detected(
+            Some(&tx),
+            "ws_x",
+            &crate::state::AgentEvent::Message {
+                id: "m2".into(),
+                role: crate::state::MessageRole::User,
+                text: "see https://github.com/o/r/pull/7".into(),
+                is_partial: false,
+            },
+        ));
+        // Assistant message without a PR URL.
+        assert!(!emit_pr_created_if_detected(
+            Some(&tx),
+            "ws_x",
+            &crate::state::AgentEvent::Message {
+                id: "m3".into(),
+                role: crate::state::MessageRole::Assistant,
+                text: "working on it".into(),
+                is_partial: false,
+            },
+        ));
+        // Non-Message variant.
+        assert!(!emit_pr_created_if_detected(
+            Some(&tx),
+            "ws_x",
+            &crate::state::AgentEvent::Error {
+                message: "boom".into(),
+            },
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "no PrCreated expected for any of the above"
+        );
     }
 
     #[test]
