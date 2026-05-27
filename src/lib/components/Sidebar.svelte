@@ -3,10 +3,11 @@
   import { SvelteSet } from 'svelte/reactivity';
   import { repos } from '$lib/stores/repos.svelte';
   import { workspaces } from '$lib/stores/workspaces.svelte';
+  import { messages } from '$lib/stores/messages.svelte';
   import { addToast } from '$lib/stores/toasts.svelte';
   import { tooltip } from '$lib/actions';
   import ResizeHandle from './ResizeHandle.svelte';
-  import type { KanbanColumn, Workspace, WorkspaceStatus } from '$lib/types';
+  import type { AgentStatus, KanbanColumn, Workspace, WorkspaceStatus } from '$lib/types';
   import { onDestroy, onMount } from 'svelte';
   import TeamActivityPanel from './sidebar/TeamActivityPanel.svelte';
   import { teamActivity } from '$lib/stores/team-activity.svelte';
@@ -98,7 +99,16 @@
   }
 
   // ── Status dots ────────────────────────────────────────────────────
-  function statusDotClass(status: WorkspaceStatus): string {
+  // The persisted `Workspace.status` trails the live agent run state (it's
+  // only refreshed when the backend repersists the workspace), so a running
+  // agent would otherwise show a stale, non-green dot here while the title
+  // bar correctly reads "Running". Overlay the live messages-store status
+  // exactly like WorkspaceView does so both surfaces agree.
+  function effectiveStatus(ws: Workspace): WorkspaceStatus | AgentStatus {
+    return messages.statusFor(ws.id) ?? ws.status;
+  }
+
+  function statusDotClass(status: WorkspaceStatus | AgentStatus): string {
     // Green = running (agent is actively processing) matches the convention
     // users expect ("green = active/on"). Waiting is alive-but-idle, shown
     // amber as a softer ping.
@@ -268,6 +278,7 @@
               {#if !collapsed.has(group.key)}
                 <ul id="sidebar-group-{group.key}" data-sidebar-group-list={group.key}>
                   {#each group.items as ws (ws.id)}
+                    {@const dotStatus = effectiveStatus(ws)}
                     <!-- svelte-ignore a11y_click_events_have_key_events -->
                     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
                     <li
@@ -281,10 +292,10 @@
                     >
                       <!-- Status dot -->
                       <span
-                        class="w-2 h-2 rounded-full flex-shrink-0 {statusDotClass(ws.status)}"
+                        class="w-2 h-2 rounded-full flex-shrink-0 {statusDotClass(dotStatus)}"
                         data-status-dot
-                        data-status={ws.status}
-                        aria-label="Status: {ws.status}"
+                        data-status={dotStatus}
+                        aria-label="Status: {dotStatus}"
                       ></span>
 
                       <!-- Title -->

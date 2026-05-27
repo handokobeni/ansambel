@@ -64,6 +64,7 @@ vi.mock('$lib/stores/workspaces.svelte', () => {
 
 import { workspaces } from '$lib/stores/workspaces.svelte';
 import { repos } from '$lib/stores/repos.svelte';
+import { messages } from '$lib/stores/messages.svelte';
 import { getToasts, removeToast } from '$lib/stores/toasts.svelte';
 import { teamActivity } from '$lib/stores/team-activity.svelte';
 
@@ -128,12 +129,28 @@ describe('Sidebar', () => {
     // The original mapping (running=amber, waiting=green) confused users
     // because green conventionally signals "active". Running is the most
     // active state — agent currently processing — so it owns green now.
+    messages.reset();
     const { container } = render(Sidebar);
     const dots = container.querySelectorAll('[data-status-dot]');
     expect(dots[0]).toHaveAttribute('data-status', 'running');
     expect(dots[0]?.className).toContain('var(--status-ok)');
     expect(dots[1]).toHaveAttribute('data-status', 'waiting');
     expect(dots[1]?.className).toContain('amber');
+  });
+
+  it('dot reflects the live agent status, overriding the lagging persisted status', () => {
+    // The persisted Workspace.status trails the live agent run state, so the
+    // sidebar must overlay the messages-store status the same way
+    // WorkspaceView does — otherwise a running agent shows a non-green dot
+    // in the sidebar while the title bar correctly says "Running".
+    messages.reset();
+    // ws_def456 is persisted as 'waiting'; the live agent status is 'running'.
+    messages.status.set('ws_def456', 'running');
+    const { container } = render(Sidebar);
+    const dots = container.querySelectorAll('[data-status-dot]');
+    expect(dots[1]).toHaveAttribute('data-status', 'running');
+    expect(dots[1]?.className).toContain('var(--status-ok)');
+    messages.reset();
   });
 
   it('selected workspace row shows a left-border accent so selection is unmistakable', () => {
