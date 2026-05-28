@@ -25,6 +25,13 @@ vi.mock('$lib/actions', () => ({
   tooltip: () => ({ destroy: () => {} }),
 }));
 
+vi.mock('$lib/stores/tasks.svelte', () => ({
+  tasks: {
+    link: vi.fn().mockResolvedValue(undefined),
+    unlink: vi.fn().mockResolvedValue({ kind: 'unlinked' }),
+  },
+}));
+
 const makeTask = (overrides: Partial<Task> = {}): Task => ({
   id: 'tk_abc123',
   repo_id: 'repo_abc123',
@@ -137,6 +144,30 @@ describe('TaskCard', () => {
   it('does NOT render the chip when task.workspace_id is null', () => {
     render(TaskCard, { props: { task: makeTask(), onRemove: vi.fn() } });
     expect(screen.queryByTestId('task-workspace-chip')).toBeNull();
+  });
+
+  it('menu "Link to workspace…" opens the picker', async () => {
+    // Provide one workspace in the repo so the picker renders a row.
+    const wsModule = await import('$lib/stores/workspaces.svelte');
+    const wsMock = wsModule.workspaces as unknown as {
+      listForRepo?: ReturnType<typeof vi.fn>;
+    };
+    wsMock.listForRepo = vi.fn(() => [
+      {
+        id: 'ws_pick',
+        repo_id: 'repo_abc123',
+        branch: 'feat/pick',
+        title: 'Pick me',
+        task_ids: [],
+        updated_at: 1,
+      },
+    ]) as never;
+
+    const task = makeTask({ workspace_id: null });
+    render(TaskCard, { props: { task, onRemove: vi.fn() } });
+    await fireEvent.click(screen.getByTestId('task-menu-trigger'));
+    await fireEvent.click(screen.getByTestId('task-menu-link-workspace'));
+    expect(screen.getByTestId('link-picker-row')).toBeTruthy();
   });
 
   it('clicking the chip selects the workspace and switches to work mode', async () => {

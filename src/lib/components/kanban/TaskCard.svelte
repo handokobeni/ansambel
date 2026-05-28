@@ -4,8 +4,23 @@
   import { workspaces } from '$lib/stores/workspaces.svelte';
   import { modeStore } from '$lib/stores/mode.svelte';
   import { tooltip } from '$lib/actions';
+  import LinkWorkspacePicker from './LinkWorkspacePicker.svelte';
 
   const { task, onRemove }: { task: Task; onRemove: (id: string) => void } = $props();
+
+  let menuOpen = $state(false);
+  let linkPickerOpen = $state(false);
+
+  function toggleMenu(e: MouseEvent) {
+    e.stopPropagation();
+    menuOpen = !menuOpen;
+  }
+
+  function openLinkPicker(e: MouseEvent) {
+    e.stopPropagation();
+    menuOpen = false;
+    linkPickerOpen = true;
+  }
 
   const truncatedDescription = $derived(
     task.description.length > 80 ? task.description.slice(0, 80) + '...' : task.description
@@ -46,13 +61,38 @@
     <span class="text-xs font-semibold text-[var(--text-primary)] flex-1 leading-snug">
       {task.title}
     </span>
-    <button
-      class="opacity-0 group-hover:opacity-100 flex items-center justify-center w-5 h-5 rounded text-sm leading-none text-[var(--text-muted)] hover:text-[var(--error)] hover:bg-[var(--error-bg)] transition-all cursor-pointer flex-shrink-0"
-      aria-label="Remove task"
-      onclick={() => onRemove(task.id)}
-    >
-      ×
-    </button>
+    <div class="relative flex items-center gap-0.5 flex-shrink-0">
+      <button
+        class="opacity-0 group-hover:opacity-100 flex items-center justify-center w-5 h-5 rounded text-sm leading-none text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-all cursor-pointer"
+        aria-label="Task menu"
+        data-testid="task-menu-trigger"
+        onclick={toggleMenu}
+      >
+        ⋯
+      </button>
+      <button
+        class="opacity-0 group-hover:opacity-100 flex items-center justify-center w-5 h-5 rounded text-sm leading-none text-[var(--text-muted)] hover:text-[var(--error)] hover:bg-[var(--error-bg)] transition-all cursor-pointer"
+        aria-label="Remove task"
+        onclick={() => onRemove(task.id)}
+      >
+        ×
+      </button>
+      {#if menuOpen}
+        <div
+          class="absolute right-0 top-6 z-20 min-w-[180px] py-1 rounded border border-[var(--border-light)] bg-[var(--bg-card)] shadow-lg text-xs"
+          role="menu"
+        >
+          <button
+            type="button"
+            class="block w-full text-left px-2 py-1 text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+            data-testid="task-menu-link-workspace"
+            onclick={openLinkPicker}
+          >
+            Link to workspace…
+          </button>
+        </div>
+      {/if}
+    </div>
   </div>
 
   {#if task.description}
@@ -94,3 +134,10 @@
     </button>
   {/if}
 </div>
+
+<LinkWorkspacePicker
+  taskId={task.id}
+  repoId={task.repo_id}
+  open={linkPickerOpen}
+  onClose={() => (linkPickerOpen = false)}
+/>
