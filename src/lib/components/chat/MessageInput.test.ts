@@ -23,6 +23,24 @@ vi.mock('$lib/ipc', () => ({
   },
 }));
 
+// Mock the slash-commands store so picker tests get a deterministic list.
+// The picker filters by prefix; the mock mirrors the real store's filtered
+// semantics so '/hel' resolves to 'help'.
+vi.mock('$lib/stores/slash-commands.svelte', () => {
+  const sample = [
+    { name: 'help', description: 'Show help', source: { kind: 'builtin' } },
+    { name: 'agents', description: 'Manage agents', source: { kind: 'builtin' } },
+  ];
+  return {
+    slashCommands: {
+      filtered: (prefix: string) =>
+        prefix === ''
+          ? sample
+          : sample.filter((c) => c.name.toLowerCase().startsWith(prefix.toLowerCase())),
+    },
+  };
+});
+
 import { open } from '@tauri-apps/plugin-dialog';
 import MessageInput from './MessageInput.svelte';
 
@@ -474,6 +492,58 @@ describe('MessageInput', () => {
       await typeMention(ta, '@a');
       await findByTestId('mention-autocomplete');
       expect(filesRecursiveMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('slash command autocomplete', () => {
+    it('typing "/" at the start of the textarea opens the slash picker', async () => {
+      const onSend = vi.fn();
+      const { getByLabelText, queryByTestId, findAllByTestId } = render(MessageInput, {
+        props: { onSend },
+      });
+      const ta = getByLabelText('Message') as HTMLTextAreaElement;
+      expect(queryByTestId('slash-picker-row')).toBeNull();
+      await fireEvent.input(ta, { target: { value: '/' } });
+      ta.selectionStart = 1;
+      ta.selectionEnd = 1;
+      await fireEvent.input(ta, { target: { value: '/' } });
+      const rows = await findAllByTestId('slash-picker-row');
+      expect(rows.length).toBeGreaterThan(0);
+    });
+
+    it('typing a space after the partial closes the slash picker', async () => {
+      const onSend = vi.fn();
+      const { getByLabelText, queryByTestId, findAllByTestId } = render(MessageInput, {
+        props: { onSend },
+      });
+      const ta = getByLabelText('Message') as HTMLTextAreaElement;
+      await fireEvent.input(ta, { target: { value: '/help' } });
+      ta.selectionStart = 5;
+      ta.selectionEnd = 5;
+      await fireEvent.input(ta, { target: { value: '/help' } });
+      await findAllByTestId('slash-picker-row');
+      await fireEvent.input(ta, { target: { value: '/help ' } });
+      ta.selectionStart = 6;
+      ta.selectionEnd = 6;
+      await fireEvent.input(ta, { target: { value: '/help ' } });
+      await waitFor(() => expect(queryByTestId('slash-picker-row')).toBeNull());
+    });
+
+    it('selecting a slash command replaces the partial token with "/name " in the textarea', async () => {
+      const onSend = vi.fn();
+      const { getByLabelText, findAllByTestId } = render(MessageInput, {
+        props: { onSend },
+      });
+      const ta = getByLabelText('Message') as HTMLTextAreaElement;
+      await fireEvent.input(ta, { target: { value: '/hel' } });
+      ta.selectionStart = 4;
+      ta.selectionEnd = 4;
+      await fireEvent.input(ta, { target: { value: '/hel' } });
+      // Picker is open and filtered to 'help' — Enter selects it.
+      await findAllByTestId('slash-picker-row');
+      await fireEvent.keyDown(document, { key: 'Enter' });
+      expect(ta.value).toBe('/help ');
+      expect(ta.selectionStart).toBe(6);
     });
   });
 });
