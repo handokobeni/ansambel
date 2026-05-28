@@ -41,6 +41,24 @@
         )}"
       >
         <span class="flex-1 min-w-0">{toast.message}</span>
+        {#if toast.actions && toast.actions.length > 0}
+          {#each toast.actions as action (action.label)}
+            <button
+              type="button"
+              class="shrink-0 inline-flex items-center justify-center px-2 py-1 text-[0.72rem] font-medium rounded-md border border-[var(--toast-border)] bg-transparent text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] cursor-pointer"
+              data-testid={`toast-action-${action.label}`}
+              onclick={async () => {
+                try {
+                  await action.onClick();
+                } finally {
+                  removeToast(toast.id);
+                }
+              }}
+            >
+              {action.label}
+            </button>
+          {/each}
+        {/if}
         <button
           type="button"
           class="shrink-0 inline-flex items-center justify-center bg-transparent border-none p-0 leading-none text-[var(--text-muted)] hover:text-[var(--text-secondary)] cursor-pointer"

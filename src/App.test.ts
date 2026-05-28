@@ -89,6 +89,7 @@ vi.mock('$lib/stores/workspaces.svelte', () => ({
     remove: vi.fn(),
     getSelected: vi.fn(() => null),
     setTeamActivityPrivate: vi.fn().mockResolvedValue(true),
+    byId: vi.fn(() => undefined),
   },
 }));
 
@@ -104,6 +105,8 @@ vi.mock('$lib/stores/tasks.svelte', () => ({
     update: vi.fn(),
     move: vi.fn().mockResolvedValue(undefined),
     remove: vi.fn(),
+    link: vi.fn().mockResolvedValue(undefined),
+    unlink: vi.fn().mockResolvedValue({ kind: 'unlinked' }),
   },
 }));
 
@@ -601,5 +604,182 @@ describe('App handleMove — empty-workspace removal toast', () => {
       expect(tasks.move).toHaveBeenCalled();
     });
     expect(addToast).not.toHaveBeenCalledWith('Removed empty workspace', 'info');
+  });
+});
+
+// Task 12: auto-create undo toast on Todo→InProgress that creates a workspace.
+describe('App handleMove — auto-create undo toast', () => {
+  // Same setup as the other handleMove tests: plan mode + a selected repo so
+  // the mock KanbanBoard renders the trigger buttons.
+  beforeEach(() => {
+    modeStore.set('plan');
+    vi.mocked(repos.getSelected).mockReturnValue(REPO_A);
+    (repos as { selectedRepoId: string | null }).selectedRepoId = REPO_A.id;
+  });
+
+  // A task that starts with NO workspace link — moving it to in_progress should
+  // trigger auto-create and the new undo toast.
+  const TASK_NO_WS = {
+    ...TASK_WITH_WS,
+    workspace_id: null,
+    column: 'todo' as const,
+  };
+
+  it('fires a 10s toast with [Link to existing instead] and [Undo create] when a workspace is auto-created', async () => {
+    vi.mocked(tasks.listForRepo).mockReturnValue([TASK_NO_WS]);
+    // Backend move returns the task with a fresh workspace_id (auto-created).
+    vi.mocked(tasks.move).mockResolvedValue({
+      ...TASK_NO_WS,
+      workspace_id: 'ws_new',
+      column: 'in_progress',
+    });
+    vi.mocked(workspaces.byId).mockReturnValue({
+      id: 'ws_new',
+      repo_id: REPO_A.id,
+      title: 'Shiny new ws',
+      branch: 'feat/auto',
+      base_branch: 'main',
+      custom_branch: false,
+      description: '',
+      status: 'Waiting',
+      column: 'in_progress',
+      created_at: 0,
+      updated_at: 0,
+      team_activity_private: false,
+      task_ids: ['task_trigger'],
+      worktree_dir: '/tmp/ws_new',
+    } as never);
+
+    render(App);
+
+    const btn = await screen.findByTestId('trigger-move-in-progress');
+    await fireEvent.click(btn);
+
+    await waitFor(() => {
+      expect(addToast).toHaveBeenCalled();
+    });
+    // The undo toast must include the workspace title in its message + the
+    // two named actions in the documented order.
+    const calls = vi.mocked(addToast).mock.calls;
+    const undoCall = calls.find((c) => {
+      const opts = c[2] as { actions?: { label: string }[] } | undefined;
+      return opts?.actions?.some((a) => a.label === 'Undo create');
+    });
+    expect(undoCall).toBeDefined();
+    expect(undoCall![0]).toMatch(/Shiny new ws/);
+    expect(undoCall![1]).toBe('info');
+    const opts = undoCall![2] as {
+      actions: { label: string }[];
+      timeoutMs: number;
+    };
+    expect(opts.timeoutMs).toBe(10_000);
+    expect(opts.actions.map((a) => a.label)).toEqual(['Link to existing instead', 'Undo create']);
+  });
+
+  it('Undo create unlinks the new workspace (force=true) and moves the card back to todo', async () => {
+    vi.mocked(tasks.listForRepo).mockReturnValue([TASK_NO_WS]);
+    vi.mocked(tasks.move).mockResolvedValue({
+      ...TASK_NO_WS,
+      workspace_id: 'ws_new',
+      column: 'in_progress',
+    });
+
+    render(App);
+
+    const btn = await screen.findByTestId('trigger-move-in-progress');
+    await fireEvent.click(btn);
+
+    await waitFor(() => expect(addToast).toHaveBeenCalled());
+    const undoCall = vi.mocked(addToast).mock.calls.find((c) => {
+      const opts = c[2] as { actions?: { label: string }[] } | undefined;
+      return opts?.actions?.some((a) => a.label === 'Undo create');
+    });
+    expect(undoCall).toBeDefined();
+
+    const undoAction = (
+      undoCall![2] as {
+        actions: { label: string; onClick: () => Promise<void> | void }[];
+      }
+    ).actions.find((a) => a.label === 'Undo create');
+    expect(undoAction).toBeDefined();
+
+    // Reset move so we can detect the new call cleanly.
+    vi.mocked(tasks.move).mockClear();
+    vi.mocked(tasks.unlink).mockClear();
+    vi.mocked(tasks.unlink).mockResolvedValue({ kind: 'unlinked' });
+    vi.mocked(tasks.move).mockResolvedValue({
+      ...TASK_NO_WS,
+      workspace_id: null,
+      column: 'todo',
+    });
+
+    await undoAction!.onClick();
+
+    expect(tasks.unlink).toHaveBeenCalledWith('task_trigger', true, REPO_A.id);
+    expect(tasks.move).toHaveBeenCalledWith('task_trigger', 'todo', 0);
+  });
+
+  it('Link to existing instead opens the picker with cleanupWorkspaceOnPick set to the new ws id', async () => {
+    vi.mocked(tasks.listForRepo).mockReturnValue([TASK_NO_WS]);
+    vi.mocked(tasks.move).mockResolvedValue({
+      ...TASK_NO_WS,
+      workspace_id: 'ws_new',
+      column: 'in_progress',
+    });
+    // Picker reads listForRepo on the workspaces store; return one row so
+    // the picker dialog body renders something testable.
+    vi.mocked(workspaces.listForRepo).mockReturnValue([
+      {
+        id: 'ws_existing',
+        repo_id: REPO_A.id,
+        title: 'Existing',
+        branch: 'feat/old',
+        base_branch: 'main',
+        custom_branch: false,
+        description: '',
+        status: 'Waiting',
+        column: 'in_progress',
+        created_at: 0,
+        updated_at: 0,
+        team_activity_private: false,
+        task_ids: [],
+        worktree_dir: '/tmp/ws_existing',
+      } as never,
+    ]);
+
+    render(App);
+
+    const btn = await screen.findByTestId('trigger-move-in-progress');
+    await fireEvent.click(btn);
+
+    await waitFor(() => expect(addToast).toHaveBeenCalled());
+
+    const linkCall = vi.mocked(addToast).mock.calls.find((c) => {
+      const opts = c[2] as { actions?: { label: string }[] } | undefined;
+      return opts?.actions?.some((a) => a.label === 'Link to existing instead');
+    });
+    expect(linkCall).toBeDefined();
+
+    const linkAction = (
+      linkCall![2] as {
+        actions: { label: string; onClick: () => Promise<void> | void }[];
+      }
+    ).actions.find((a) => a.label === 'Link to existing instead');
+    expect(linkAction).toBeDefined();
+
+    await linkAction!.onClick();
+
+    // Picker dialog should now be in the DOM with the existing-ws row visible.
+    await waitFor(() => {
+      expect(screen.getByRole('dialog', { name: /Link to workspace/i })).toBeInTheDocument();
+    });
+    // Picking a row triggers tasks.unlink (force=true, cleanup of the
+    // just-auto-created workspace) followed by tasks.link to the chosen one.
+    const row = screen.getByTestId('link-picker-row');
+    await fireEvent.click(row);
+    await waitFor(() => {
+      expect(tasks.unlink).toHaveBeenCalledWith('task_trigger', true, REPO_A.id);
+    });
+    expect(tasks.link).toHaveBeenCalledWith('task_trigger', 'ws_existing', REPO_A.id);
   });
 });
