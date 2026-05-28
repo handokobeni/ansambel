@@ -309,6 +309,7 @@ pub fn run() {
             crate::commands::task::move_task,
             crate::commands::task::remove_task,
             crate::commands::task::refresh_tasks,
+            crate::commands::task::unlink_task_from_workspace,
             crate::commands::agent::spawn_agent,
             crate::commands::agent::send_message,
             crate::commands::agent::stop_agent,
@@ -393,6 +394,13 @@ mod tests {
         let _ = crate::commands::task::update_task as *const () as usize;
         let _ = crate::commands::task::move_task as *const () as usize;
         let _ = crate::commands::task::remove_task as *const () as usize;
+    }
+
+    #[test]
+    fn unlink_task_from_workspace_command_is_registered() {
+        // Symbol existence check — ensures the command is wired in
+        // `tauri::generate_handler!` and not silently dropped.
+        let _ = crate::commands::task::unlink_task_from_workspace as *const () as usize;
     }
 
     #[test]

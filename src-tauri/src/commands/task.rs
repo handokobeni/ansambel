@@ -31,6 +31,25 @@ pub struct TaskPatch {
     pub order: Option<i32>,
 }
 
+/// Result of `unlink_task_from_workspace`.
+///
+/// - `Unlinked`: the card was detached (or was never linked); the workspace
+///   remains.
+/// - `Removed`: the unlink dropped the last live ref AND the workspace was
+///   empty (no commits ahead, clean worktree, no chat, no live agent), so it
+///   was cleaned up.
+/// - `WouldRemove { workspace_title }`: returned in preview mode
+///   (`force = false`) when the unlink would trigger `Removed`. No state was
+///   mutated — the UI uses this to drive a confirm modal, then re-calls with
+///   `force = true`.
+#[derive(serde::Serialize, Debug, Clone, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UnlinkResult {
+    Unlinked,
+    Removed,
+    WouldRemove { workspace_title: String },
+}
+
 // ── Public Tauri commands ────────────────────────────────────────────
 
 #[tauri::command]
@@ -521,6 +540,170 @@ pub(crate) fn resolve_default_repo(state: &AppState) -> Option<String> {
         .selected_repo_id
         .clone()
         .or_else(|| state.repos.keys().next().cloned())
+}
+
+// ── unlink_task_from_workspace ───────────────────────────────────────
+//
+// Detaches a card from its workspace, optionally previewing whether the
+// unlink would trigger refcount-cleanup of the workspace itself.
+//
+// Behaviour (spec §3 + §4):
+// - If the card is not currently linked, returns `Unlinked` (no-op).
+// - If the workspace forward-link is dangling (workspace id refers to a
+//   workspace that no longer exists), the forward link is cleared and
+//   `Unlinked` is returned — defensive fail-safe.
+// - Otherwise the post-unlink refcount is computed (== ws.task_ids.len() - 1).
+//   If `refcount_after == 0` AND the workspace would be considered empty
+//   by `is_workspace_empty` (no commits ahead, clean tree, no chat, no
+//   live agent), the unlink will trigger cleanup:
+//   - In preview mode (`force = false`) the function returns
+//     `WouldRemove { workspace_title }` WITHOUT mutating any state —
+//     the UI uses this to show a confirm modal before re-calling with
+//     `force = true`.
+//   - With `force = true`, the unlink is performed AND
+//     `remove_workspace_inner` is called; `Removed` is returned.
+// - Any other case (refcount_after > 0, OR refcount_after == 0 but the
+//   workspace is non-empty) performs the unlink and returns `Unlinked`.
+//
+// Mutex discipline:
+// - State is read once under the lock to capture (workspace_id, title,
+//   worktree_dir, base_branch, refcount_after, agent_live), then the
+//   lock is dropped before calling `is_workspace_empty` (which does git
+//   I/O) or `save_*` (disk I/O) or `remove_workspace_inner` (locks
+//   internally).
+#[tauri::command]
+pub async fn unlink_task_from_workspace(
+    task_id: String,
+    force: bool,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> std::result::Result<UnlinkResult, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    unlink_task_from_workspace_inner(&task_id, force, data_dir, state.inner().clone())
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "unlink_task_from_workspace failed");
+            e.to_string()
+        })
+}
+
+pub(crate) async fn unlink_task_from_workspace_inner(
+    task_id: &str,
+    force: bool,
+    data_dir: std::path::PathBuf,
+    state: Arc<Mutex<AppState>>,
+) -> Result<UnlinkResult> {
+    use crate::state::{KanbanColumn, WorkspaceStatus};
+
+    // Phase 1: read current state under the lock — find the task and
+    // its workspace, capture everything needed for the
+    // `is_workspace_empty` decision (which must run OUTSIDE the lock).
+    let (workspace_id, workspace_title, refcount_after, worktree_dir, base_branch, agent_live) = {
+        let st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        let task = st
+            .tasks
+            .get(task_id)
+            .ok_or_else(|| AppError::NotFound(format!("task '{task_id}'")))?;
+        let Some(ws_id) = task.workspace_id.clone() else {
+            return Ok(UnlinkResult::Unlinked);
+        };
+        let Some(ws) = st.workspaces.get(&ws_id) else {
+            // Defensive: the task's forward link points to a workspace
+            // that no longer exists. Clear the dangling link so future
+            // reads see a clean state. Drop the read guard before
+            // re-acquiring write access.
+            drop(st);
+            let snapshot = {
+                let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+                if let Some(t) = st.tasks.get_mut(task_id) {
+                    t.workspace_id = None;
+                    t.updated_at = crate::commands::helpers::now_unix();
+                }
+                st.tasks.clone()
+            };
+            crate::persistence::tasks::save_tasks(&data_dir, &snapshot)?;
+            return Ok(UnlinkResult::Unlinked);
+        };
+        let refcount_after = ws
+            .task_ids
+            .iter()
+            .filter(|id| id.as_str() != task_id)
+            .count();
+        let agent_live = st.agents.contains_key(&ws_id);
+        (
+            ws_id,
+            ws.title.clone(),
+            refcount_after,
+            ws.worktree_dir.clone(),
+            ws.base_branch.clone(),
+            agent_live,
+        )
+    };
+
+    // Phase 2: cleanup-check decision. Treat `refcount_after == 0 +
+    // empty` as "would remove". This call shells out to git, so it
+    // MUST happen with no state lock held.
+    let would_remove = if refcount_after == 0 {
+        // Construct a transient WorkspaceInfo proxy carrying only the
+        // fields `is_workspace_empty` reads (worktree_dir, base_branch,
+        // id for the messages-log lookup). Other fields are stubbed.
+        let ws_proxy = crate::state::WorkspaceInfo {
+            id: workspace_id.clone(),
+            repo_id: String::new(),
+            branch: String::new(),
+            base_branch: base_branch.clone(),
+            custom_branch: false,
+            title: workspace_title.clone(),
+            description: String::new(),
+            status: WorkspaceStatus::Waiting,
+            column: KanbanColumn::InProgress,
+            created_at: 0,
+            updated_at: 0,
+            worktree_dir: worktree_dir.clone(),
+            team_activity_private: false,
+            task_ids: Vec::new(),
+        };
+        crate::commands::workspace::is_workspace_empty(&data_dir, &ws_proxy, agent_live)
+    } else {
+        false
+    };
+
+    if !force && would_remove {
+        return Ok(UnlinkResult::WouldRemove { workspace_title });
+    }
+
+    // Phase 3: perform the unlink under the lock; clone snapshots;
+    // release the lock before disk / cleanup I/O.
+    let (tasks_snapshot, workspaces_snapshot) = {
+        let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        let now = crate::commands::helpers::now_unix();
+        if let Some(task) = st.tasks.get_mut(task_id) {
+            task.workspace_id = None;
+            task.updated_at = now;
+        }
+        if let Some(ws) = st.workspaces.get_mut(&workspace_id) {
+            ws.task_ids.retain(|id| id != task_id);
+            ws.updated_at = now;
+        }
+        (st.tasks.clone(), st.workspaces.clone())
+    };
+    crate::persistence::tasks::save_tasks(&data_dir, &tasks_snapshot)?;
+    crate::persistence::workspaces::save_workspaces(&data_dir, &workspaces_snapshot)?;
+
+    // Phase 4: if cleanup is now warranted, remove the workspace.
+    // `remove_workspace_inner` locks internally — call OUTSIDE any
+    // currently-held lock (already dropped above).
+    if would_remove {
+        crate::commands::workspace::remove_workspace_inner(
+            workspace_id,
+            data_dir.clone(),
+            Arc::clone(&state),
+        )
+        .await?;
+        return Ok(UnlinkResult::Removed);
+    }
+
+    Ok(UnlinkResult::Unlinked)
 }
 
 #[cfg(test)]
@@ -2037,5 +2220,255 @@ mod tests {
         .unwrap();
         assert_eq!(updated.repo_id, "repo_r1");
         assert_eq!(updated.workspace_id.as_deref(), Some("ws_existing"));
+    }
+
+    // ── Task 4 (multi-card workspace): unlink_task_from_workspace ───
+
+    /// Test fixture used by the multi-card workspace tests
+    /// (`unlink_*`, `link_*`, `move_to_todo_with_refcount_*`,
+    /// `remove_task_*`). Builds:
+    ///
+    /// 1. A real on-disk bare git repo + local clone (so
+    ///    `is_workspace_empty` can shell out to git).
+    /// 2. An `AppState` with one repo registered under id `"repo_a"` whose
+    ///    `path` is the cloned local working dir.
+    /// 3. A real workspace (via `create_workspace_inner` — runs
+    ///    `git worktree add`) renamed in-state to `ws_id` so test
+    ///    assertions can address it by the stable identifier (e.g.
+    ///    `"ws_a"`). The disk worktree path is preserved on the in-state
+    ///    entry, so `is_workspace_empty` / `remove_workspace_inner` both
+    ///    operate on the real on-disk worktree.
+    /// 4. One linked card with id `initial_task_id` (e.g. `"tk_a"`) in
+    ///    the kanban `InProgress` column with `workspace_id = ws_id`,
+    ///    appearing in `ws.task_ids`.
+    ///
+    /// Returned tuple: `(data_dir, state)`. The `TempDir` containing both
+    /// the repo and the data_dir is leaked (via `into_path`) so the test
+    /// can hold paths to a still-existing on-disk fixture for the full
+    /// test lifetime without juggling a `TempDir` guard.
+    ///
+    /// Adapted from the existing PR #32 helpers
+    /// `init_bare_repo_for_task_tests` + `make_state_with_real_repo` in
+    /// this same tests module, with an added `create_workspace_inner`
+    /// call (mirroring the `move_to_todo_*` lifecycle tests in this
+    /// file) and an in-state rename so the workspace key matches the
+    /// caller-supplied `ws_id`.
+    async fn setup_state_with_repo_and_workspace(
+        ws_id: &str,
+        initial_task_id: &str,
+    ) -> (PathBuf, Arc<Mutex<AppState>>) {
+        let tmp = tempdir().unwrap();
+        let local = init_bare_repo_for_task_tests(&tmp);
+        let data = tmp.path().join("data_mcw");
+        std::fs::create_dir_all(&data).unwrap();
+
+        // Build the AppState with repo registered under id "repo_a"
+        // (matches the plan test fixtures).
+        let mut state = AppState::default();
+        state.repos.insert(
+            "repo_a".into(),
+            RepoInfo {
+                id: "repo_a".into(),
+                name: "my-repo".into(),
+                path: local,
+                gh_profile: None,
+                default_branch: "main".into(),
+                created_at: 0,
+                updated_at: 0,
+                scripts: Vec::new(),
+            },
+        );
+        let state = Arc::new(Mutex::new(state));
+
+        let created = crate::commands::workspace::create_workspace_inner(
+            "repo_a".into(),
+            ws_id.into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+
+        // Rename the in-state entry so it's addressable by the
+        // caller-supplied stable id (the on-disk worktree path is
+        // preserved — only the HashMap key and `id` field move).
+        {
+            let mut st = state.lock().unwrap();
+            let mut ws = st.workspaces.remove(&created.id).unwrap();
+            ws.id = ws_id.into();
+            ws.task_ids = vec![initial_task_id.into()];
+            st.workspaces.insert(ws_id.into(), ws);
+            st.tasks.insert(
+                initial_task_id.into(),
+                Task {
+                    id: initial_task_id.into(),
+                    repo_id: "repo_a".into(),
+                    workspace_id: Some(ws_id.into()),
+                    title: initial_task_id.into(),
+                    description: String::new(),
+                    column: KanbanColumn::InProgress,
+                    order: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                    pic_names: Vec::new(),
+                },
+            );
+        }
+
+        // Leak the TempDir guard — the test owns the fixture for its
+        // full lifetime and we don't want premature cleanup yanking the
+        // worktree out from under `is_workspace_empty`.
+        let _kept = tmp.keep();
+        (data, state)
+    }
+
+    fn seed_task(
+        state: &Arc<Mutex<AppState>>,
+        task_id: &str,
+        repo_id: &str,
+        workspace_id: Option<String>,
+    ) {
+        let mut st = state.lock().unwrap();
+        st.tasks.insert(
+            task_id.into(),
+            Task {
+                id: task_id.into(),
+                repo_id: repo_id.into(),
+                workspace_id,
+                title: task_id.into(),
+                description: String::new(),
+                column: KanbanColumn::Todo,
+                order: 0,
+                created_at: 0,
+                updated_at: 0,
+                pic_names: Vec::new(),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn unlink_force_with_refcount_gt_1_keeps_workspace_and_returns_unlinked() {
+        let (data_dir, state) = setup_state_with_repo_and_workspace("ws_a", "tk_a").await;
+        // Seed a second card linked to the same workspace.
+        seed_task(&state, "tk_b", "repo_a", Some("ws_a".into()));
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .get_mut("ws_a")
+            .unwrap()
+            .task_ids = vec!["tk_a".into(), "tk_b".into()];
+
+        let r = unlink_task_from_workspace_inner("tk_b", true, data_dir, Arc::clone(&state))
+            .await
+            .unwrap();
+        assert_eq!(r, UnlinkResult::Unlinked);
+
+        let st = state.lock().unwrap();
+        let ws = st.workspaces.get("ws_a").unwrap();
+        assert_eq!(ws.task_ids, vec!["tk_a".to_string()]);
+        let tk = st.tasks.get("tk_b").unwrap();
+        assert!(tk.workspace_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn unlink_force_with_refcount_1_and_empty_workspace_removes_workspace() {
+        // Setup helper creates ws_a with one linked card and a fresh,
+        // empty real worktree (no commits ahead, clean tree, no chat,
+        // no agent).
+        let (data_dir, state) = setup_state_with_repo_and_workspace("ws_a", "tk_a").await;
+        let r = unlink_task_from_workspace_inner("tk_a", true, data_dir, Arc::clone(&state))
+            .await
+            .unwrap();
+        assert_eq!(r, UnlinkResult::Removed);
+        let st = state.lock().unwrap();
+        assert!(!st.workspaces.contains_key("ws_a"));
+    }
+
+    #[tokio::test]
+    async fn unlink_force_with_refcount_1_and_non_empty_workspace_keeps_workspace() {
+        let (data_dir, state) = setup_state_with_repo_and_workspace("ws_a", "tk_a").await;
+        // Dirty the worktree so is_workspace_empty returns false.
+        let wt = state
+            .lock()
+            .unwrap()
+            .workspaces
+            .get("ws_a")
+            .unwrap()
+            .worktree_dir
+            .clone();
+        std::fs::write(wt.join("DIRTY.md"), b"x").unwrap();
+
+        let r = unlink_task_from_workspace_inner("tk_a", true, data_dir, Arc::clone(&state))
+            .await
+            .unwrap();
+        assert_eq!(r, UnlinkResult::Unlinked);
+
+        let st = state.lock().unwrap();
+        assert!(st.workspaces.contains_key("ws_a"));
+        let ws = st.workspaces.get("ws_a").unwrap();
+        assert!(ws.task_ids.is_empty());
+        let tk = st.tasks.get("tk_a").unwrap();
+        assert!(tk.workspace_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn unlink_preview_returns_would_remove_for_last_empty_link() {
+        let (data_dir, state) = setup_state_with_repo_and_workspace("ws_a", "tk_a").await;
+        let r = unlink_task_from_workspace_inner(
+            "tk_a",
+            /* force = */ false,
+            data_dir,
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        match r {
+            UnlinkResult::WouldRemove { workspace_title } => {
+                assert_eq!(workspace_title, "ws_a");
+            }
+            other => panic!("expected WouldRemove, got {other:?}"),
+        }
+        // Preview MUST NOT mutate.
+        let st = state.lock().unwrap();
+        let ws = st.workspaces.get("ws_a").unwrap();
+        assert_eq!(ws.task_ids, vec!["tk_a".to_string()]);
+        let tk = st.tasks.get("tk_a").unwrap();
+        assert_eq!(tk.workspace_id.as_deref(), Some("ws_a"));
+    }
+
+    #[tokio::test]
+    async fn unlink_preview_returns_unlinked_when_no_cleanup_would_fire() {
+        let (data_dir, state) = setup_state_with_repo_and_workspace("ws_a", "tk_a").await;
+        seed_task(&state, "tk_b", "repo_a", Some("ws_a".into()));
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .get_mut("ws_a")
+            .unwrap()
+            .task_ids = vec!["tk_a".into(), "tk_b".into()];
+
+        let r = unlink_task_from_workspace_inner("tk_b", false, data_dir, Arc::clone(&state))
+            .await
+            .unwrap();
+        // refcount > 1 → no cleanup would fire; preview returns Unlinked
+        // (the UI uses this as "safe to execute immediately, no modal").
+        // Per the plan, when `would_remove` is false the inner falls
+        // through to mutate even with `force = false` — the UI only
+        // skips the call entirely when it doesn't want a mutation.
+        assert_eq!(r, UnlinkResult::Unlinked);
+    }
+
+    #[tokio::test]
+    async fn unlink_unlinked_task_is_noop_unlinked() {
+        let (data_dir, state) = setup_state_with_repo_and_workspace("ws_a", "tk_a").await;
+        seed_task(&state, "tk_loose", "repo_a", None);
+        let r = unlink_task_from_workspace_inner("tk_loose", true, data_dir, state)
+            .await
+            .unwrap();
+        assert_eq!(r, UnlinkResult::Unlinked);
     }
 }
