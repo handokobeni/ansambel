@@ -10,6 +10,8 @@ vi.mock('$lib/ipc', () => ({
       move: vi.fn(),
       remove: vi.fn(),
       refresh: vi.fn(),
+      linkToWorkspace: vi.fn(),
+      unlinkFromWorkspace: vi.fn().mockResolvedValue({ kind: 'unlinked' }),
     },
   },
 }));
@@ -18,10 +20,16 @@ vi.mock('$lib/stores/toasts.svelte', () => ({
   addToast: vi.fn(),
 }));
 
+vi.mock('$lib/stores/workspaces.svelte', () => ({
+  workspaces: {
+    loadForRepo: vi.fn(),
+  },
+}));
+
 import { api } from '$lib/ipc';
 import { addToast } from '$lib/stores/toasts.svelte';
 import { TasksStore } from './tasks.svelte';
-import type { Task } from '$lib/types';
+import type { Task, UnlinkResult } from '$lib/types';
 
 const makeTask = (overrides: Partial<Task> = {}): Task => ({
   id: 'tk_abc123',
@@ -331,5 +339,34 @@ describe('TasksStore', () => {
   it('isLoading returns false for a repo that has never had a refresh', () => {
     const store = new TasksStore();
     expect(store.isLoading('r_unknown')).toBe(false);
+  });
+
+  it('link calls api.task.linkToWorkspace and refreshes tasks for the repo', async () => {
+    vi.mocked(api.task.linkToWorkspace).mockResolvedValue(undefined);
+    vi.mocked(api.task.list).mockResolvedValue([]);
+    const store = new TasksStore();
+    await store.link('tk_abc123', 'ws_xyz', 'repo_abc123');
+    expect(api.task.linkToWorkspace).toHaveBeenCalledWith('tk_abc123', 'ws_xyz');
+    expect(api.task.list).toHaveBeenCalledWith('repo_abc123');
+  });
+
+  it('unlink force=true returns UnlinkResult and refreshes', async () => {
+    const result: UnlinkResult = { kind: 'removed' };
+    vi.mocked(api.task.unlinkFromWorkspace).mockResolvedValue(result);
+    vi.mocked(api.task.list).mockResolvedValue([]);
+    const store = new TasksStore();
+    const returned = await store.unlink('tk_abc123', true, 'repo_abc123');
+    expect(returned).toEqual({ kind: 'removed' });
+    expect(api.task.list).toHaveBeenCalledWith('repo_abc123');
+  });
+
+  it('unlink force=false (preview) does NOT trigger a refresh', async () => {
+    const result: UnlinkResult = { kind: 'would_remove', workspace_title: 'X' };
+    vi.mocked(api.task.unlinkFromWorkspace).mockResolvedValue(result);
+    vi.mocked(api.task.list).mockResolvedValue([]);
+    const store = new TasksStore();
+    const returned = await store.unlink('tk_abc123', false, 'repo_abc123');
+    expect(returned).toEqual({ kind: 'would_remove', workspace_title: 'X' });
+    expect(api.task.list).not.toHaveBeenCalled();
   });
 });

@@ -2,7 +2,8 @@
 import { SvelteMap } from 'svelte/reactivity';
 import { api } from '$lib/ipc';
 import { addToast } from '$lib/stores/toasts.svelte';
-import type { Task, CreateTaskArgs, TaskPatch, KanbanColumn } from '$lib/types';
+import { workspaces } from '$lib/stores/workspaces.svelte';
+import type { Task, CreateTaskArgs, TaskPatch, KanbanColumn, UnlinkResult } from '$lib/types';
 
 export class TasksStore {
   readonly tasks = new SvelteMap<string, SvelteMap<string, Task>>();
@@ -123,6 +124,31 @@ export class TasksStore {
         return;
       }
     }
+  }
+
+  async link(taskId: string, workspaceId: string, repoId: string): Promise<void> {
+    await api.task.linkToWorkspace(taskId, workspaceId);
+    const fresh = await api.task.list(repoId);
+    const map = this.getOrCreate(repoId);
+    map.clear();
+    for (const task of fresh) {
+      map.set(task.id, task);
+    }
+    await workspaces.loadForRepo(repoId);
+  }
+
+  async unlink(taskId: string, force: boolean, repoId: string): Promise<UnlinkResult> {
+    const result = await api.task.unlinkFromWorkspace(taskId, force);
+    if (force) {
+      const fresh = await api.task.list(repoId);
+      const map = this.getOrCreate(repoId);
+      map.clear();
+      for (const task of fresh) {
+        map.set(task.id, task);
+      }
+      await workspaces.loadForRepo(repoId);
+    }
+    return result;
   }
 
   listForRepo(repoId: string): Task[] {
