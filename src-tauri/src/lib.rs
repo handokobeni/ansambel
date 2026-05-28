@@ -348,6 +348,7 @@ pub fn run() {
             crate::commands::team_activity::fetch_team_activity_rows,
             crate::commands::settings::set_selected_repo,
             crate::commands::settings::get_selected_repo,
+            crate::commands::slash_commands::list_slash_commands,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -525,6 +526,11 @@ mod tests {
         // the linker pulling in the function symbol; if the macro
         // forgot to include it, this test would fail to compile.
         let _ = crate::commands::team_activity::fetch_team_activity_rows;
+    }
+
+    #[test]
+    fn list_slash_commands_command_is_registered() {
+        let _ = crate::commands::slash_commands::list_slash_commands as *const () as usize;
     }
 
     #[test]
