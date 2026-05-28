@@ -344,6 +344,8 @@ pub fn run() {
             crate::commands::team_activity::set_team_activity_config,
             crate::commands::team_activity::setup_team_activity_table,
             crate::commands::team_activity::fetch_team_activity_rows,
+            crate::commands::settings::set_selected_repo,
+            crate::commands::settings::get_selected_repo,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -10,6 +10,7 @@ pub mod lark_repo_binding;
 pub mod repo;
 pub mod scripts;
 pub mod search;
+pub mod settings;
 pub mod system;
 pub mod task;
 pub mod team_activity;
