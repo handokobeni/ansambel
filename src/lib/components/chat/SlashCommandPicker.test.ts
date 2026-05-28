@@ -28,8 +28,6 @@ vi.mock('$lib/stores/slash-commands.svelte', () => {
 
 import SlashCommandPicker from './SlashCommandPicker.svelte';
 
-const anchorRect = new DOMRect(0, 0, 200, 24);
-
 beforeEach(() => {
   vi.clearAllMocks();
 });
@@ -40,7 +38,6 @@ describe('SlashCommandPicker', () => {
       props: {
         open: true,
         filterText: '',
-        anchorRect,
         onSelect: vi.fn(),
         onClose: vi.fn(),
       },
@@ -53,7 +50,6 @@ describe('SlashCommandPicker', () => {
       props: {
         open: true,
         filterText: 'wri',
-        anchorRect,
         onSelect: vi.fn(),
         onClose: vi.fn(),
       },
@@ -69,7 +65,6 @@ describe('SlashCommandPicker', () => {
       props: {
         open: true,
         filterText: '',
-        anchorRect,
         onSelect,
         onClose: vi.fn(),
       },
@@ -84,7 +79,6 @@ describe('SlashCommandPicker', () => {
       props: {
         open: true,
         filterText: '',
-        anchorRect,
         onSelect,
         onClose: vi.fn(),
       },
@@ -99,7 +93,7 @@ describe('SlashCommandPicker', () => {
     const onSelect = vi.fn();
     const onClose = vi.fn();
     render(SlashCommandPicker, {
-      props: { open: true, filterText: '', anchorRect, onSelect, onClose },
+      props: { open: true, filterText: '', onSelect, onClose },
     });
     await fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalled();
@@ -112,7 +106,6 @@ describe('SlashCommandPicker', () => {
       props: {
         open: true,
         filterText: '',
-        anchorRect,
         onSelect,
         onClose: vi.fn(),
       },
@@ -126,7 +119,6 @@ describe('SlashCommandPicker', () => {
       props: {
         open: true,
         filterText: 'zzz-no-match',
-        anchorRect,
         onSelect: vi.fn(),
         onClose: vi.fn(),
       },

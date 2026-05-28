@@ -10,11 +10,10 @@
   interface Props {
     open: boolean;
     filterText: string;
-    anchorRect: DOMRect;
     onSelect: (commandName: string) => void;
     onClose: () => void;
   }
-  const { open, filterText, anchorRect, onSelect, onClose }: Props = $props();
+  const { open, filterText, onSelect, onClose }: Props = $props();
 
   const rows = $derived<SlashCommand[]>(slashCommands.filtered(filterText));
   let highlightIndex = $state(0);
@@ -63,15 +62,13 @@
 </script>
 
 {#if open}
-  <!-- Position above the textarea anchor; flip to below if not enough room.
-       For the first cut we always render above the anchor (top-bias matches
-       most chat UIs). -->
+  <!-- Anchored inline as a sibling of the textarea inside a `relative`
+       wrapper (same pattern as MentionAutocomplete). `bottom-full` floats
+       the picker directly above the textarea without any viewport math,
+       and `bg-[var(--bg-sidebar)]` is the canonical opaque popover bg in
+       the theme. -->
   <div
-    class="slash-picker absolute z-50 bg-[var(--bg-panel)] border border-[var(--border)] rounded shadow-lg overflow-y-auto"
-    style:bottom={`${window.innerHeight - anchorRect.top + 4}px`}
-    style:left={`${anchorRect.left}px`}
-    style:max-height="240px"
-    style:min-width={`${Math.max(anchorRect.width, 320)}px`}
+    class="absolute bottom-full left-0 right-0 mb-1 z-50 max-h-60 overflow-y-auto rounded border border-[var(--border)] bg-[var(--bg-sidebar)] shadow-lg"
     role="listbox"
     aria-label="Slash command picker"
   >

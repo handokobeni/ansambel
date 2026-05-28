@@ -29,7 +29,6 @@
   // practice (one starts with `/`, the other with `@`).
   let pickerOpen = $state(false);
   let pickerFilter = $state('');
-  let anchorRect = $state<DOMRect | null>(null);
 
   function updateSlashPickerState(): void {
     if (!textareaEl) return;
@@ -41,7 +40,6 @@
     const m = currentLine.match(/^\/([\w-]*)$/);
     if (m) {
       pickerFilter = m[1];
-      anchorRect = textareaEl.getBoundingClientRect();
       pickerOpen = true;
     } else {
       pickerOpen = false;
@@ -342,15 +340,12 @@
         onDismiss={dismissMention}
       />
     {/if}
-    {#if anchorRect}
-      <SlashCommandPicker
-        open={pickerOpen}
-        filterText={pickerFilter}
-        {anchorRect}
-        onSelect={replaceSlashToken}
-        onClose={() => (pickerOpen = false)}
-      />
-    {/if}
+    <SlashCommandPicker
+      open={pickerOpen}
+      filterText={pickerFilter}
+      onSelect={replaceSlashToken}
+      onClose={() => (pickerOpen = false)}
+    />
   </div>
   <div class="flex items-center justify-between">
     <button

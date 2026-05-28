@@ -76,7 +76,7 @@ pub fn discover(claude_dir: &Path) -> Vec<SlashCommand> {
     let mut all: Vec<SlashCommand> = Vec::new();
     all.extend(builtin_commands());
     all.extend(scan_user_commands(&claude_dir.join("commands")));
-    all.extend(scan_plugins(&claude_dir.join("plugins")));
+    all.extend(scan_plugins_via_manifest(claude_dir));
     dedupe_and_sort(all)
 }
 
@@ -84,31 +84,111 @@ fn scan_user_commands(dir: &Path) -> Vec<SlashCommand> {
     scan_markdown_dir(dir, SlashCommandSource::User)
 }
 
-fn scan_plugins(plugins_dir: &Path) -> Vec<SlashCommand> {
-    let entries = match std::fs::read_dir(plugins_dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
+/// Enumerate plugin slash commands by reading the manifest Claude Code
+/// maintains at `<claude_dir>/plugins/installed_plugins.json`. Each entry
+/// resolves to one absolute `installPath`; we then scan
+/// `<installPath>/commands/*.md` and `<installPath>/skills/<skill>/SKILL.md`.
+///
+/// Fail-soft on every error path: missing manifest, malformed JSON, missing
+/// `installPath`, and stale paths all log a warning and yield an empty
+/// contribution rather than aborting discovery.
+fn scan_plugins_via_manifest(claude_dir: &Path) -> Vec<SlashCommand> {
+    let manifest_path = claude_dir.join("plugins").join("installed_plugins.json");
+    let raw = match std::fs::read_to_string(&manifest_path) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %manifest_path.display(),
+                "slash_commands: installed_plugins.json missing or unreadable; \
+                 skipping plugin discovery"
+            );
+            return Vec::new();
+        }
     };
+    let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %manifest_path.display(),
+                "slash_commands: installed_plugins.json is not valid JSON; \
+                 skipping plugin discovery"
+            );
+            return Vec::new();
+        }
+    };
+    let plugins = match parsed.get("plugins").and_then(|p| p.as_object()) {
+        Some(obj) => obj,
+        None => {
+            tracing::warn!(
+                path = %manifest_path.display(),
+                "slash_commands: installed_plugins.json has no `plugins` object; \
+                 skipping plugin discovery"
+            );
+            return Vec::new();
+        }
+    };
+
     let mut out: Vec<SlashCommand> = Vec::new();
-    for plugin_entry in entries.flatten() {
-        let plugin_path = plugin_entry.path();
-        if !plugin_path.is_dir() {
+    for (qualified_name, entries_value) in plugins {
+        // Display name = part before `@` in `name@marketplace`.
+        let display_name = qualified_name
+            .split_once('@')
+            .map(|(name, _)| name)
+            .unwrap_or(qualified_name.as_str())
+            .to_string();
+        let entries = match entries_value.as_array() {
+            Some(arr) => arr,
+            None => {
+                tracing::warn!(
+                    plugin = %qualified_name,
+                    "slash_commands: plugin entries are not an array; skipping"
+                );
+                continue;
+            }
+        };
+        if entries.is_empty() {
             continue;
         }
-        let plugin_name = match plugin_path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_string(),
-            None => continue,
+        // Pick the first `scope == "user"` entry; otherwise fall back to the
+        // first entry in the array. Project-scoped installs are out of scope
+        // for this discovery pass.
+        let chosen = entries
+            .iter()
+            .find(|e| e.get("scope").and_then(|s| s.as_str()) == Some("user"))
+            .unwrap_or(&entries[0]);
+        let install_path_str = match chosen.get("installPath").and_then(|p| p.as_str()) {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                tracing::warn!(
+                    plugin = %qualified_name,
+                    "slash_commands: plugin entry missing `installPath`; skipping"
+                );
+                continue;
+            }
         };
+        let install_path = Path::new(install_path_str);
+        if !install_path.exists() {
+            tracing::warn!(
+                plugin = %qualified_name,
+                path = %install_path.display(),
+                "slash_commands: plugin installPath does not exist on disk; \
+                 skipping (stale manifest entry?)"
+            );
+            continue;
+        }
+
         let source = SlashCommandSource::Plugin {
-            plugin: plugin_name.clone(),
+            plugin: display_name,
         };
-        // Commands directory.
+        // <installPath>/commands/*.md
         out.extend(scan_markdown_dir(
-            &plugin_path.join("commands"),
+            &install_path.join("commands"),
             source.clone(),
         ));
-        // Skills (one level deeper: <plugin>/skills/<skill>/SKILL.md).
-        let skills_root = plugin_path.join("skills");
+        // <installPath>/skills/<skill>/SKILL.md
+        let skills_root = install_path.join("skills");
         if let Ok(skill_entries) = std::fs::read_dir(&skills_root) {
             for skill_entry in skill_entries.flatten() {
                 let skill_dir = skill_entry.path();
@@ -118,33 +198,6 @@ fn scan_plugins(plugins_dir: &Path) -> Vec<SlashCommand> {
                 let skill_md = skill_dir.join("SKILL.md");
                 if let Some(cmd) = parse_md_command(&skill_md, source.clone()) {
                     out.push(cmd);
-                }
-            }
-        }
-        // Plugin layouts also sometimes nest <plugin>/<version>/skills/... — be
-        // tolerant: scan one level of intermediate dirs that aren't `commands`
-        // or `skills` themselves.
-        if let Ok(plugin_inner) = std::fs::read_dir(&plugin_path) {
-            for inner in plugin_inner.flatten() {
-                let p = inner.path();
-                let fname = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !p.is_dir() || fname == "commands" || fname == "skills" {
-                    continue;
-                }
-                // Treat `<plugin>/<inner>/skills/*` and `<plugin>/<inner>/commands/*`
-                // the same way as the top-level forms.
-                out.extend(scan_markdown_dir(&p.join("commands"), source.clone()));
-                if let Ok(skill_entries) = std::fs::read_dir(p.join("skills")) {
-                    for skill_entry in skill_entries.flatten() {
-                        let skill_dir = skill_entry.path();
-                        if !skill_dir.is_dir() {
-                            continue;
-                        }
-                        let skill_md = skill_dir.join("SKILL.md");
-                        if let Some(cmd) = parse_md_command(&skill_md, source.clone()) {
-                            out.push(cmd);
-                        }
-                    }
                 }
             }
         }
@@ -379,20 +432,50 @@ mod tests {
         assert_eq!(plain.source, SlashCommandSource::User);
     }
 
+    /// Writes a fake `<claude_dir>/plugins/installed_plugins.json` with the
+    /// given (qualified_name, installPath) pairs. Mirrors the layout that
+    /// Claude Code maintains on real systems so the discovery path is
+    /// exercised end-to-end in unit tests.
+    fn write_installed_plugins_manifest(claude_dir: &Path, entries: &[(&str, &str)]) {
+        use std::fmt::Write as _;
+        let mut json = String::from("{\"version\":2,\"plugins\":{");
+        for (i, (qualified, install_path)) in entries.iter().enumerate() {
+            if i > 0 {
+                json.push(',');
+            }
+            let _ = write!(
+                &mut json,
+                "\"{qualified}\":[{{\"scope\":\"user\",\"installPath\":\"{install_path}\",\"version\":\"1.0.0\"}}]"
+            );
+        }
+        json.push_str("}}");
+        let plugins_dir = claude_dir.join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        std::fs::write(plugins_dir.join("installed_plugins.json"), json).unwrap();
+    }
+
     #[test]
     fn discover_includes_plugin_commands_and_skills() {
         let tmp = tempfile::tempdir().unwrap();
+        // installPath lives outside <claude_dir>/plugins to mirror the real
+        // cache layout (`~/.claude/plugins/cache/<marketplace>/<plugin>/<ver>`).
+        let install_path = tmp.path().join("cache/official/superpowers/1.0.0");
         write_md_with_frontmatter(
-            &tmp.path()
-                .join("plugins/superpowers/commands/writing-plans.md"),
+            &install_path.join("commands/writing-plans.md"),
             "Use when you have a spec for a multi-step task",
             "body",
         );
         write_md_with_frontmatter(
-            &tmp.path()
-                .join("plugins/superpowers/skills/brainstorming/SKILL.md"),
+            &install_path.join("skills/brainstorming/SKILL.md"),
             "Turn ideas into designs",
             "body",
+        );
+        write_installed_plugins_manifest(
+            tmp.path(),
+            &[(
+                "superpowers@claude-plugins-official",
+                install_path.to_str().unwrap(),
+            )],
         );
         let result = discover(tmp.path());
         let plans = result.iter().find(|c| c.name == "writing-plans").unwrap();
@@ -422,10 +505,15 @@ mod tests {
             "User override of help",
             "body",
         );
+        let install_path = tmp.path().join("cache/official/foo/1.0.0");
         write_md_with_frontmatter(
-            &tmp.path().join("plugins/foo/commands/help.md"),
+            &install_path.join("commands/help.md"),
             "Plugin help (shadowed)",
             "body",
+        );
+        write_installed_plugins_manifest(
+            tmp.path(),
+            &[("foo@official", install_path.to_str().unwrap())],
         );
         let result = discover(tmp.path());
         let helps: Vec<_> = result.iter().filter(|c| c.name == "help").collect();
@@ -435,13 +523,68 @@ mod tests {
     }
 
     #[test]
+    fn discover_skips_plugins_with_missing_install_path() {
+        // Manifest references a path that doesn't exist on disk (e.g. the
+        // plugin was uninstalled but the manifest entry wasn't pruned).
+        // Discovery must fail-soft and still return at least the builtins.
+        let tmp = tempfile::tempdir().unwrap();
+        let bogus = tmp.path().join("does/not/exist");
+        write_installed_plugins_manifest(
+            tmp.path(),
+            &[("ghost@official", bogus.to_str().unwrap())],
+        );
+        let result = discover(tmp.path());
+        assert!(
+            !result.is_empty(),
+            "discover() must not crash on missing installPath"
+        );
+        assert!(
+            result
+                .iter()
+                .all(|c| !matches!(c.source, SlashCommandSource::Plugin { .. })),
+            "no plugin entries should be emitted when installPath is missing"
+        );
+        // Sanity: builtins are still there.
+        assert!(result.iter().any(|c| c.name == "help"));
+    }
+
+    #[test]
+    fn discover_strips_marketplace_suffix_from_plugin_name() {
+        // The display name is the part before `@` in the qualified name.
+        // `foo@official` → `Plugin { plugin: "foo" }`.
+        let tmp = tempfile::tempdir().unwrap();
+        let install_path = tmp.path().join("cache/official/foo/1.0.0");
+        write_md_with_frontmatter(
+            &install_path.join("commands/widget.md"),
+            "a widget command",
+            "body",
+        );
+        write_installed_plugins_manifest(
+            tmp.path(),
+            &[("foo@official", install_path.to_str().unwrap())],
+        );
+        let result = discover(tmp.path());
+        let widget = result
+            .iter()
+            .find(|c| c.name == "widget")
+            .expect("widget must be discovered");
+        assert_eq!(
+            widget.source,
+            SlashCommandSource::Plugin {
+                plugin: "foo".into()
+            }
+        );
+    }
+
+    #[test]
     fn discover_sort_is_bucket_then_alphabetical() {
         let tmp = tempfile::tempdir().unwrap();
         write_md_with_frontmatter(&tmp.path().join("commands/zeta-user.md"), "z", "");
-        write_md_with_frontmatter(
-            &tmp.path().join("plugins/aaa/commands/alpha-plugin.md"),
-            "a",
-            "",
+        let install_path = tmp.path().join("cache/official/aaa/1.0.0");
+        write_md_with_frontmatter(&install_path.join("commands/alpha-plugin.md"), "a", "");
+        write_installed_plugins_manifest(
+            tmp.path(),
+            &[("aaa@official", install_path.to_str().unwrap())],
         );
         let result = discover(tmp.path());
         // The first entry must be a Builtin; the last must be a Plugin.
