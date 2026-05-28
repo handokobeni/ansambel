@@ -441,10 +441,20 @@ pub(crate) async fn move_task_inner(
     };
 
     // (B) Auto-remove an EMPTY linked workspace when returning to Todo.
+    //
+    // Multi-card refcount rule (spec §4):
+    //   refcount > 1  → sticky; no cleanup, link stays, only column changes.
+    //   refcount == 1 + empty → PR #32 behaviour (unlink + remove).
+    //   refcount == 1 + not-empty → keep (existing behaviour, no-op).
     let removed_ws = if column == KanbanColumn::Todo {
         match todo_cleanup.as_ref() {
             Some((ws, agent_live))
-                if crate::commands::workspace::is_workspace_empty(&data_dir, ws, *agent_live) =>
+                if ws.task_ids.len() <= 1
+                    && crate::commands::workspace::is_workspace_empty(
+                        &data_dir,
+                        ws,
+                        *agent_live,
+                    ) =>
             {
                 crate::commands::workspace::remove_workspace_inner(
                     ws.id.clone(),
@@ -2711,5 +2721,115 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("ws_missing"));
+    }
+
+    // ── Task 5 (multi-card workspace): move_task_inner sticky refcount ───
+
+    /// When two cards share a workspace (refcount=2), moving one to Todo
+    /// must NOT remove the workspace or break any link. Only the column
+    /// of the moved card changes. (spec §4: refcount > 1 → sticky)
+    #[tokio::test]
+    async fn move_to_todo_with_refcount_gt_1_keeps_workspace_and_link() {
+        // Setup: ws_a linked to [tk_a, tk_b]; both in InProgress.
+        let (data_dir, state) = setup_state_with_repo_and_workspace("ws_a", "tk_a").await;
+        // Seed a second card in the same repo linked to ws_a.
+        {
+            let mut st = state.lock().unwrap();
+            st.tasks.insert(
+                "tk_b".into(),
+                Task {
+                    id: "tk_b".into(),
+                    repo_id: "repo_a".into(),
+                    workspace_id: Some("ws_a".into()),
+                    title: "tk_b".into(),
+                    description: String::new(),
+                    column: KanbanColumn::InProgress,
+                    order: 1,
+                    created_at: 0,
+                    updated_at: 0,
+                    pic_names: Vec::new(),
+                },
+            );
+            st.workspaces
+                .get_mut("ws_a")
+                .unwrap()
+                .task_ids
+                .push("tk_b".into());
+        }
+
+        let provider: Arc<dyn crate::task_provider::TaskProvider> = Arc::new(BlankRepoIdProvider);
+        let updated = move_task_inner(
+            "tk_a".into(),
+            KanbanColumn::Todo,
+            0,
+            data_dir.clone(),
+            provider,
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+
+        // Column changed.
+        assert_eq!(
+            updated.column,
+            KanbanColumn::Todo,
+            "column must change to Todo"
+        );
+
+        // Link preserved.
+        assert_eq!(
+            updated.workspace_id.as_deref(),
+            Some("ws_a"),
+            "tk_a.workspace_id must remain ws_a (sticky, refcount=2)"
+        );
+
+        let st = state.lock().unwrap();
+        // Workspace still exists.
+        assert!(
+            st.workspaces.contains_key("ws_a"),
+            "workspace ws_a must NOT be removed when refcount=2"
+        );
+        // Both task_ids still in ws.task_ids.
+        let task_ids = &st.workspaces.get("ws_a").unwrap().task_ids;
+        assert!(
+            task_ids.contains(&"tk_a".to_string()),
+            "tk_a must remain in ws_a.task_ids"
+        );
+        assert!(
+            task_ids.contains(&"tk_b".to_string()),
+            "tk_b must remain in ws_a.task_ids"
+        );
+    }
+
+    /// Regression guard for PR #32: when the sole linked card moves to
+    /// Todo and the workspace is empty, the workspace must still be removed
+    /// and the link cleared. (spec §4: refcount=1 + empty → unlink + remove)
+    #[tokio::test]
+    async fn move_to_todo_with_refcount_1_and_empty_still_removes_workspace() {
+        let (data_dir, state) = setup_state_with_repo_and_workspace("ws_a", "tk_a").await;
+
+        let provider: Arc<dyn crate::task_provider::TaskProvider> = Arc::new(BlankRepoIdProvider);
+        let updated = move_task_inner(
+            "tk_a".into(),
+            KanbanColumn::Todo,
+            0,
+            data_dir.clone(),
+            provider,
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+
+        // Link cleared.
+        assert_eq!(
+            updated.workspace_id, None,
+            "workspace_id must be None after removing empty solo workspace"
+        );
+        // Workspace removed from state.
+        let st = state.lock().unwrap();
+        assert!(
+            st.workspaces.is_empty(),
+            "empty solo workspace must be removed from state"
+        );
     }
 }
