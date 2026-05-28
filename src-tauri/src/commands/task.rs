@@ -706,6 +706,111 @@ pub(crate) async fn unlink_task_from_workspace_inner(
     Ok(UnlinkResult::Unlinked)
 }
 
+// ── link_task_to_workspace ──────────────────────────────────────────
+//
+// Attaches a card to a workspace. Idempotent when the card is already
+// linked to the target workspace; performs an atomic switch (via the
+// unlink-inner cleanup path) when the card was previously linked to a
+// different workspace.
+//
+// Validation (under lock, then dropped before I/O):
+// - task exists,
+// - workspace exists,
+// - `task.repo_id == workspace.repo_id` — else `InvalidState("repo
+//   mismatch: ...")`.
+//
+// Mutex discipline:
+// - The unlink-inner call (for the switch case) and the `save_*` disk
+//   writes both happen with NO lock held — locks are reacquired only to
+//   read or mutate the in-memory state and then immediately released.
+#[tauri::command]
+pub async fn link_task_to_workspace(
+    task_id: String,
+    workspace_id: String,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<Mutex<AppState>>>,
+) -> std::result::Result<(), String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    link_task_to_workspace_inner(&task_id, &workspace_id, data_dir, state.inner().clone())
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "link_task_to_workspace failed");
+            e.to_string()
+        })
+}
+
+pub(crate) async fn link_task_to_workspace_inner(
+    task_id: &str,
+    workspace_id: &str,
+    data_dir: std::path::PathBuf,
+    state: Arc<Mutex<AppState>>,
+) -> Result<()> {
+    // Phase 1: validate + plan the mutation while holding the lock briefly.
+    let (already_linked_here, switch_from) = {
+        let st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        let task = st
+            .tasks
+            .get(task_id)
+            .ok_or_else(|| AppError::NotFound(format!("task '{task_id}'")))?;
+        let ws = st
+            .workspaces
+            .get(workspace_id)
+            .ok_or_else(|| AppError::NotFound(format!("workspace '{workspace_id}'")))?;
+        if task.repo_id != ws.repo_id {
+            return Err(AppError::InvalidState(format!(
+                "repo mismatch: task '{task_id}' is in repo '{}', workspace '{workspace_id}' is in repo '{}'",
+                task.repo_id, ws.repo_id
+            )));
+        }
+        let already = task.workspace_id.as_deref() == Some(workspace_id);
+        let switch_from = task
+            .workspace_id
+            .clone()
+            .filter(|w| w.as_str() != workspace_id);
+        (already, switch_from)
+    };
+
+    if already_linked_here {
+        return Ok(());
+    }
+
+    // Phase 2: if switching, unlink from the previous workspace (may
+    // trigger cleanup). This calls the unlink inner so the cleanup
+    // logic stays in one place. MUST happen with no lock held — the
+    // inner re-acquires the lock and may invoke `remove_workspace_inner`.
+    if switch_from.is_some() {
+        let _ = unlink_task_from_workspace_inner(
+            task_id,
+            /* force = */ true,
+            data_dir.clone(),
+            Arc::clone(&state),
+        )
+        .await?;
+    }
+
+    // Phase 3: link — bump both timestamps, idempotent guard on
+    // `ws.task_ids`. Clone snapshots; drop lock before disk I/O.
+    let now = crate::commands::helpers::now_unix();
+    let (tasks_snapshot, workspaces_snapshot) = {
+        let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+        if let Some(task) = st.tasks.get_mut(task_id) {
+            task.workspace_id = Some(workspace_id.to_string());
+            task.updated_at = now;
+        }
+        if let Some(ws) = st.workspaces.get_mut(workspace_id) {
+            if !ws.task_ids.iter().any(|id| id == task_id) {
+                ws.task_ids.push(task_id.to_string());
+            }
+            ws.updated_at = now;
+        }
+        (st.tasks.clone(), st.workspaces.clone())
+    };
+
+    crate::persistence::tasks::save_tasks(&data_dir, &tasks_snapshot)?;
+    crate::persistence::workspaces::save_workspaces(&data_dir, &workspaces_snapshot)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2470,5 +2575,141 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r, UnlinkResult::Unlinked);
+    }
+
+    // ── Task 3 (multi-card workspace): link_task_to_workspace ────────
+
+    /// Creates a real on-disk workspace (via `create_workspace_inner`,
+    /// which runs `git worktree add`) in the existing `repo_a` registered
+    /// by `setup_state_with_repo_and_workspace`, then renames the in-state
+    /// entry so it is addressable by the stable id `ws_id`. Mirrors the
+    /// rename trick used by `setup_state_with_repo_and_workspace` so the
+    /// on-disk worktree (used by `is_workspace_empty` for the atomic
+    /// switch cleanup) is preserved.
+    async fn seed_workspace(
+        state: &Arc<Mutex<AppState>>,
+        data_dir: &std::path::Path,
+        ws_id: &str,
+        repo_id: &str,
+    ) {
+        let created = crate::commands::workspace::create_workspace_inner(
+            repo_id.into(),
+            ws_id.into(),
+            String::new(),
+            None,
+            data_dir.to_path_buf(),
+            Arc::clone(state),
+        )
+        .await
+        .unwrap();
+        let mut st = state.lock().unwrap();
+        let mut ws = st.workspaces.remove(&created.id).unwrap();
+        ws.id = ws_id.into();
+        st.workspaces.insert(ws_id.into(), ws);
+    }
+
+    #[tokio::test]
+    async fn link_task_to_workspace_attaches_card_and_appends_task_id() {
+        let (data_dir, state) = setup_state_with_repo_and_workspace("ws_a", "tk_a").await;
+        // Seed a second card in the same repo, currently unlinked.
+        seed_task(&state, "tk_b", "repo_a", None);
+        link_task_to_workspace_inner("tk_b", "ws_a", data_dir.clone(), Arc::clone(&state))
+            .await
+            .unwrap();
+        let st = state.lock().unwrap();
+        let ws = st.workspaces.get("ws_a").unwrap();
+        assert!(ws.task_ids.contains(&"tk_a".to_string()));
+        assert!(ws.task_ids.contains(&"tk_b".to_string()));
+        let tk = st.tasks.get("tk_b").unwrap();
+        assert_eq!(tk.workspace_id.as_deref(), Some("ws_a"));
+    }
+
+    #[tokio::test]
+    async fn link_task_to_workspace_is_idempotent_for_already_linked_card() {
+        let (data_dir, state) = setup_state_with_repo_and_workspace("ws_a", "tk_a").await;
+        // tk_a is already in ws_a from setup.
+        let before = state
+            .lock()
+            .unwrap()
+            .workspaces
+            .get("ws_a")
+            .unwrap()
+            .task_ids
+            .clone();
+        link_task_to_workspace_inner("tk_a", "ws_a", data_dir, Arc::clone(&state))
+            .await
+            .unwrap();
+        let after = state
+            .lock()
+            .unwrap()
+            .workspaces
+            .get("ws_a")
+            .unwrap()
+            .task_ids
+            .clone();
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn link_task_to_workspace_atomically_switches_from_other_workspace() {
+        let (data_dir, state) = setup_state_with_repo_and_workspace("ws_a", "tk_a").await;
+        // Seed a second workspace with a real on-disk worktree + link a
+        // card to it. The real worktree is required so the unlink-driven
+        // cleanup (refcount=0 + empty) actually fires on ws_b.
+        seed_workspace(&state, &data_dir, "ws_b", "repo_a").await;
+        seed_task(&state, "tk_b", "repo_a", Some("ws_b".into()));
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .get_mut("ws_b")
+            .unwrap()
+            .task_ids = vec!["tk_b".into()];
+
+        link_task_to_workspace_inner("tk_b", "ws_a", data_dir, Arc::clone(&state))
+            .await
+            .unwrap();
+
+        let st = state.lock().unwrap();
+        assert!(st
+            .workspaces
+            .get("ws_a")
+            .unwrap()
+            .task_ids
+            .contains(&"tk_b".to_string()));
+        // ws_b lost the link AND was removed (refcount=0 + empty, per
+        // cleanup rule).
+        assert!(!st.workspaces.contains_key("ws_b"));
+        let tk = st.tasks.get("tk_b").unwrap();
+        assert_eq!(tk.workspace_id.as_deref(), Some("ws_a"));
+    }
+
+    #[tokio::test]
+    async fn link_task_to_workspace_rejects_cross_repo() {
+        let (data_dir, state) = setup_state_with_repo_and_workspace("ws_a", "tk_a").await;
+        seed_task(&state, "tk_x", "repo_other", None);
+        let err = link_task_to_workspace_inner("tk_x", "ws_a", data_dir, state)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("repo"));
+    }
+
+    #[tokio::test]
+    async fn link_task_to_workspace_rejects_missing_task_or_workspace() {
+        let (data_dir, state) = setup_state_with_repo_and_workspace("ws_a", "tk_a").await;
+        let err = link_task_to_workspace_inner(
+            "tk_missing",
+            "ws_a",
+            data_dir.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("tk_missing"));
+
+        let err = link_task_to_workspace_inner("tk_a", "ws_missing", data_dir, state)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("ws_missing"));
     }
 }
