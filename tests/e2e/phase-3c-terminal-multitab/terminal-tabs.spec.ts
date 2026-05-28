@@ -52,7 +52,7 @@ test('a workspace can open multiple terminal tabs that persist across switching'
         updated_at: 1,
         worktree_dir: '/tmp/term-repo',
         team_activity_private: false,
-        task_id: null,
+        task_ids: [],
       },
     ],
     initialTasks: [],

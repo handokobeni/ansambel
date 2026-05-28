@@ -204,7 +204,7 @@ describe('App', () => {
       created_at: 1776000001,
       updated_at: 1776000001,
       worktree_dir: '/tmp/ws_abc',
-      task_id: null,
+      task_ids: [],
     });
     render(App);
     await waitFor(() => {
@@ -426,7 +426,7 @@ describe('WorkspaceView mount-persistence across mode toggle', () => {
     created_at: 0,
     updated_at: 0,
     worktree_dir: '/tmp/ws_persist',
-    task_id: null,
+    task_ids: [],
   };
 
   it('WorkspaceView stub stays in DOM (hidden wrapper) when mode switches to plan', async () => {
@@ -461,7 +461,7 @@ describe('App work mode', () => {
       created_at: 0,
       updated_at: 0,
       worktree_dir: '/tmp/ws_a',
-      task_id: null,
+      task_ids: [],
     });
     modeStore.set('work');
     const { getByText } = render(App);

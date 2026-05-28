@@ -41,7 +41,7 @@ const mockWorkspace: WorkspaceInfo = {
   created_at: 1776000000,
   updated_at: 1776000000,
   worktree_dir: '/tmp/ws_abc123',
-  task_id: null,
+  task_ids: [],
 };
 
 beforeEach(() => {

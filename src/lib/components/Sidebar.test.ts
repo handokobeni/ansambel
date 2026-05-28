@@ -92,7 +92,7 @@ const defaultWorkspaceList = [
     created_at: 1776000001,
     updated_at: 1776000001,
     worktree_dir: '/tmp/ws_abc123',
-    task_id: null,
+    task_ids: [],
   },
   {
     id: 'ws_def456',
@@ -107,7 +107,7 @@ const defaultWorkspaceList = [
     created_at: 1776000002,
     updated_at: 1776000002,
     worktree_dir: '/tmp/ws_def456',
-    task_id: null,
+    task_ids: [],
   },
 ];
 
@@ -196,7 +196,7 @@ describe('Sidebar', () => {
       created_at: 1776000003,
       updated_at: 1776000003,
       worktree_dir: '/tmp/ws_new111',
-      task_id: null,
+      task_ids: [],
     });
     render(Sidebar);
     await fireEvent.click(screen.getByRole('button', { name: /new workspace/i }));
@@ -354,7 +354,7 @@ describe('Sidebar', () => {
         created_at: 1776000010,
         updated_at: 1776000010,
         worktree_dir: '/tmp/ws_xyz',
-        task_id: null,
+        task_ids: [],
       },
     ]);
     const { container } = render(Sidebar);
@@ -377,7 +377,7 @@ describe('Sidebar', () => {
         created_at: 1776000003,
         updated_at: 1776000003,
         worktree_dir: '/tmp/ws_done1',
-        task_id: null,
+        task_ids: [],
       },
     ];
     vi.mocked(workspaces.listForRepo).mockReturnValue(fallthroughList);
@@ -443,7 +443,7 @@ describe('Sidebar grouping', () => {
         created_at: 1,
         updated_at: 1,
         worktree_dir: '/tmp/a',
-        task_id: null,
+        task_ids: [],
       },
       {
         id: 'ws_b',
@@ -458,7 +458,7 @@ describe('Sidebar grouping', () => {
         created_at: 2,
         updated_at: 2,
         worktree_dir: '/tmp/b',
-        task_id: null,
+        task_ids: [],
       },
       {
         id: 'ws_c',
@@ -473,7 +473,7 @@ describe('Sidebar grouping', () => {
         created_at: 3,
         updated_at: 3,
         worktree_dir: '/tmp/c',
-        task_id: null,
+        task_ids: [],
       },
     ]);
     const { container } = render(Sidebar);
@@ -506,7 +506,7 @@ describe('Sidebar grouping', () => {
         created_at: 1,
         updated_at: 1,
         worktree_dir: '/tmp/a',
-        task_id: null,
+        task_ids: [],
       },
     ]);
     const { container } = render(Sidebar);
@@ -530,7 +530,7 @@ describe('Sidebar grouping', () => {
         created_at: 1,
         updated_at: 1,
         worktree_dir: '/tmp/d',
-        task_id: null,
+        task_ids: [],
       },
     ]);
     const { container } = render(Sidebar);
@@ -582,7 +582,7 @@ describe('Sidebar grouping', () => {
         created_at: 1,
         updated_at: 1,
         worktree_dir: '/tmp/r',
-        task_id: null,
+        task_ids: [],
       },
     ]);
     const { container } = render(Sidebar);
