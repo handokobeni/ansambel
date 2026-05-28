@@ -3,13 +3,17 @@
   import type { Task } from '$lib/types';
   import { workspaces } from '$lib/stores/workspaces.svelte';
   import { modeStore } from '$lib/stores/mode.svelte';
+  import { tasks } from '$lib/stores/tasks.svelte';
   import { tooltip } from '$lib/actions';
   import LinkWorkspacePicker from './LinkWorkspacePicker.svelte';
+  import UnlinkConfirmModal from './UnlinkConfirmModal.svelte';
 
   const { task, onRemove }: { task: Task; onRemove: (id: string) => void } = $props();
 
   let menuOpen = $state(false);
   let linkPickerOpen = $state(false);
+  let unlinkModalOpen = $state(false);
+  let unlinkModalTitle = $state('');
 
   function toggleMenu(e: MouseEvent) {
     e.stopPropagation();
@@ -20,6 +24,25 @@
     e.stopPropagation();
     menuOpen = false;
     linkPickerOpen = true;
+  }
+
+  async function startUnlink(e: MouseEvent) {
+    e.stopPropagation();
+    menuOpen = false;
+    if (!task.workspace_id) return;
+    const preview = await tasks.unlink(task.id, false, task.repo_id);
+    if (preview.kind === 'would_remove') {
+      unlinkModalTitle = preview.workspace_title;
+      unlinkModalOpen = true;
+      return;
+    }
+    // No cleanup would fire — execute immediately.
+    await tasks.unlink(task.id, true, task.repo_id);
+  }
+
+  async function confirmUnlink() {
+    unlinkModalOpen = false;
+    await tasks.unlink(task.id, true, task.repo_id);
   }
 
   const truncatedDescription = $derived(
@@ -90,6 +113,16 @@
           >
             Link to workspace…
           </button>
+          {#if task.workspace_id}
+            <button
+              type="button"
+              class="block w-full text-left px-2 py-1 text-[var(--text-primary)] hover:bg-[var(--bg-hover)]"
+              data-testid="task-menu-unlink"
+              onclick={startUnlink}
+            >
+              Unlink from workspace
+            </button>
+          {/if}
         </div>
       {/if}
     </div>
@@ -140,4 +173,11 @@
   repoId={task.repo_id}
   open={linkPickerOpen}
   onClose={() => (linkPickerOpen = false)}
+/>
+
+<UnlinkConfirmModal
+  open={unlinkModalOpen}
+  workspaceTitle={unlinkModalTitle}
+  onConfirm={confirmUnlink}
+  onCancel={() => (unlinkModalOpen = false)}
 />

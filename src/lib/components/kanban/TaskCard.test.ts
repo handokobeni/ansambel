@@ -1,10 +1,11 @@
 // src/lib/components/kanban/TaskCard.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import TaskCard from './TaskCard.svelte';
 import type { Task } from '$lib/types';
 import { workspaces } from '$lib/stores/workspaces.svelte';
 import { modeStore } from '$lib/stores/mode.svelte';
+import { tasks } from '$lib/stores/tasks.svelte';
 
 vi.mock('$lib/stores/workspaces.svelte', () => ({
   workspaces: {
@@ -51,6 +52,8 @@ describe('TaskCard', () => {
     vi.mocked(workspaces.byId).mockReturnValue(undefined);
     vi.mocked(workspaces.select).mockClear();
     vi.mocked(modeStore.set).mockClear();
+    vi.mocked(tasks.unlink).mockReset();
+    vi.mocked(tasks.unlink).mockResolvedValue({ kind: 'unlinked' });
   });
 
   it('renders task title', () => {
@@ -184,5 +187,52 @@ describe('TaskCard', () => {
     await fireEvent.click(chip);
     expect(vi.mocked(workspaces.select)).toHaveBeenCalledWith('ws_a');
     expect(vi.mocked(modeStore.set)).toHaveBeenCalledWith('work');
+  });
+
+  it('Unlink with preview=Unlinked executes immediately, no modal', async () => {
+    vi.mocked(tasks.unlink).mockReset();
+    vi.mocked(tasks.unlink).mockResolvedValue({ kind: 'unlinked' });
+    const task = makeTask({ workspace_id: 'ws_a' });
+    render(TaskCard, { props: { task, onRemove: vi.fn() } });
+    await fireEvent.click(screen.getByTestId('task-menu-trigger'));
+    await fireEvent.click(screen.getByTestId('task-menu-unlink'));
+    await waitFor(() => expect(vi.mocked(tasks.unlink)).toHaveBeenCalledTimes(2));
+    // Preview call first, then force call. No modal in between.
+    expect(vi.mocked(tasks.unlink)).toHaveBeenNthCalledWith(1, 'tk_abc123', false, 'repo_abc123');
+    expect(vi.mocked(tasks.unlink)).toHaveBeenNthCalledWith(2, 'tk_abc123', true, 'repo_abc123');
+    expect(screen.queryByTestId('unlink-modal-text')).toBeNull();
+  });
+
+  it('Unlink with preview=WouldRemove shows modal; Confirm fires force=true', async () => {
+    vi.mocked(tasks.unlink).mockReset();
+    vi.mocked(tasks.unlink)
+      .mockResolvedValueOnce({ kind: 'would_remove', workspace_title: 'pay' })
+      .mockResolvedValueOnce({ kind: 'removed' });
+    const task = makeTask({ workspace_id: 'ws_a' });
+    render(TaskCard, { props: { task, onRemove: vi.fn() } });
+    await fireEvent.click(screen.getByTestId('task-menu-trigger'));
+    await fireEvent.click(screen.getByTestId('task-menu-unlink'));
+    await waitFor(() => expect(screen.queryByTestId('unlink-modal-text')).not.toBeNull());
+    expect(screen.getByTestId('unlink-modal-text').textContent).toMatch(/pay/);
+    await fireEvent.click(screen.getByTestId('unlink-modal-confirm'));
+    await waitFor(() =>
+      expect(vi.mocked(tasks.unlink)).toHaveBeenNthCalledWith(2, 'tk_abc123', true, 'repo_abc123')
+    );
+  });
+
+  it('Unlink with preview=WouldRemove + Cancel does NOT call force=true', async () => {
+    vi.mocked(tasks.unlink).mockReset();
+    vi.mocked(tasks.unlink).mockResolvedValueOnce({
+      kind: 'would_remove',
+      workspace_title: 'pay',
+    });
+    const task = makeTask({ workspace_id: 'ws_a' });
+    render(TaskCard, { props: { task, onRemove: vi.fn() } });
+    await fireEvent.click(screen.getByTestId('task-menu-trigger'));
+    await fireEvent.click(screen.getByTestId('task-menu-unlink'));
+    await waitFor(() => expect(screen.queryByTestId('unlink-modal-text')).not.toBeNull());
+    await fireEvent.click(screen.getByTestId('unlink-modal-cancel'));
+    // Only the preview call was made.
+    expect(vi.mocked(tasks.unlink)).toHaveBeenCalledTimes(1);
   });
 });
