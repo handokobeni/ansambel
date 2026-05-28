@@ -175,12 +175,18 @@ pub async fn remove_task(
             .unwrap_or_default()
     };
     let provider = provider_for_repo(provider_handle.inner(), &data_dir, &repo_id).await;
-    remove_task_inner(task_id, Some(force), provider, state.inner().clone())
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "remove_task failed");
-            e.to_string()
-        })
+    remove_task_inner(
+        task_id,
+        Some(force),
+        provider,
+        data_dir,
+        state.inner().clone(),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "remove_task failed");
+        e.to_string()
+    })
 }
 
 // ── Inner implementations ────────────────────────────────────────────
@@ -503,30 +509,37 @@ pub(crate) async fn remove_task_inner(
     task_id: String,
     force: Option<bool>,
     provider: Arc<dyn crate::task_provider::TaskProvider>,
+    data_dir: std::path::PathBuf,
     state: Arc<Mutex<AppState>>,
 ) -> Result<()> {
     let force = force.unwrap_or(false);
-    // Refuse delete when the task has an active workspace unless
-    // force=true. The check reads the AppState mirror so it works for
-    // both providers — LarkProvider returns workspace_id=None on
-    // hydrate, so this guard only fires for the local store.
-    {
+    // Verify the task exists (and capture whether it has a workspace link)
+    // under a brief lock. Drop the lock before any async I/O.
+    let has_workspace = {
         let st = state
             .lock()
             .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
         if let Some(t) = st.tasks.get(&task_id) {
-            if t.workspace_id.is_some() && !force {
-                return Err(AppError::InvalidState(format!(
-                    "task '{}' has a linked workspace '{}'. Use force=true to remove anyway, \
-                     or remove the workspace via the sidebar first.",
-                    task_id,
-                    t.workspace_id.as_deref().unwrap_or("")
-                )));
-            }
+            t.workspace_id.is_some()
         } else {
             return Err(AppError::NotFound(format!("task '{}' not found", task_id)));
         }
+    };
+
+    // Option A: unlink FIRST (handles refcount + optional workspace removal
+    // uniformly), then delete the task. We always pass force=true so the
+    // unlink commits immediately instead of returning WouldRemove.
+    // The outer `force` flag no longer gates workspace-linked deletions —
+    // delete always proceeds (spec §4: "deleting a card is equivalent to
+    // explicit unlink for refcount purposes").
+    if has_workspace {
+        // force=false on the outer call is treated as "do not guard here";
+        // unlink itself is always committed (force=true) because removing
+        // the task makes a preview-and-confirm loop impossible.
+        let _ = force; // consumed implicitly; kept in signature for API compat
+        unlink_task_from_workspace_inner(&task_id, true, data_dir, Arc::clone(&state)).await?;
     }
+
     provider.delete_task(&task_id).await?;
     {
         let mut st = state
@@ -1589,6 +1602,7 @@ mod tests {
             task.id.clone(),
             Some(false),
             Arc::clone(&provider),
+            tmp.path().to_path_buf(),
             Arc::clone(&state),
         )
         .await
@@ -1599,20 +1613,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_task_with_workspace_and_no_force_returns_err() {
+    async fn remove_task_with_workspace_always_succeeds() {
+        // Per spec §4: deleting a card is equivalent to explicit unlink for
+        // refcount purposes — the `force` parameter no longer gates workspace-
+        // linked deletions. Even force=false must succeed.
         let tmp = tempdir().unwrap();
         let state = make_state_with_repo(tmp.path());
         let provider = make_provider(tmp.path());
 
-        // Insert a task with workspace_id already set. We seed both the
-        // in-memory mirror and the provider's tasks.json so the guard
-        // (which reads AppState) and the eventual provider.delete_task
-        // (which reads tasks.json) both see it.
+        // Seed a task with a dangling workspace reference (workspace not in
+        // the state map — simulates an already-cleaned workspace). The unlink
+        // inner will clear the dangling link and the task is then deleted.
         let task_id = "tk_linked".to_string();
         let seeded_task = Task {
             id: task_id.clone(),
             repo_id: "repo_r1".into(),
-            workspace_id: Some("ws_exists".into()),
+            workspace_id: Some("ws_dangling".into()),
             title: "Has workspace".into(),
             description: String::new(),
             column: KanbanColumn::InProgress,
@@ -1631,23 +1647,20 @@ mod tests {
             crate::persistence::tasks::save_tasks(tmp.path(), &map).unwrap();
         }
 
-        let result = remove_task_inner(
+        // force=false must now succeed (unlinks dangling ref, then deletes)
+        remove_task_inner(
             task_id.clone(),
             Some(false),
             Arc::clone(&provider),
+            tmp.path().to_path_buf(),
             Arc::clone(&state),
         )
-        .await;
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("workspace") || msg.contains("force"),
-            "Error should mention workspace/force. Got: {msg}"
-        );
+        .await
+        .unwrap();
 
-        // Task should still exist
+        // Task must be gone
         let st = state.lock().unwrap();
-        assert!(st.tasks.contains_key(&task_id));
+        assert!(!st.tasks.contains_key(&task_id));
     }
 
     #[tokio::test]
@@ -1683,6 +1696,7 @@ mod tests {
             task_id.clone(),
             Some(true),
             Arc::clone(&provider),
+            tmp.path().to_path_buf(),
             Arc::clone(&state),
         )
         .await
@@ -1700,10 +1714,107 @@ mod tests {
             "tk_ghost".into(),
             Some(false),
             make_provider(tmp.path()),
+            tmp.path().to_path_buf(),
             state,
         )
         .await;
         assert!(result.is_err());
+    }
+
+    // ── Task 6: remove_task refcount-aware cleanup ───────────────────
+
+    #[tokio::test]
+    async fn remove_task_decrements_refcount_and_keeps_shared_workspace() {
+        let (data_dir, state) = setup_state_with_repo_and_workspace("ws_a", "tk_a").await;
+        seed_task(&state, "tk_b", "repo_a", Some("ws_a".into()));
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .get_mut("ws_a")
+            .unwrap()
+            .task_ids = vec!["tk_a".into(), "tk_b".into()];
+
+        let provider = make_provider(&data_dir);
+        // Seed tk_b into the provider's store so delete_task doesn't fail.
+        {
+            let mut map = std::collections::HashMap::new();
+            map.insert(
+                "tk_b".to_string(),
+                Task {
+                    id: "tk_b".into(),
+                    repo_id: "repo_a".into(),
+                    workspace_id: Some("ws_a".into()),
+                    title: "tk_b".into(),
+                    description: String::new(),
+                    column: KanbanColumn::Todo,
+                    order: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                    pic_names: Vec::new(),
+                },
+            );
+            crate::persistence::tasks::save_tasks(&data_dir, &map).unwrap();
+        }
+
+        remove_task_inner(
+            "tk_b".into(),
+            Some(true),
+            Arc::clone(&provider),
+            data_dir.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+
+        let st = state.lock().unwrap();
+        let ws = st.workspaces.get("ws_a").expect("shared ws must stay");
+        assert_eq!(ws.task_ids, vec!["tk_a".to_string()]);
+        assert!(!st.tasks.contains_key("tk_b"));
+    }
+
+    #[tokio::test]
+    async fn remove_task_with_last_link_and_empty_workspace_removes_workspace() {
+        let (data_dir, state) = setup_state_with_repo_and_workspace("ws_a", "tk_a").await;
+
+        let provider = make_provider(&data_dir);
+        // Seed tk_a into provider store.
+        {
+            let mut map = std::collections::HashMap::new();
+            map.insert(
+                "tk_a".to_string(),
+                Task {
+                    id: "tk_a".into(),
+                    repo_id: "repo_a".into(),
+                    workspace_id: Some("ws_a".into()),
+                    title: "tk_a".into(),
+                    description: String::new(),
+                    column: KanbanColumn::InProgress,
+                    order: 0,
+                    created_at: 0,
+                    updated_at: 0,
+                    pic_names: Vec::new(),
+                },
+            );
+            crate::persistence::tasks::save_tasks(&data_dir, &map).unwrap();
+        }
+
+        remove_task_inner(
+            "tk_a".into(),
+            Some(true),
+            Arc::clone(&provider),
+            data_dir.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+
+        let st = state.lock().unwrap();
+        assert!(
+            !st.workspaces.contains_key("ws_a"),
+            "workspace must be gone"
+        );
+        assert!(!st.tasks.contains_key("tk_a"));
     }
 
     fn make_state() -> Arc<Mutex<AppState>> {
