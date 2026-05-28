@@ -55,4 +55,14 @@ describe('SlashCommandsStore', () => {
     await store.load();
     expect(store.filtered('zzz')).toEqual([]);
   });
+
+  it('load: leaves commands empty and logs when api throws', async () => {
+    vi.mocked(api.slashCommands.list).mockRejectedValue(new Error('IPC error'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const store = new SlashCommandsStore();
+    await store.load();
+    expect(store.commands).toEqual([]);
+    expect(errorSpy).toHaveBeenCalledWith('slashCommands.load failed', expect.any(Error));
+    errorSpy.mockRestore();
+  });
 });

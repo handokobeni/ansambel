@@ -369,4 +369,29 @@ describe('TasksStore', () => {
     expect(returned).toEqual({ kind: 'would_remove', workspace_title: 'X' });
     expect(api.task.list).not.toHaveBeenCalled();
   });
+
+  it('byId returns the task when found across repos', async () => {
+    const task = makeTask();
+    vi.mocked(api.task.list).mockResolvedValue([task]);
+    const store = new TasksStore();
+    await store.loadForRepo('repo_abc123');
+    expect(store.byId('tk_abc123')).toEqual(task);
+  });
+
+  it('byId returns undefined when the id is not in any repo', async () => {
+    const task = makeTask();
+    vi.mocked(api.task.list).mockResolvedValue([task]);
+    const store = new TasksStore();
+    await store.loadForRepo('repo_abc123');
+    expect(store.byId('tk_nonexistent')).toBeUndefined();
+  });
+
+  it('highlight sets and clears highlightedTaskId', () => {
+    const store = new TasksStore();
+    expect(store.highlightedTaskId).toBeNull();
+    store.highlight('tk_abc123');
+    expect(store.highlightedTaskId).toBe('tk_abc123');
+    store.highlight(null);
+    expect(store.highlightedTaskId).toBeNull();
+  });
 });

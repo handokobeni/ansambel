@@ -152,4 +152,12 @@ describe('editorTabs store', () => {
     expect(editorTabs.open('ws_a').map((f) => f.path)).toEqual(['a.ts']);
     expect(editorTabs.active('ws_a')).toBe('a.ts');
   });
+
+  it('activeFile returns null when state exists but active is null (last file closed)', () => {
+    // Covers the `!state.active` branch in activeFile.
+    editorTabs.openFile('ws_a', 'a.ts', 'A', 'shaA', false);
+    editorTabs.closeFile('ws_a', 'a.ts'); // resets active to null
+    // state exists for 'ws_a' but state.active === null
+    expect(editorTabs.activeFile('ws_a')).toBeNull();
+  });
 });

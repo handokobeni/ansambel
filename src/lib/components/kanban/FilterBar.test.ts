@@ -1897,3 +1897,396 @@ describe('FilterBar coverage gaps', () => {
     );
   });
 });
+
+describe('FilterBar uncovered branch scenarios', () => {
+  it('Person field with fetched but empty person options shows text input (not select or loading)', async () => {
+    // Covers the {:else if personOptionsCache.has(cond.field_name)} branch
+    // when the cache hit exists but options array is empty (length === 0).
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fldPIC', field_name: 'PIC', type: 11, is_primary: false, property: null },
+    ]);
+    vi.mocked(api.lark.listPersonOptions).mockResolvedValue([]); // empty list
+
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fldPIC',
+              field_name: 'PIC',
+              operator: 'is' as const,
+              value: [''],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    await tick();
+
+    // Options were fetched and cached but empty → fallback to text input
+    expect(document.querySelector('[data-testid="person-select"]')).toBeNull();
+    expect(screen.queryByText('Loading options…')).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+  });
+
+  it('Lookup field with fetch error falls back to text input', async () => {
+    // Covers the {:else if lookupOptionsFailed.has(cond.field_id)} branch
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_lookup',
+        field_name: 'Sprint Status',
+        type: 19,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    vi.mocked(api.lark.listLookupOptions).mockRejectedValueOnce(new Error('network error'));
+
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_lookup',
+              field_name: 'Sprint Status',
+              operator: 'is' as const,
+              value: [''],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    await tick();
+
+    // Error path → fallback to text input, not select or loading
+    expect(document.querySelector('[data-testid="lookup-select"]')).toBeNull();
+    expect(screen.queryByText('Loading options…')).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+  });
+
+  it('Lookup field with empty options (cache hit, length 0) shows text input', async () => {
+    // Covers the {:else if lookupOptionsCache.has(cond.field_id)} branch
+    // when the cache exists but is empty (chain didn't resolve to SingleSelect).
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_lookup',
+        field_name: 'Sprint Status',
+        type: 19,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    vi.mocked(api.lark.listLookupOptions).mockResolvedValue([]); // empty list
+
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_lookup',
+              field_name: 'Sprint Status',
+              operator: 'contains' as const,
+              value: ['Active'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    await tick();
+
+    // Empty cache hit → neither select nor loading spinner; text input instead
+    expect(document.querySelector('[data-testid="lookup-select"]')).toBeNull();
+    expect(screen.queryByText('Loading options…')).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox')).toBeInTheDocument();
+  });
+
+  it('MultiSelect (type 4) renders a <select> value picker from field options', async () => {
+    // Covers the {:else if fieldType === 3 || fieldType === 4} branch for type 4.
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_ms',
+        field_name: 'Tags',
+        type: 4,
+        is_primary: false,
+        property: {
+          options: [
+            { id: 'o1', name: 'Bug' },
+            { id: 'o2', name: 'Feature' },
+          ],
+        },
+      },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_ms',
+              field_name: 'Tags',
+              operator: 'contains' as const,
+              value: ['Bug'],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    expect(screen.queryByText('Bug')).toBeInTheDocument();
+    expect(screen.queryByText('Feature')).toBeInTheDocument();
+  });
+
+  it('changeField to a Lookup type (19) kicks off ensureLookupOptions', async () => {
+    // Covers the `if (field.type === 19)` branch in changeField (lines 254-256)
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fld_title', field_name: 'Title', type: 1, is_primary: true, property: null },
+      {
+        field_id: 'fld_lookup',
+        field_name: 'Sprint Status',
+        type: 19,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    vi.mocked(api.lark.listLookupOptions).mockResolvedValue([
+      { option_id: 'optDone', name: 'Done' },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_title',
+              field_name: 'Title',
+              operator: 'contains' as const,
+              value: [''],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const fieldSelect = screen.getByRole('combobox', { name: /^field$/i }) as HTMLSelectElement;
+    await fireEvent.change(fieldSelect, { target: { value: 'fld_lookup' } });
+    await tick();
+    await tick();
+    expect(api.lark.listLookupOptions).toHaveBeenCalledWith('appA', 'tblA', 'fld_lookup');
+  });
+
+  it('changing value in condition with multiple rows only updates the target row', async () => {
+    // Covers the `: c` branch in the map() calls inside changeOperator / changeValue
+    // — the map runs over all conditions; only the target idx is replaced, the rest return c.
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fld_a', field_name: 'A', type: 1, is_primary: false, property: null },
+      { field_id: 'fld_b', field_name: 'B', type: 1, is_primary: false, property: null },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            { field_id: 'fld_a', field_name: 'A', operator: 'contains' as const, value: ['x'] },
+            { field_id: 'fld_b', field_name: 'B', operator: 'contains' as const, value: ['y'] },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    const textInputs = screen.getAllByRole('textbox') as HTMLInputElement[];
+    // Change the SECOND input — the first row must remain unchanged (covers `: c` branch)
+    await fireEvent.change(textInputs[1], { target: { value: 'z' } });
+    const lastCall = vi.mocked(filterStore.update).mock.lastCall;
+    const conditions = lastCall?.[1]?.conditions;
+    expect(conditions?.[0]?.value).toEqual(['x']); // first row untouched
+    expect(conditions?.[1]?.value).toEqual(['z']); // second row updated
+  });
+
+  it('addCondition with a unary-first field type (type 4: contains) seeds empty string', async () => {
+    // Covers the `UNARY.includes(op) ? [] : ['']` false branch in addCondition
+    // when the first supported field has a non-unary default operator.
+    // Type 4 default op is 'contains', which is non-unary → value = ['']
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_ms',
+        field_name: 'Tags',
+        type: 4,
+        is_primary: false,
+        property: { options: [] },
+      },
+    ]);
+    render(FilterBar, { props: defaultProps });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    await fireEvent.click(screen.getByRole('button', { name: /add condition/i }));
+    await tick();
+    expect(filterStore.update).toHaveBeenCalledWith(
+      'repo-1',
+      expect.objectContaining({
+        conditions: expect.arrayContaining([
+          expect.objectContaining({ field_id: 'fld_ms', operator: 'contains', value: [''] }),
+        ]),
+      })
+    );
+  });
+
+  it('SingleSelect field with no options renders empty <select> (getOptions fallback to [])', async () => {
+    // Covers the `?? []` fallback in getOptions() when property is null.
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_ss',
+        field_name: 'Status',
+        type: 3,
+        is_primary: false,
+        property: null, // no options
+      },
+    ]);
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_ss',
+              field_name: 'Status',
+              operator: 'is' as const,
+              value: [''],
+            },
+          ],
+        },
+      },
+    });
+    await fireEvent.click(screen.getByRole('button', { name: /filter/i }));
+    await tick();
+    await tick();
+    // Should still render the <select> (with no options), not a text input
+    const valueSelect = screen.getAllByRole('combobox', { name: /value/i });
+    expect(valueSelect.length).toBeGreaterThan(0);
+  });
+
+  it('ensurePersonOptions early-returns on second fetch attempt for already-cached field', async () => {
+    // Covers the `personOptionsCache.has(fieldName)` guard branch in ensurePersonOptions.
+    // We trigger openPopover twice for the same Person field — the second call
+    // should hit the cache hit path and NOT call listPersonOptions again.
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      { field_id: 'fldPIC', field_name: 'PIC', type: 11, is_primary: false, property: null },
+    ]);
+    vi.mocked(api.lark.listPersonOptions).mockResolvedValue([
+      { open_id: 'ou_alice', name: 'Alice' },
+    ]);
+
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fldPIC',
+              field_name: 'PIC',
+              operator: 'is' as const,
+              value: [''],
+            },
+          ],
+        },
+      },
+    });
+    // First open: fetches person options
+    const triggerBtn = screen.getByRole('button', { name: /filter/i });
+    await fireEvent.click(triggerBtn);
+    await tick();
+    await tick();
+    await tick();
+    expect(api.lark.listPersonOptions).toHaveBeenCalledTimes(1);
+
+    // Close the popover
+    const backdrop = document.querySelector('[data-testid="filter-backdrop"]') as HTMLElement;
+    await fireEvent.click(backdrop);
+    await tick();
+
+    // Second open: personOptionsCache already has 'PIC' → early return, no second API call
+    await fireEvent.click(triggerBtn);
+    await tick();
+    await tick();
+    await tick();
+    expect(api.lark.listPersonOptions).toHaveBeenCalledTimes(1); // still only 1
+  });
+
+  it('ensureLookupOptions early-returns on second fetch attempt for already-cached field', async () => {
+    // Covers the `lookupOptionsCache.has(fieldId)` guard branch in ensureLookupOptions.
+    vi.mocked(api.lark.listFields).mockResolvedValue([
+      {
+        field_id: 'fld_lookup',
+        field_name: 'Sprint Status',
+        type: 19,
+        is_primary: false,
+        property: null,
+      },
+    ]);
+    vi.mocked(api.lark.listLookupOptions).mockResolvedValue([
+      { option_id: 'optDone', name: 'Done' },
+    ]);
+
+    render(FilterBar, {
+      props: {
+        ...defaultProps,
+        filters: {
+          conjunction: 'and' as const,
+          conditions: [
+            {
+              field_id: 'fld_lookup',
+              field_name: 'Sprint Status',
+              operator: 'is' as const,
+              value: [''],
+            },
+          ],
+        },
+      },
+    });
+    // First open: fetches lookup options
+    const triggerBtn = screen.getByRole('button', { name: /filter/i });
+    await fireEvent.click(triggerBtn);
+    await tick();
+    await tick();
+    await tick();
+    expect(api.lark.listLookupOptions).toHaveBeenCalledTimes(1);
+
+    // Close popover
+    const backdrop = document.querySelector('[data-testid="filter-backdrop"]') as HTMLElement;
+    await fireEvent.click(backdrop);
+    await tick();
+
+    // Second open: lookupOptionsCache already has 'fld_lookup' → early return
+    await fireEvent.click(triggerBtn);
+    await tick();
+    await tick();
+    await tick();
+    expect(api.lark.listLookupOptions).toHaveBeenCalledTimes(1); // still only 1
+  });
+});

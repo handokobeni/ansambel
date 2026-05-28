@@ -57,4 +57,30 @@ describe('TerminalTabBar', () => {
     await fireEvent.click(closeBtn);
     expect(onClose).toHaveBeenCalledWith(a);
   });
+
+  it('Enter on the × span calls onClose (keyboard accessibility)', async () => {
+    const a = terminalTabs.add('ws');
+    const onClose = vi.fn();
+    const { getAllByTestId } = render(TerminalTabBar, {
+      props: { workspaceId: 'ws', onAdd: vi.fn(), onClose },
+    });
+    const closeBtn = getAllByTestId('terminal-tab-close').find(
+      (b) => b.getAttribute('data-id') === a
+    )!;
+    await fireEvent.keyDown(closeBtn, { key: 'Enter' });
+    expect(onClose).toHaveBeenCalledWith(a);
+  });
+
+  it('Space on the × span calls onClose (keyboard accessibility)', async () => {
+    const a = terminalTabs.add('ws');
+    const onClose = vi.fn();
+    const { getAllByTestId } = render(TerminalTabBar, {
+      props: { workspaceId: 'ws', onAdd: vi.fn(), onClose },
+    });
+    const closeBtn = getAllByTestId('terminal-tab-close').find(
+      (b) => b.getAttribute('data-id') === a
+    )!;
+    await fireEvent.keyDown(closeBtn, { key: ' ' });
+    expect(onClose).toHaveBeenCalledWith(a);
+  });
 });

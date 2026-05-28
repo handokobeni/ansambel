@@ -203,3 +203,25 @@ describe('WorkspacesStore', () => {
     });
   });
 });
+
+describe('WorkspacesStore.byId', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns the workspace when found across all repos', async () => {
+    const ws = makeWorkspace();
+    vi.mocked(api.workspace.list).mockResolvedValue([ws]);
+    const store = new WorkspacesStore();
+    await store.loadForRepo('repo_abc123');
+    expect(store.byId('ws_abc123')).toEqual(ws);
+  });
+
+  it('returns undefined when the id does not exist in any repo', async () => {
+    const ws = makeWorkspace();
+    vi.mocked(api.workspace.list).mockResolvedValue([ws]);
+    const store = new WorkspacesStore();
+    await store.loadForRepo('repo_abc123');
+    expect(store.byId('ws_nonexistent')).toBeUndefined();
+  });
+});

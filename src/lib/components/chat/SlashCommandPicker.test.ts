@@ -134,4 +134,49 @@ describe('SlashCommandPicker', () => {
     });
     expect(getByTestId('slash-picker-empty').textContent).toMatch(/no slash commands/i);
   });
+
+  it('clamps highlightIndex when the filtered list shrinks (effect clamp)', async () => {
+    const onSelect = vi.fn();
+    const { rerender } = render(SlashCommandPicker, {
+      props: { open: true, filterText: '', onSelect, onClose: vi.fn() },
+    });
+    // ArrowDown twice to move highlight to index 2 (writing-plans, the third item).
+    await fireEvent.keyDown(document, { key: 'ArrowDown' });
+    await fireEvent.keyDown(document, { key: 'ArrowDown' });
+    // Re-render with a filter that leaves only one item ('wri' → 'writing-plans').
+    // The $effect clamp should bring highlightIndex from 2 down to 0.
+    await rerender({ open: true, filterText: 'wri', onSelect, onClose: vi.fn() });
+    // Enter should now select the only remaining item.
+    await fireEvent.keyDown(document, { key: 'Enter' });
+    expect(onSelect).toHaveBeenCalledWith('writing-plans');
+  });
+
+  it('Enter with empty filtered list does not fire onSelect', async () => {
+    const onSelect = vi.fn();
+    render(SlashCommandPicker, {
+      props: { open: true, filterText: 'zzz-no-match', onSelect, onClose: vi.fn() },
+    });
+    await fireEvent.keyDown(document, { key: 'Enter' });
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('ArrowUp wraps from first item to last', async () => {
+    const onSelect = vi.fn();
+    render(SlashCommandPicker, {
+      props: { open: true, filterText: '', onSelect, onClose: vi.fn() },
+    });
+    // At index 0, ArrowUp should wrap to the last item (index 2 = writing-plans).
+    await fireEvent.keyDown(document, { key: 'ArrowUp' });
+    await fireEvent.keyDown(document, { key: 'Enter' });
+    expect(onSelect).toHaveBeenCalledWith('writing-plans');
+  });
+
+  it('ArrowUp with empty filtered list does not throw or fire onSelect', async () => {
+    const onSelect = vi.fn();
+    render(SlashCommandPicker, {
+      props: { open: true, filterText: 'zzz-no-match', onSelect, onClose: vi.fn() },
+    });
+    await fireEvent.keyDown(document, { key: 'ArrowUp' });
+    expect(onSelect).not.toHaveBeenCalled();
+  });
 });
