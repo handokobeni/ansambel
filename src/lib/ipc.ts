@@ -29,6 +29,7 @@ import type {
   SingleSelectOption,
   TeamActivityConfig,
   UnlinkResult,
+  SlashCommand,
 } from './types';
 
 export type ListMessagesOpts = {
@@ -327,6 +328,10 @@ export const api = {
      *  `no_overlap_repos` / `rows`. See
      *  `commands/team_activity.rs::fetch_team_activity_rows`. */
     fetchRows: (): Promise<FetchResult> => invoke<FetchResult>('fetch_team_activity_rows'),
+  },
+
+  slashCommands: {
+    list: (): Promise<SlashCommand[]> => invoke('list_slash_commands'),
   },
 
   script: {

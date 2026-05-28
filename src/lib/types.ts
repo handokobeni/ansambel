@@ -425,3 +425,16 @@ export type FetchResult =
   | { kind: 'machine_label_empty' }
   | { kind: 'no_overlap_repos' }
   | { kind: 'rows'; rows: TeamActivityRow[] };
+
+// ── Slash command autocomplete (Task 3) ──────────────────────────────────
+
+export type SlashCommandSource =
+  | { kind: 'builtin' }
+  | { kind: 'user' }
+  | { kind: 'plugin'; plugin: string };
+
+export type SlashCommand = {
+  name: string;
+  description: string;
+  source: SlashCommandSource;
+};
