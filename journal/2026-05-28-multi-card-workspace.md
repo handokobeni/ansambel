@@ -130,3 +130,67 @@ cards).
   clone, the map's `prev_res !== value` check short-circuits and the sidebar
   doesn't re-derive. Documented inline in the spec; no impact on the real
   backend, which returns fresh serde-deserialized objects every call.
+
+## Addendum — Slash command autocomplete (folded into same branch)
+
+### What shipped
+
+Typing `/` at the start of a line in the workspace chat input now opens an
+autocomplete picker listing built-in + user (`~/.claude/commands/*.md`) +
+plugin/skill (`~/.claude/plugins/*/{commands,skills}/...`) slash commands with
+name + description. Keyboard nav (↑↓/Enter/Tab/Esc) + click-to-select. Selection
+inserts `/full-name ` into the textarea; the user submits with Enter and the
+existing chat→claude IPC carries the command through (verified: claude CLI in
+stream-JSON mode still parses leading `/` as a slash command).
+
+### Backend
+
+- New `commands/slash_commands.rs`: `SlashCommand` + `SlashCommandSource` types,
+  `list_slash_commands` Tauri command, `discover(claude_dir)` helper.
+- Sources: hardcoded built-in list, `~/.claude/commands/`, `~/.claude/plugins/`.
+  Hand-rolled minimal YAML frontmatter parser for `name:` and `description:`;
+  falls back to the first non-blank body line.
+- Dedupe: user > plugin > builtin. Sort: bucket Builtin → User → Plugin, then
+  alphabetical within bucket.
+- Fail-soft: missing `~/.claude`, unreadable files, malformed frontmatter all
+  log + skip rather than erroring the entire call.
+
+### Frontend
+
+- TS types `SlashCommand`, `SlashCommandSource` mirror Rust serde shape.
+- `api.slashCommands.list()` IPC wrapper.
+- `SlashCommandsStore.load()` + `filtered(prefix)`.
+- New `SlashCommandPicker.svelte` popover (no overlay backdrop — inline-anchored
+  to the chat textarea via `anchorRect`). Owns keyboard nav via a `document`-
+  level keydown listener while open.
+- ChatInput wires the trigger regex `^/([\w-]*)$` on the current line, mounts
+  the picker, and handles token replacement on selection.
+- App boot fires `slashCommands.load()` fire-and-forget.
+
+### Decisions
+
+- **Discovery happens at app boot, once.** Plugin files don't change mid-session
+  in practice. A `refresh` IPC was scaffolded but not surfaced in UI yet.
+- **Submission goes through existing chat→claude IPC.** Claude CLI parses
+  leading `/` as a slash command in stream-JSON mode too — the autocomplete is a
+  discovery-only feature, not an execution path.
+- **Hand-rolled YAML frontmatter parser** rather than pulling in `serde_yaml` or
+  `yaml-rust2`. The spec only needs `name:` and `description:` lines; a ~25-line
+  parser handles the entire surface and removes a dependency.
+- **Dedupe priority User > Plugin > Builtin** so user-authored overrides always
+  win; alphabetical plugin tie-break for determinism.
+
+### Tests
+
+- Rust (`commands/slash_commands.rs`): empty-claude-dir returns builtins only;
+  builtin descriptions non-empty; user commands discovered from frontmatter and
+  first-line fallback; plugin commands + skills discovered; dedupe user >
+  plugin > builtin; bucket sort order; fail-soft on broken frontmatter.
+- Frontend store: load + filtered (prefix, case-insensitive, empty-string,
+  no-match).
+- Picker component: all-items render, prefix filter, ArrowDown highlight + Enter
+  selection, Esc close, click select, empty-state.
+- ChatInput integration: opens on `/`, closes on space, selection replaces
+  partial with `/full-name ` and positions the cursor.
+- Final cumulative counts at branch tip: ~1003 vitest, ~829 cargo, clippy +
+  fmt + check clean.

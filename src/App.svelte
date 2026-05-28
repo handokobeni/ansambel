@@ -19,6 +19,7 @@
   import { workspaces } from '$lib/stores/workspaces.svelte';
   import { tasks } from '$lib/stores/tasks.svelte';
   import { larkBindings } from '$lib/stores/lark-bindings.svelte';
+  import { slashCommands } from '$lib/stores/slash-commands.svelte';
   import { modeStore } from '$lib/stores/mode.svelte';
   import { theme } from '$lib/stores/theme.svelte';
   import { addToast } from '$lib/stores/toasts.svelte';
@@ -89,6 +90,7 @@
 
     await repos.load();
     await larkBindings.load();
+    void slashCommands.load(); // fire-and-forget; failure logs + leaves list empty
     // Cold-start auto-select: selectedRepoId is in-memory only, so on every
     // restart it lands as null. Prefer the persisted choice from
     // app_settings.json so reopening Ansambel returns to whatever repo the
