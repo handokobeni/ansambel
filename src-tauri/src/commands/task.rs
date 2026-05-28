@@ -512,31 +512,37 @@ pub(crate) async fn remove_task_inner(
     data_dir: std::path::PathBuf,
     state: Arc<Mutex<AppState>>,
 ) -> Result<()> {
-    let force = force.unwrap_or(false);
-    // Verify the task exists (and capture whether it has a workspace link)
-    // under a brief lock. Drop the lock before any async I/O.
-    let has_workspace = {
+    let forced = force.unwrap_or(false);
+    // Verify the task exists and capture its workspace link under a brief
+    // lock. Drop the lock before any async I/O.
+    let workspace_id = {
         let st = state
             .lock()
             .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
         if let Some(t) = st.tasks.get(&task_id) {
-            t.workspace_id.is_some()
+            t.workspace_id.clone()
         } else {
             return Err(AppError::NotFound(format!("task '{}' not found", task_id)));
         }
     };
 
-    // Option A: unlink FIRST (handles refcount + optional workspace removal
-    // uniformly), then delete the task. We always pass force=true so the
-    // unlink commits immediately instead of returning WouldRemove.
-    // The outer `force` flag no longer gates workspace-linked deletions —
-    // delete always proceeds (spec §4: "deleting a card is equivalent to
-    // explicit unlink for refcount purposes").
-    if has_workspace {
-        // force=false on the outer call is treated as "do not guard here";
-        // unlink itself is always committed (force=true) because removing
-        // the task makes a preview-and-confirm loop impossible.
-        let _ = force; // consumed implicitly; kept in signature for API compat
+    // Safety gate (pre-T6 guardrail): deleting a card that is linked to a
+    // workspace requires explicit force=true. The frontend TaskCard fires
+    // delete on a single × click with no confirm UX — this backend gate is
+    // the sole guardrail against accidental destructive deletes until a
+    // frontend confirm modal lands (tracked in the post-multi-card scope).
+    if workspace_id.is_some() && !forced {
+        return Err(AppError::InvalidState(format!(
+            "task '{task_id}' is linked to a workspace; pass force=true to delete"
+        )));
+    }
+
+    // Refcount cleanup: unlink FIRST (handles refcount decrement + optional
+    // workspace removal uniformly), then delete the task via the provider.
+    // We pass force=true to the inner unlink so it commits immediately
+    // rather than returning WouldRemove (a preview-and-confirm loop is
+    // impossible once we're deleting the task itself).
+    if workspace_id.is_some() {
         unlink_task_from_workspace_inner(&task_id, true, data_dir, Arc::clone(&state)).await?;
     }
 
@@ -1613,17 +1619,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_task_with_workspace_always_succeeds() {
-        // Per spec §4: deleting a card is equivalent to explicit unlink for
-        // refcount purposes — the `force` parameter no longer gates workspace-
-        // linked deletions. Even force=false must succeed.
+    async fn remove_task_with_workspace_and_no_force_returns_err() {
+        // Pre-T6 guardrail: deleting a card that is linked to a workspace
+        // must fail when force=false (or force=None). The backend gate is
+        // the sole safeguard against accidental destructive deletes until
+        // the frontend ships a confirm modal (T11+ scope).
         let tmp = tempdir().unwrap();
         let state = make_state_with_repo(tmp.path());
         let provider = make_provider(tmp.path());
 
-        // Seed a task with a dangling workspace reference (workspace not in
-        // the state map — simulates an already-cleaned workspace). The unlink
-        // inner will clear the dangling link and the task is then deleted.
         let task_id = "tk_linked".to_string();
         let seeded_task = Task {
             id: task_id.clone(),
@@ -1647,8 +1651,24 @@ mod tests {
             crate::persistence::tasks::save_tasks(tmp.path(), &map).unwrap();
         }
 
-        // force=false must now succeed (unlinks dangling ref, then deletes)
-        remove_task_inner(
+        // force=None must be rejected with a descriptive error.
+        let err_none = remove_task_inner(
+            task_id.clone(),
+            None,
+            Arc::clone(&provider),
+            tmp.path().to_path_buf(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap_err();
+        let msg = err_none.to_string();
+        assert!(
+            msg.contains("force") || msg.contains("linked to a workspace"),
+            "error message must mention 'force' or 'linked to a workspace'; got: {msg}"
+        );
+
+        // force=Some(false) must also be rejected.
+        let err_false = remove_task_inner(
             task_id.clone(),
             Some(false),
             Arc::clone(&provider),
@@ -1656,11 +1676,19 @@ mod tests {
             Arc::clone(&state),
         )
         .await
-        .unwrap();
+        .unwrap_err();
+        let msg2 = err_false.to_string();
+        assert!(
+            msg2.contains("force") || msg2.contains("linked to a workspace"),
+            "error message must mention 'force' or 'linked to a workspace'; got: {msg2}"
+        );
 
-        // Task must be gone
+        // Task must still exist — the gate prevented deletion.
         let st = state.lock().unwrap();
-        assert!(!st.tasks.contains_key(&task_id));
+        assert!(
+            st.tasks.contains_key(&task_id),
+            "task must NOT be removed when force guard fires"
+        );
     }
 
     #[tokio::test]
