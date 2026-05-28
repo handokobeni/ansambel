@@ -56,6 +56,18 @@ describe('SlashCommandsStore', () => {
     expect(store.filtered('zzz')).toEqual([]);
   });
 
+  it('load: coerces non-array IPC results to [] so the picker stays safe', async () => {
+    // E2E shims that fall through with `undefined` would otherwise poison
+    // `commands` and crash the picker's $effect (`commands.length` on
+    // undefined). Repro: shim returns undefined → load() must store [].
+    vi.mocked(api.slashCommands.list).mockResolvedValue(undefined as unknown as SlashCommand[]);
+    const store = new SlashCommandsStore();
+    await store.load();
+    expect(store.commands).toEqual([]);
+    // And filtered('') must still return an array (was returning undefined).
+    expect(Array.isArray(store.filtered(''))).toBe(true);
+  });
+
   it('load: leaves commands empty and logs when api throws', async () => {
     vi.mocked(api.slashCommands.list).mockRejectedValue(new Error('IPC error'));
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
