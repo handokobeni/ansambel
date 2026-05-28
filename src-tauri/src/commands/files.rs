@@ -74,7 +74,15 @@ pub fn workspace_files_inner(
     let walker = ignore::WalkBuilder::new(&target)
         .max_depth(Some(1))
         .follow_links(false)
+        // `standard_filters(true)` is a bundle that also turns on
+        // `hidden(true)` — which would prune every dotfile in the
+        // worktree (`.env.example`, `.gitignore`, `.editorconfig`, …).
+        // Dev workflows need those visible, so we keep the rest of the
+        // bundle (gitignore / ignore / exclude / global / parents) and
+        // flip just `hidden` off. Files actually listed in `.gitignore`
+        // (e.g. Laravel's `.env`) stay hidden via the gitignore filter.
         .standard_filters(true)
+        .hidden(false)
         .build();
 
     for result in walker {
@@ -176,7 +184,11 @@ pub fn workspace_files_recursive_inner(
     let mut paths: Vec<String> = Vec::new();
     let walker = ignore::WalkBuilder::new(&worktree_dir)
         .follow_links(false)
+        // Same dotfile policy as `workspace_files_inner` — see the
+        // comment there. The chat @-mention autocomplete shares this
+        // walker, so e.g. `.env.example` becomes a mentionable file.
         .standard_filters(true)
+        .hidden(false)
         .build();
 
     for result in walker {
@@ -360,6 +372,54 @@ mod tests {
     }
 
     #[test]
+    fn workspace_files_inner_includes_dotfiles_outside_gitignore() {
+        // Regression: the `ignore` crate's `standard_filters(true)` bundle
+        // turns on `hidden(true)` which hides anything starting with `.`,
+        // so `.env.example`, `.gitignore`, `.editorconfig` etc. were
+        // missing from the Files panel. The fix flips just the hidden
+        // filter off while keeping gitignore on.
+        let (_tmp, wt) = make_worktree();
+        std::fs::write(wt.join(".env.example"), b"APP_KEY=").unwrap();
+        std::fs::write(wt.join(".gitignore"), b"node_modules/\n").unwrap();
+        std::fs::write(wt.join(".editorconfig"), b"").unwrap();
+        std::fs::write(wt.join("README.md"), b"# r").unwrap();
+        let state = make_state("ws_dot", &wt);
+        let entries = workspace_files_inner("ws_dot", None, state).unwrap();
+        let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&".env.example"), "got: {names:?}");
+        assert!(names.contains(&".gitignore"), "got: {names:?}");
+        assert!(names.contains(&".editorconfig"), "got: {names:?}");
+        assert!(names.contains(&"README.md"), "got: {names:?}");
+    }
+
+    #[test]
+    fn workspace_files_inner_still_hides_gitignored_dotfiles() {
+        // After enabling dotfile visibility, gitignore filtering must
+        // still apply — so a dotfile that the repo's .gitignore lists
+        // (e.g. Laravel's `.env`) stays hidden, while its sibling
+        // `.env.example` (not gitignored) appears.
+        let (_tmp, wt) = make_worktree();
+        let out = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git init failed");
+        std::fs::write(wt.join(".gitignore"), b".env\n").unwrap();
+        std::fs::write(wt.join(".env"), b"SECRET=1").unwrap();
+        std::fs::write(wt.join(".env.example"), b"SECRET=").unwrap();
+        let state = make_state("ws_dotignore", &wt);
+        let entries = workspace_files_inner("ws_dotignore", None, state).unwrap();
+        let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            !names.contains(&".env"),
+            ".env should stay gitignored; got: {names:?}"
+        );
+        assert!(names.contains(&".env.example"), "got: {names:?}");
+        assert!(names.contains(&".gitignore"), "got: {names:?}");
+    }
+
+    #[test]
     fn workspace_files_inner_does_not_recurse() {
         let (_tmp, wt) = make_worktree();
         std::fs::create_dir_all(wt.join("a/b/c")).unwrap();
@@ -509,6 +569,22 @@ mod tests {
         assert!(paths.iter().any(|p| p == "src/main.rs"));
         assert!(!paths.iter().any(|p| p.starts_with("target/")));
         assert!(!paths.iter().any(|p| p.starts_with("node_modules/")));
+    }
+
+    #[test]
+    fn workspace_files_recursive_inner_includes_dotfiles() {
+        // Same regression as the non-recursive variant: dotfiles outside
+        // gitignore must be returned so the chat @-mention autocomplete
+        // can target e.g. `.env.example`.
+        let (_tmp, wt) = make_worktree();
+        std::fs::write(wt.join(".env.example"), b"APP_KEY=").unwrap();
+        std::fs::write(wt.join(".gitignore"), b"node_modules/\n").unwrap();
+        std::fs::write(wt.join("README.md"), b"# r").unwrap();
+        let state = make_state("ws_rec_dot", &wt);
+        let paths = workspace_files_recursive_inner("ws_rec_dot", state).unwrap();
+        assert!(paths.iter().any(|p| p == ".env.example"), "got: {paths:?}");
+        assert!(paths.iter().any(|p| p == ".gitignore"), "got: {paths:?}");
+        assert!(paths.iter().any(|p| p == "README.md"), "got: {paths:?}");
     }
 
     #[test]
