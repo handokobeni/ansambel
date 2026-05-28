@@ -427,6 +427,7 @@ pub struct RepoInfo {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(from = "WorkspaceInfoRaw")]
 pub struct WorkspaceInfo {
     pub id: String,
     pub repo_id: String,
@@ -450,14 +451,66 @@ pub struct WorkspaceInfo {
     /// workspaces persisted before Task 18 deserialise without migration.
     #[serde(default)]
     pub team_activity_private: bool,
-    /// Originating kanban task id when the workspace was auto-created by
-    /// moving a card into In Progress. `serde(default)` → workspaces
-    /// persisted before this change deserialise as `None`. Used to
-    /// reattach a card to its existing workspace instead of creating a
-    /// duplicate when the local `task.workspace_id` link is lost (e.g. a
-    /// Lark refresh blanks it).
+    /// Cards linked to this workspace. Refcount = `task_ids.len()`.
+    ///
+    /// Backward compat: persisted files from before multi-card support
+    /// carried a single `task_id: Option<String>`. The custom deserialize
+    /// path below reads either `task_ids` (new) or `task_id` (legacy) and
+    /// normalises to this Vec. After the next atomic save, the legacy
+    /// field disappears from disk.
     #[serde(default)]
-    pub task_id: Option<String>,
+    pub task_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceInfoRaw {
+    id: String,
+    repo_id: String,
+    branch: String,
+    base_branch: String,
+    custom_branch: bool,
+    title: String,
+    description: String,
+    status: WorkspaceStatus,
+    column: KanbanColumn,
+    created_at: i64,
+    updated_at: i64,
+    #[serde(default)]
+    worktree_dir: PathBuf,
+    #[serde(default)]
+    team_activity_private: bool,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    task_ids: Vec<String>,
+}
+
+impl From<WorkspaceInfoRaw> for WorkspaceInfo {
+    fn from(raw: WorkspaceInfoRaw) -> Self {
+        let task_ids = if !raw.task_ids.is_empty() {
+            raw.task_ids
+        } else if let Some(legacy) = raw.task_id {
+            vec![legacy]
+        } else {
+            Vec::new()
+        };
+        Self {
+            id: raw.id,
+            repo_id: raw.repo_id,
+            branch: raw.branch,
+            base_branch: raw.base_branch,
+            custom_branch: raw.custom_branch,
+            title: raw.title,
+            description: raw.description,
+            status: raw.status,
+            column: raw.column,
+            created_at: raw.created_at,
+            updated_at: raw.updated_at,
+            worktree_dir: raw.worktree_dir,
+            team_activity_private: raw.team_activity_private,
+            task_ids,
+        }
+    }
 }
 
 #[derive(Default, Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -799,7 +852,7 @@ mod tests {
             updated_at: 1_776_099_500,
             worktree_dir: PathBuf::from("/data/workspaces/ws_abc123"),
             team_activity_private: false,
-            task_id: None,
+            task_ids: Vec::new(),
         };
         let json = serde_json::to_string(&ws).unwrap();
         let back: WorkspaceInfo = serde_json::from_str(&json).unwrap();
@@ -1409,7 +1462,8 @@ mod tests {
 
     #[test]
     fn workspace_info_task_id_defaults_to_none_for_legacy_json() {
-        // Legacy workspaces.json predates task_id; it must deserialise as None.
+        // Legacy workspaces.json predates task_ids; it must deserialise as
+        // an empty Vec (no linked cards).
         let legacy = r#"{
             "id": "ws_1", "repo_id": "repo_1", "branch": "ansambel/x",
             "base_branch": "main", "custom_branch": false, "title": "T",
@@ -1417,7 +1471,7 @@ mod tests {
             "created_at": 0, "updated_at": 0
         }"#;
         let ws: WorkspaceInfo = serde_json::from_str(legacy).unwrap();
-        assert_eq!(ws.task_id, None);
+        assert!(ws.task_ids.is_empty());
     }
 
     #[test]
@@ -1436,11 +1490,11 @@ mod tests {
             updated_at: 0,
             worktree_dir: std::path::PathBuf::new(),
             team_activity_private: false,
-            task_id: Some("tk_42".into()),
+            task_ids: vec!["tk_42".into()],
         };
         let json = serde_json::to_string(&ws).unwrap();
         ws = serde_json::from_str(&json).unwrap();
-        assert_eq!(ws.task_id.as_deref(), Some("tk_42"));
+        assert_eq!(ws.task_ids, vec!["tk_42".to_string()]);
     }
 
     #[tokio::test]
@@ -1492,5 +1546,102 @@ mod tests {
         let json = serde_json::to_string(&b).unwrap();
         let parsed: BitableBinding = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, b);
+    }
+
+    #[test]
+    fn workspace_info_deserializes_legacy_task_id_into_task_ids() {
+        // Legacy persisted shape from before PR #34: single `task_id`.
+        // The new field `task_ids` MUST be populated from it on load so
+        // workspaces.json files written by the old binary are still readable.
+        let json = r#"{
+            "id": "ws_legacy",
+            "repo_id": "repo_a",
+            "branch": "ansambel/x",
+            "base_branch": "main",
+            "custom_branch": false,
+            "title": "T",
+            "description": "",
+            "status": "waiting",
+            "column": "in_progress",
+            "created_at": 0,
+            "updated_at": 0,
+            "worktree_dir": "/tmp/wt",
+            "team_activity_private": false,
+            "task_id": "tk_legacy"
+        }"#;
+        let ws: WorkspaceInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(ws.task_ids, vec!["tk_legacy".to_string()]);
+    }
+
+    #[test]
+    fn workspace_info_deserializes_new_task_ids_directly() {
+        let json = r#"{
+            "id": "ws_new",
+            "repo_id": "repo_a",
+            "branch": "ansambel/x",
+            "base_branch": "main",
+            "custom_branch": false,
+            "title": "T",
+            "description": "",
+            "status": "waiting",
+            "column": "in_progress",
+            "created_at": 0,
+            "updated_at": 0,
+            "worktree_dir": "/tmp/wt",
+            "team_activity_private": false,
+            "task_ids": ["tk_a", "tk_b"]
+        }"#;
+        let ws: WorkspaceInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(ws.task_ids, vec!["tk_a".to_string(), "tk_b".to_string()]);
+    }
+
+    #[test]
+    fn workspace_info_deserializes_with_neither_field_yields_empty_task_ids() {
+        let json = r#"{
+            "id": "ws_none",
+            "repo_id": "repo_a",
+            "branch": "ansambel/x",
+            "base_branch": "main",
+            "custom_branch": false,
+            "title": "T",
+            "description": "",
+            "status": "waiting",
+            "column": "in_progress",
+            "created_at": 0,
+            "updated_at": 0,
+            "worktree_dir": "/tmp/wt",
+            "team_activity_private": false
+        }"#;
+        let ws: WorkspaceInfo = serde_json::from_str(json).unwrap();
+        assert!(ws.task_ids.is_empty());
+    }
+
+    #[test]
+    fn workspace_info_round_trip_serializes_task_ids_not_legacy() {
+        // After a load+save cycle the persisted shape MUST use the new field.
+        let ws = WorkspaceInfo {
+            id: "ws_rt".into(),
+            repo_id: "repo_a".into(),
+            branch: "ansambel/x".into(),
+            base_branch: "main".into(),
+            custom_branch: false,
+            title: "T".into(),
+            description: String::new(),
+            status: WorkspaceStatus::Waiting,
+            column: KanbanColumn::InProgress,
+            created_at: 0,
+            updated_at: 0,
+            worktree_dir: std::path::PathBuf::from("/tmp/wt"),
+            team_activity_private: false,
+            task_ids: vec!["tk_a".into(), "tk_b".into()],
+        };
+        let json = serde_json::to_string(&ws).unwrap();
+        assert!(json.contains("\"task_ids\""));
+        assert!(
+            !json.contains("\"task_id\""),
+            "legacy field must NOT appear in output"
+        );
+        let back: WorkspaceInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.task_ids, vec!["tk_a".to_string(), "tk_b".to_string()]);
     }
 }

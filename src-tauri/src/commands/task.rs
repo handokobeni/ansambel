@@ -367,7 +367,7 @@ pub(crate) async fn move_task_inner(
             _ => st
                 .workspaces
                 .values()
-                .find(|w| w.repo_id == repo_id && w.task_id.as_deref() == Some(task_id.as_str()))
+                .find(|w| w.repo_id == repo_id && w.task_ids.contains(&task_id))
                 .map(|w| w.id.clone()),
         };
 
@@ -409,7 +409,9 @@ pub(crate) async fn move_task_inner(
                 .lock()
                 .map_err(|e| AppError::InvalidState(format!("AppState lock poisoned: {e}")))?;
             if let Some(w) = st.workspaces.get_mut(&ws.id) {
-                w.task_id = Some(task_id.clone());
+                if !w.task_ids.contains(&task_id) {
+                    w.task_ids.push(task_id.clone());
+                }
             }
             crate::persistence::workspaces::save_workspaces(&data_dir, &st.workspaces)?;
         }
@@ -1706,7 +1708,7 @@ mod tests {
         .unwrap();
         {
             let mut st = state.lock().unwrap();
-            st.workspaces.get_mut(&ws.id).unwrap().task_id = Some("tk_a".into());
+            st.workspaces.get_mut(&ws.id).unwrap().task_ids = vec!["tk_a".into()];
             st.tasks.insert(
                 "tk_a".into(),
                 crate::state::Task {
@@ -1763,7 +1765,7 @@ mod tests {
         .unwrap();
         {
             let mut st = state.lock().unwrap();
-            st.workspaces.get_mut(&ws.id).unwrap().task_id = Some("tk_a".into());
+            st.workspaces.get_mut(&ws.id).unwrap().task_ids = vec!["tk_a".into()];
             st.tasks.insert(
                 "tk_a".into(),
                 crate::state::Task {
@@ -1838,7 +1840,7 @@ mod tests {
         }
         {
             let mut st = state.lock().unwrap();
-            st.workspaces.get_mut(&ws.id).unwrap().task_id = Some("tk_a".into());
+            st.workspaces.get_mut(&ws.id).unwrap().task_ids = vec!["tk_a".into()];
             st.tasks.insert(
                 "tk_a".into(),
                 crate::state::Task {
