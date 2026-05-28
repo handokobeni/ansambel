@@ -9,6 +9,7 @@ export class TasksStore {
   readonly tasks = new SvelteMap<string, SvelteMap<string, Task>>();
   readonly loadingByRepo = new SvelteMap<string, boolean>();
   selectedTaskId = $state<string | null>(null);
+  highlightedTaskId = $state<string | null>(null);
 
   isLoading(repoId: string): boolean {
     return this.loadingByRepo.get(repoId) === true;
@@ -165,6 +166,23 @@ export class TasksStore {
 
   selectTask(id: string | null): void {
     this.selectedTaskId = id;
+  }
+
+  // Cross-repo lookup. Linear scan is fine — tasks per repo are dozens at
+  // most, and this is only called from sidebar expand/render hot paths.
+  byId(id: string): Task | undefined {
+    for (const map of this.tasks.values()) {
+      const t = map.get(id);
+      if (t) return t;
+    }
+    return undefined;
+  }
+
+  // Highlight a task in the kanban (driven from the sidebar's expanded
+  // workspace row). KanbanBoard reads `highlightedTaskId` to apply a brief
+  // ring style; setting null clears the highlight.
+  highlight(id: string | null): void {
+    this.highlightedTaskId = id;
   }
 }
 

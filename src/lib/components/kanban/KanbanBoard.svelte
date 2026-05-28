@@ -212,7 +212,21 @@
           </p>
         {:else}
           {#each itemsFor(col.id) as task (task.id)}
-            <TaskCard {task} onRemove={onRemoveTask} />
+            <!--
+              Sidebar can highlight a card (clicking a linked card title in
+              an expanded workspace row). We wrap rather than thread the
+              flag through TaskCard to keep the card component agnostic of
+              the highlight mechanism.
+            -->
+            <div
+              class="rounded"
+              class:ring-2={task.id === tasksStore.highlightedTaskId}
+              class:ring-[var(--accent)]={task.id === tasksStore.highlightedTaskId}
+              data-task-highlighted={task.id === tasksStore.highlightedTaskId}
+              data-task-id={task.id}
+            >
+              <TaskCard {task} onRemove={onRemoveTask} />
+            </div>
           {:else}
             <p class="text-xs text-[var(--text-muted)] text-center py-4 italic">No tasks</p>
           {/each}
