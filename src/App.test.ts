@@ -35,6 +35,12 @@ vi.mock('$lib/stores/lark-bindings.svelte', () => ({
   },
 }));
 
+// Module-scope handle for the persisted repo id the mocked `get_selected_repo`
+// command should resolve with. Each test sets this in its setup phase; the
+// shared beforeEach below resets it back to null so untouched tests preserve
+// the pre-existing "no persisted selection" baseline.
+let persistedRepoId: string | null = null;
+
 // Mock @tauri-apps/api/core so WorkspaceView (rendered in work mode) does not
 // break tests that run without a real Tauri runtime.
 vi.mock('@tauri-apps/api/core', () => {
@@ -46,6 +52,12 @@ vi.mock('@tauri-apps/api/core', () => {
     invoke: vi.fn((cmd: string) => {
       if (cmd === 'fetch_team_activity_rows') {
         return Promise.resolve({ kind: 'disabled' });
+      }
+      if (cmd === 'get_selected_repo') {
+        return Promise.resolve(persistedRepoId);
+      }
+      if (cmd === 'set_selected_repo') {
+        return Promise.resolve(undefined);
       }
       return Promise.resolve(undefined);
     }),
@@ -124,6 +136,7 @@ import { addToast } from '$lib/stores/toasts.svelte';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  persistedRepoId = null;
   vi.mocked(repos.getSelected).mockReturnValue(null);
   vi.mocked(workspaces.getSelected).mockReturnValue(null);
   (repos as { selectedRepoId: string | null }).selectedRepoId = null;
@@ -294,6 +307,105 @@ describe('App', () => {
     const workBtn = await screen.findByRole('button', { name: /^work$/i });
     await fireEvent.click(workBtn);
     expect(modeStore.set).toHaveBeenCalledWith('work');
+  });
+
+  it('on cold start restores the persisted selected_repo_id when it is present in the repos list', async () => {
+    // Two repos in deterministic insertion order: top first, kelola second.
+    // The persisted id is the second one — without restore logic the app
+    // would always pick the first.
+    (repos as { selectedRepoId: string | null }).selectedRepoId = null;
+    const repoMap = new Map<string, unknown>();
+    repoMap.set('repo_top', {
+      id: 'repo_top',
+      name: 'top-assessment',
+      path: '/top',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 1,
+      updated_at: 1,
+    });
+    repoMap.set('repo_kelola', {
+      id: 'repo_kelola',
+      name: 'kelola-app',
+      path: '/kelola',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 2,
+      updated_at: 2,
+    });
+    (repos as unknown as { repos: Map<string, unknown> }).repos = repoMap;
+    persistedRepoId = 'repo_kelola';
+    vi.mocked(repos.load).mockResolvedValue(undefined);
+    render(App);
+    await waitFor(() => {
+      expect(repos.select).toHaveBeenCalledWith('repo_kelola');
+    });
+    // And the fallback path was NOT taken (no extra call with repo_top).
+    expect(repos.select).not.toHaveBeenCalledWith('repo_top');
+  });
+
+  it('on cold start falls back to the first repo when no selection is persisted', async () => {
+    (repos as { selectedRepoId: string | null }).selectedRepoId = null;
+    const repoMap = new Map<string, unknown>();
+    repoMap.set('repo_top', {
+      id: 'repo_top',
+      name: 'top-assessment',
+      path: '/top',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 1,
+      updated_at: 1,
+    });
+    repoMap.set('repo_kelola', {
+      id: 'repo_kelola',
+      name: 'kelola-app',
+      path: '/kelola',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 2,
+      updated_at: 2,
+    });
+    (repos as unknown as { repos: Map<string, unknown> }).repos = repoMap;
+    persistedRepoId = null;
+    vi.mocked(repos.load).mockResolvedValue(undefined);
+    render(App);
+    await waitFor(() => {
+      expect(repos.select).toHaveBeenCalledWith('repo_top');
+    });
+  });
+
+  it('on cold start falls back to the first repo when the persisted id no longer exists', async () => {
+    // Stale persisted id: the repo was removed between sessions. The
+    // validity check (`repos.repos.has(persisted)`) keeps us from picking
+    // a ghost and the fallback fires.
+    (repos as { selectedRepoId: string | null }).selectedRepoId = null;
+    const repoMap = new Map<string, unknown>();
+    repoMap.set('repo_top', {
+      id: 'repo_top',
+      name: 'top-assessment',
+      path: '/top',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 1,
+      updated_at: 1,
+    });
+    repoMap.set('repo_kelola', {
+      id: 'repo_kelola',
+      name: 'kelola-app',
+      path: '/kelola',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 2,
+      updated_at: 2,
+    });
+    (repos as unknown as { repos: Map<string, unknown> }).repos = repoMap;
+    persistedRepoId = 'repo_gone';
+    vi.mocked(repos.load).mockResolvedValue(undefined);
+    render(App);
+    await waitFor(() => {
+      expect(repos.select).toHaveBeenCalledWith('repo_top');
+    });
+    expect(repos.select).not.toHaveBeenCalledWith('repo_gone');
   });
 });
 

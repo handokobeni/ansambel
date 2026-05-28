@@ -13,6 +13,7 @@
   import { workspaceTabs } from '$lib/stores/workspace-tabs.svelte';
   import type { SearchMode } from '$lib/types';
   import { listen } from '@tauri-apps/api/event';
+  import { api } from '$lib/ipc';
   import { repos } from '$lib/stores/repos.svelte';
   import { workspaces } from '$lib/stores/workspaces.svelte';
   import { tasks } from '$lib/stores/tasks.svelte';
@@ -79,15 +80,28 @@
     await repos.load();
     await larkBindings.load();
     // Cold-start auto-select: selectedRepoId is in-memory only, so on every
-    // restart it lands as null. Without this fallback the kanban renders
-    // "Add a repo to start" even when tasks.json/workspaces.json on disk
-    // have content — the user has to re-Add the repo to repopulate the
-    // board. Pick the first repo when nothing is selected and the list is
-    // non-empty; the existing if-block then hydrates tasks + workspaces.
+    // restart it lands as null. Prefer the persisted choice from
+    // app_settings.json so reopening Ansambel returns to whatever repo the
+    // user had open. If nothing was persisted (first run) or the persisted
+    // repo no longer exists (removed between sessions), fall back to the
+    // first repo in the list — the existing if-block below then hydrates
+    // tasks + workspaces.
     if (!repos.selectedRepoId) {
-      const firstRepoId = repos.repos.keys().next().value;
-      if (firstRepoId) {
-        repos.select(firstRepoId);
+      let persisted: string | null = null;
+      try {
+        persisted = await api.settings.getSelectedRepo();
+      } catch (err) {
+        // A settings read failure must not block startup — log and fall
+        // through to the first-repo fallback so the kanban still hydrates.
+        console.error('settings.getSelectedRepo failed', err);
+      }
+      if (persisted && repos.repos.has(persisted)) {
+        repos.select(persisted);
+      } else {
+        const firstRepoId = repos.repos.keys().next().value;
+        if (firstRepoId) {
+          repos.select(firstRepoId);
+        }
       }
     }
     if (repos.selectedRepoId) {

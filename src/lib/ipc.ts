@@ -40,6 +40,19 @@ export const api = {
     getAppVersion: (): Promise<string> => invoke('get_app_version'),
   },
 
+  settings: {
+    /** Read the persisted `selected_repo_id` from `app_settings.json`.
+     *  Resolves with `null` when nothing has been selected yet (cold start
+     *  on first launch) or when the field was previously cleared. */
+    getSelectedRepo: (): Promise<string | null> => invoke('get_selected_repo'),
+
+    /** Persist the active repo selection. The backend writes
+     *  `app_settings.json` immediately (no debounce — selection is a single
+     *  user action and must survive a hard kill). Pass `null` to clear. */
+    setSelectedRepo: (repoId: string | null): Promise<void> =>
+      invoke('set_selected_repo', { repoId }),
+  },
+
   repo: {
     add: (path: string): Promise<Repo> => invoke('add_repo', { path }),
 
