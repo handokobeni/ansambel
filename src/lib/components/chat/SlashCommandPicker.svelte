@@ -44,6 +44,8 @@
       if (rows.length === 0) return;
       highlightIndex = (highlightIndex - 1 + rows.length) % rows.length;
     } else if (e.key === 'Enter' || e.key === 'Tab') {
+      // Ctrl/Meta+Enter is the chat-send shortcut — let it pass through.
+      if (e.ctrlKey || e.metaKey) return;
       if (rows.length === 0) return;
       e.preventDefault();
       onSelect(rows[highlightIndex].name);

@@ -114,6 +114,15 @@ describe('SlashCommandPicker', () => {
     expect(onSelect).toHaveBeenCalledWith('writing-plans');
   });
 
+  it('Ctrl+Enter does NOT fire onSelect — chat-send shortcut must pass through', async () => {
+    const onSelect = vi.fn();
+    render(SlashCommandPicker, {
+      props: { open: true, filterText: '', onSelect, onClose: vi.fn() },
+    });
+    await fireEvent.keyDown(document, { key: 'Enter', ctrlKey: true });
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
   it('shows empty-state hint when filtered list is empty', () => {
     const { getByTestId } = render(SlashCommandPicker, {
       props: {

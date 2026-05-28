@@ -437,21 +437,22 @@ mod tests {
     /// Claude Code maintains on real systems so the discovery path is
     /// exercised end-to-end in unit tests.
     fn write_installed_plugins_manifest(claude_dir: &Path, entries: &[(&str, &str)]) {
-        use std::fmt::Write as _;
-        let mut json = String::from("{\"version\":2,\"plugins\":{");
-        for (i, (qualified, install_path)) in entries.iter().enumerate() {
-            if i > 0 {
-                json.push(',');
-            }
-            let _ = write!(
-                &mut json,
-                "\"{qualified}\":[{{\"scope\":\"user\",\"installPath\":\"{install_path}\",\"version\":\"1.0.0\"}}]"
+        use serde_json::{json, Map, Value};
+        let mut plugins = Map::new();
+        for (qualified, install_path) in entries {
+            plugins.insert(
+                (*qualified).to_string(),
+                json!([{ "scope": "user", "installPath": install_path, "version": "1.0.0" }]),
             );
         }
-        json.push_str("}}");
+        let manifest = json!({ "version": 2, "plugins": Value::Object(plugins) });
         let plugins_dir = claude_dir.join("plugins");
         std::fs::create_dir_all(&plugins_dir).unwrap();
-        std::fs::write(plugins_dir.join("installed_plugins.json"), json).unwrap();
+        std::fs::write(
+            plugins_dir.join("installed_plugins.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]
