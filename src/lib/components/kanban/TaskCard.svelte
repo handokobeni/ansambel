@@ -1,6 +1,9 @@
 <!-- src/lib/components/kanban/TaskCard.svelte -->
 <script lang="ts">
   import type { Task } from '$lib/types';
+  import { workspaces } from '$lib/stores/workspaces.svelte';
+  import { modeStore } from '$lib/stores/mode.svelte';
+  import { tooltip } from '$lib/actions';
 
   const { task, onRemove }: { task: Task; onRemove: (id: string) => void } = $props();
 
@@ -21,6 +24,17 @@
         : `${picList[0]} +${picList.length - 1}`
   );
   const picTooltip = $derived(picList.length > 0 ? picList.join(', ') : '');
+
+  const linkedWorkspace = $derived(
+    task.workspace_id ? (workspaces.byId(task.workspace_id) ?? null) : null
+  );
+
+  function jumpToWorkspace(e: MouseEvent) {
+    e.stopPropagation();
+    if (!task.workspace_id) return;
+    workspaces.select(task.workspace_id);
+    modeStore.set('work');
+  }
 </script>
 
 <div
@@ -66,4 +80,17 @@
       {picLabel}
     </span>
   </div>
+
+  {#if linkedWorkspace}
+    <button
+      type="button"
+      class="mt-2 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-[var(--bg-hover)] text-[var(--text-muted)] hover:text-[var(--text-base)]"
+      data-testid="task-workspace-chip"
+      onclick={jumpToWorkspace}
+      use:tooltip={{ text: `Open workspace ${linkedWorkspace.title}` }}
+    >
+      <span aria-hidden="true">◆</span>
+      <span class="truncate max-w-[140px]">{linkedWorkspace.title}</span>
+    </button>
+  {/if}
 </div>

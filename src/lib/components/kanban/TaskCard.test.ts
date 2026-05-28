@@ -1,8 +1,29 @@
 // src/lib/components/kanban/TaskCard.test.ts
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import TaskCard from './TaskCard.svelte';
 import type { Task } from '$lib/types';
+import { workspaces } from '$lib/stores/workspaces.svelte';
+import { modeStore } from '$lib/stores/mode.svelte';
+
+vi.mock('$lib/stores/workspaces.svelte', () => ({
+  workspaces: {
+    byId: vi.fn(() => undefined),
+    select: vi.fn(),
+    getSelected: vi.fn(() => null),
+  },
+}));
+
+vi.mock('$lib/stores/mode.svelte', () => ({
+  modeStore: {
+    mode: 'plan' as 'plan' | 'work',
+    set: vi.fn(),
+  },
+}));
+
+vi.mock('$lib/actions', () => ({
+  tooltip: () => ({ destroy: () => {} }),
+}));
 
 const makeTask = (overrides: Partial<Task> = {}): Task => ({
   id: 'tk_abc123',
@@ -19,6 +40,12 @@ const makeTask = (overrides: Partial<Task> = {}): Task => ({
 });
 
 describe('TaskCard', () => {
+  beforeEach(() => {
+    vi.mocked(workspaces.byId).mockReturnValue(undefined);
+    vi.mocked(workspaces.select).mockClear();
+    vi.mocked(modeStore.set).mockClear();
+  });
+
   it('renders task title', () => {
     render(TaskCard, { props: { task: makeTask(), onRemove: vi.fn() } });
     expect(screen.getByText('Fix login bug')).toBeTruthy();
@@ -91,5 +118,40 @@ describe('TaskCard', () => {
     delete (task as { pic_names?: string[] }).pic_names;
     render(TaskCard, { props: { task, onRemove: vi.fn() } });
     expect(screen.getByTestId('task-pic').textContent?.trim()).toBe('—');
+  });
+
+  it('renders a workspace chip when the task is linked', () => {
+    vi.mocked(workspaces.byId).mockReturnValue({
+      id: 'ws_a',
+      repo_id: 'repo_abc123',
+      title: 'payment-refactor',
+      task_ids: ['tk_abc123'],
+      team_activity_private: false,
+    } as never);
+    const task = makeTask({ workspace_id: 'ws_a' });
+    render(TaskCard, { props: { task, onRemove: vi.fn() } });
+    const chip = screen.getByTestId('task-workspace-chip');
+    expect(chip.textContent).toMatch(/payment-refactor/);
+  });
+
+  it('does NOT render the chip when task.workspace_id is null', () => {
+    render(TaskCard, { props: { task: makeTask(), onRemove: vi.fn() } });
+    expect(screen.queryByTestId('task-workspace-chip')).toBeNull();
+  });
+
+  it('clicking the chip selects the workspace and switches to work mode', async () => {
+    vi.mocked(workspaces.byId).mockReturnValue({
+      id: 'ws_a',
+      repo_id: 'repo_abc123',
+      title: 'payment-refactor',
+      task_ids: ['tk_abc123'],
+      team_activity_private: false,
+    } as never);
+    const task = makeTask({ workspace_id: 'ws_a' });
+    render(TaskCard, { props: { task, onRemove: vi.fn() } });
+    const chip = screen.getByTestId('task-workspace-chip');
+    await fireEvent.click(chip);
+    expect(vi.mocked(workspaces.select)).toHaveBeenCalledWith('ws_a');
+    expect(vi.mocked(modeStore.set)).toHaveBeenCalledWith('work');
   });
 });

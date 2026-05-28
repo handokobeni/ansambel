@@ -87,6 +87,14 @@ export class WorkspacesStore {
     return [...inner.values()];
   }
 
+  byId(id: string): WorkspaceInfo | undefined {
+    for (const inner of this.byRepo.values()) {
+      const ws = inner.get(id);
+      if (ws) return ws;
+    }
+    return undefined;
+  }
+
   select(id: string | null): void {
     this.selectedWorkspaceId = id;
   }
