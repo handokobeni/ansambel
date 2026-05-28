@@ -24,13 +24,9 @@ export class SlashCommandsStore {
   }
 
   filtered(prefix: string): SlashCommand[] {
-    // Belt-and-suspenders: callers depend on this returning an array even
-    // if `commands` somehow ends up as a non-array (shouldn't happen given
-    // load()'s guard, but keeps the picker safe under any future regression).
-    const list = Array.isArray(this.commands) ? this.commands : [];
-    if (prefix.length === 0) return list;
+    if (prefix.length === 0) return this.commands;
     const lower = prefix.toLowerCase();
-    return list.filter((c) => c.name.toLowerCase().startsWith(lower));
+    return this.commands.filter((c) => c.name.toLowerCase().startsWith(lower));
   }
 }
 
