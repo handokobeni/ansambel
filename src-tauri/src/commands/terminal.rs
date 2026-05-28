@@ -47,6 +47,7 @@ const MAX_DIM: u16 = 1000;
 
 pub fn spawn_terminal_inner(
     workspace_id: &str,
+    terminal_id: &str,
     cols: u16,
     rows: u16,
     state: Arc<Mutex<AppState>>,
@@ -56,9 +57,9 @@ pub fn spawn_terminal_inner(
     // is missing on disk.
     let worktree_dir = {
         let st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
-        if st.terminals.contains_key(workspace_id) {
+        if st.terminals.contains_key(terminal_id) {
             return Err(AppError::InvalidState(format!(
-                "terminal already active for workspace '{workspace_id}' — call reattach instead"
+                "terminal '{terminal_id}' already active — call reattach instead"
             )));
         }
         let ws = st
@@ -77,7 +78,14 @@ pub fn spawn_terminal_inner(
     // a shell prompt, so this is what the user expects.
     let cmd = build_shell_command(&worktree_dir);
     let session = pty::spawn(cmd)?;
-    spawn_terminal_inner_with_pty(workspace_id, Box::new(session), cols, rows, state)
+    spawn_terminal_inner_with_pty(
+        workspace_id,
+        terminal_id,
+        Box::new(session),
+        cols,
+        rows,
+        state,
+    )
 }
 
 /// Test-friendly variant that takes a pre-built PTY. Production code
@@ -87,19 +95,21 @@ pub fn spawn_terminal_inner(
 /// without spawning a real process.
 pub fn spawn_terminal_inner_with_pty(
     workspace_id: &str,
+    terminal_id: &str,
     pty: Box<dyn pty::Pty + Send>,
     cols: u16,
     rows: u16,
     state: Arc<Mutex<AppState>>,
 ) -> Result<broadcast::Receiver<TerminalChunk>> {
-    // Double-check no terminal already active. `spawn_terminal_inner`
-    // (the production wrapper) already does this before spawning, but
-    // tests can call `_with_pty` directly so we re-check here.
+    // Double-check no terminal already active for this terminal_id.
+    // `spawn_terminal_inner` (the production wrapper) already does this
+    // before spawning, but tests can call `_with_pty` directly so we
+    // re-check here.
     {
         let st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
-        if st.terminals.contains_key(workspace_id) {
+        if st.terminals.contains_key(terminal_id) {
             return Err(AppError::InvalidState(format!(
-                "terminal already active for workspace '{workspace_id}' — call reattach instead"
+                "terminal '{terminal_id}' already active — call reattach instead"
             )));
         }
     }
@@ -142,20 +152,21 @@ pub fn spawn_terminal_inner_with_pty(
         .lock()
         .map_err(|e| AppError::Other(e.to_string()))?
         .terminals
-        .insert(workspace_id.into(), handle);
+        .insert(terminal_id.into(), handle);
 
     Ok(event_rx)
 }
 
 pub fn write_terminal_inner(
-    workspace_id: &str,
+    terminal_id: &str,
     bytes: Vec<u8>,
     state: Arc<Mutex<AppState>>,
 ) -> Result<()> {
     let st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
-    let handle = st.terminals.get(workspace_id).ok_or_else(|| {
-        AppError::NotFound(format!("no active terminal for workspace '{workspace_id}'"))
-    })?;
+    let handle = st
+        .terminals
+        .get(terminal_id)
+        .ok_or_else(|| AppError::NotFound(format!("no active terminal '{terminal_id}'")))?;
     handle
         .stdin_tx
         .send(bytes)
@@ -164,7 +175,7 @@ pub fn write_terminal_inner(
 }
 
 pub fn resize_terminal_inner(
-    workspace_id: &str,
+    terminal_id: &str,
     cols: u16,
     rows: u16,
     state: Arc<Mutex<AppState>>,
@@ -172,9 +183,10 @@ pub fn resize_terminal_inner(
     let cols = cols.clamp(MIN_DIM, MAX_DIM);
     let rows = rows.clamp(MIN_DIM, MAX_DIM);
     let st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
-    let handle = st.terminals.get(workspace_id).ok_or_else(|| {
-        AppError::NotFound(format!("no active terminal for workspace '{workspace_id}'"))
-    })?;
+    let handle = st
+        .terminals
+        .get(terminal_id)
+        .ok_or_else(|| AppError::NotFound(format!("no active terminal '{terminal_id}'")))?;
     let pty = handle
         .pty
         .lock()
@@ -183,11 +195,11 @@ pub fn resize_terminal_inner(
     Ok(())
 }
 
-pub fn kill_terminal_inner(workspace_id: &str, state: Arc<Mutex<AppState>>) -> Result<()> {
+pub fn kill_terminal_inner(terminal_id: &str, state: Arc<Mutex<AppState>>) -> Result<()> {
     // Remove the handle first so concurrent reattach attempts can't
     // race with the kill. Idempotent: a missing handle returns Ok(()).
     let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
-    let Some(handle) = st.terminals.remove(workspace_id) else {
+    let Some(handle) = st.terminals.remove(terminal_id) else {
         return Ok(());
     };
     handle.cancel.store(true, Ordering::SeqCst);
@@ -201,14 +213,42 @@ pub fn kill_terminal_inner(workspace_id: &str, state: Arc<Mutex<AppState>>) -> R
 }
 
 pub fn reattach_terminal_inner(
-    workspace_id: &str,
+    terminal_id: &str,
     state: Arc<Mutex<AppState>>,
 ) -> Result<broadcast::Receiver<TerminalChunk>> {
     let st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
-    let handle = st.terminals.get(workspace_id).ok_or_else(|| {
-        AppError::NotFound(format!("no active terminal for workspace '{workspace_id}'"))
-    })?;
+    let handle = st
+        .terminals
+        .get(terminal_id)
+        .ok_or_else(|| AppError::NotFound(format!("no active terminal '{terminal_id}'")))?;
     Ok(handle.event_tx.subscribe())
+}
+
+/// Kill every terminal belonging to a workspace. Used when the
+/// workspace is removed. Idempotent.
+pub fn kill_workspace_terminals_inner(
+    workspace_id: &str,
+    state: Arc<Mutex<AppState>>,
+) -> Result<()> {
+    let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
+    let ids: Vec<String> = st
+        .terminals
+        .iter()
+        .filter(|(_, h)| h.workspace_id == workspace_id)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in ids {
+        if let Some(handle) = st.terminals.remove(&id) {
+            handle
+                .cancel
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Ok(mut pty) = handle.pty.lock() {
+                let _ = pty.kill();
+                pty.close_master();
+            }
+        }
+    }
+    Ok(())
 }
 
 // ── Tauri command wrappers ───────────────────────────────────────────
@@ -216,6 +256,7 @@ pub fn reattach_terminal_inner(
 #[tauri::command]
 pub async fn terminal_spawn(
     workspace_id: String,
+    terminal_id: String,
     cols: Option<u16>,
     rows: Option<u16>,
     channel: Channel<TerminalChunk>,
@@ -223,8 +264,14 @@ pub async fn terminal_spawn(
 ) -> std::result::Result<(), String> {
     let cols = cols.unwrap_or(DEFAULT_COLS);
     let rows = rows.unwrap_or(DEFAULT_ROWS);
-    let inner_state = state.inner().clone();
-    let rx = spawn_terminal_inner(&workspace_id, cols, rows, inner_state).map_err(|e| {
+    let rx = spawn_terminal_inner(
+        &workspace_id,
+        &terminal_id,
+        cols,
+        rows,
+        state.inner().clone(),
+    )
+    .map_err(|e| {
         tracing::error!(error = %e, "terminal_spawn failed");
         e.to_string()
     })?;
@@ -234,40 +281,40 @@ pub async fn terminal_spawn(
 
 #[tauri::command]
 pub async fn terminal_write(
-    workspace_id: String,
+    terminal_id: String,
     bytes: Vec<u8>,
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> std::result::Result<(), String> {
-    write_terminal_inner(&workspace_id, bytes, state.inner().clone()).map_err(|e| e.to_string())
+    write_terminal_inner(&terminal_id, bytes, state.inner().clone()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn terminal_resize(
-    workspace_id: String,
+    terminal_id: String,
     cols: u16,
     rows: u16,
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> std::result::Result<(), String> {
-    resize_terminal_inner(&workspace_id, cols, rows, state.inner().clone())
+    resize_terminal_inner(&terminal_id, cols, rows, state.inner().clone())
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn terminal_kill(
-    workspace_id: String,
+    terminal_id: String,
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> std::result::Result<(), String> {
-    kill_terminal_inner(&workspace_id, state.inner().clone()).map_err(|e| e.to_string())
+    kill_terminal_inner(&terminal_id, state.inner().clone()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub async fn terminal_reattach(
-    workspace_id: String,
+    terminal_id: String,
     channel: Channel<TerminalChunk>,
     state: State<'_, Arc<Mutex<AppState>>>,
 ) -> std::result::Result<(), String> {
     let rx =
-        reattach_terminal_inner(&workspace_id, state.inner().clone()).map_err(|e| e.to_string())?;
+        reattach_terminal_inner(&terminal_id, state.inner().clone()).map_err(|e| e.to_string())?;
     forward_to_channel(rx, channel);
     Ok(())
 }
@@ -527,10 +574,35 @@ mod tests {
         crate::platform::pty::MockPtyHandle,
     ) {
         let (mock, handle) = MockPty::new(1234);
-        let rx =
-            spawn_terminal_inner_with_pty(workspace_id, Box::new(mock), 80, 24, Arc::clone(state))
-                .unwrap();
+        let rx = spawn_terminal_inner_with_pty(
+            workspace_id,
+            workspace_id,
+            Box::new(mock),
+            80,
+            24,
+            Arc::clone(state),
+        )
+        .unwrap();
         (rx, handle)
+    }
+
+    /// Spawn a MockPty-backed terminal under (workspace_id, terminal_id).
+    fn spawn_term(
+        workspace_id: &str,
+        terminal_id: &str,
+        state: &Arc<Mutex<AppState>>,
+    ) -> crate::platform::pty::MockPtyHandle {
+        let (mock, handle) = crate::platform::pty::MockPty::new(1234);
+        spawn_terminal_inner_with_pty(
+            workspace_id,
+            terminal_id,
+            Box::new(mock),
+            80,
+            24,
+            Arc::clone(state),
+        )
+        .expect("spawn");
+        handle
     }
 
     // ── spawn ────────────────────────────────────────────────────────
@@ -596,7 +668,8 @@ mod tests {
         let (_tmp, wt) = make_worktree();
         let state = make_state("ws_spawn_real", &wt);
 
-        let rx = spawn_terminal_inner("ws_spawn_real", 80, 24, Arc::clone(&state)).unwrap();
+        let rx = spawn_terminal_inner("ws_spawn_real", "ws_spawn_real", 80, 24, Arc::clone(&state))
+            .unwrap();
 
         // `\r\n` works on both Unix shells and cmd.exe in ConPTY.
         write_terminal_inner("ws_spawn_real", b"exit\r\n".to_vec(), Arc::clone(&state)).unwrap();
@@ -622,9 +695,15 @@ mod tests {
 
         // Second spawn (via with_pty, same workspace) must error.
         let (mock2, _h2) = MockPty::new(2);
-        let err =
-            spawn_terminal_inner_with_pty("ws_dup", Box::new(mock2), 80, 24, Arc::clone(&state))
-                .unwrap_err();
+        let err = spawn_terminal_inner_with_pty(
+            "ws_dup",
+            "ws_dup",
+            Box::new(mock2),
+            80,
+            24,
+            Arc::clone(&state),
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("already active"),
             "expected 'already active', got: {err}"
@@ -636,7 +715,7 @@ mod tests {
     #[test]
     fn spawn_terminal_inner_returns_error_for_unknown_workspace() {
         let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
-        let err = spawn_terminal_inner("ws_missing", 80, 24, state).unwrap_err();
+        let err = spawn_terminal_inner("ws_missing", "ws_missing", 80, 24, state).unwrap_err();
         assert!(err.to_string().contains("ws_missing"));
     }
 
@@ -645,7 +724,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let wt = tmp.path().join("nope");
         let state = make_state("ws_gone", &wt);
-        let err = spawn_terminal_inner("ws_gone", 80, 24, state).unwrap_err();
+        let err = spawn_terminal_inner("ws_gone", "ws_gone", 80, 24, state).unwrap_err();
         let msg = err.to_string().to_lowercase();
         assert!(
             msg.contains("path") || msg.contains("not found"),
@@ -756,6 +835,72 @@ mod tests {
     }
 
     // ── helpers ──────────────────────────────────────────────────────
+
+    // ── multi-terminal (Task 1) ──────────────────────────────────────
+
+    #[test]
+    fn two_terminals_per_workspace_are_independent() {
+        let (_tmp, wt) = make_worktree();
+        let state = make_state("ws_a", &wt);
+        let _h1 = spawn_term("ws_a", "term_1", &state);
+        let _h2 = spawn_term("ws_a", "term_2", &state);
+        let st = state.lock().unwrap();
+        assert!(st.terminals.contains_key("term_1"));
+        assert!(st.terminals.contains_key("term_2"));
+        assert_eq!(st.terminals.len(), 2, "two distinct terminals coexist");
+    }
+
+    #[test]
+    fn write_and_kill_target_only_the_given_terminal() {
+        let (_tmp, wt) = make_worktree();
+        let state = make_state("ws_a", &wt);
+        let _h1 = spawn_term("ws_a", "term_1", &state);
+        let _h2 = spawn_term("ws_a", "term_2", &state);
+        kill_terminal_inner("term_1", Arc::clone(&state)).unwrap();
+        let st = state.lock().unwrap();
+        assert!(!st.terminals.contains_key("term_1"));
+        assert!(st.terminals.contains_key("term_2"), "term_2 survives");
+    }
+
+    #[test]
+    fn spawn_duplicate_terminal_id_errors() {
+        let (_tmp, wt) = make_worktree();
+        let state = make_state("ws_a", &wt);
+        let _h1 = spawn_term("ws_a", "term_1", &state);
+        let (mock2, _h2) = crate::platform::pty::MockPty::new(2);
+        let err = spawn_terminal_inner_with_pty(
+            "ws_a",
+            "term_1",
+            Box::new(mock2),
+            80,
+            24,
+            Arc::clone(&state),
+        );
+        assert!(err.is_err(), "duplicate terminal_id rejected");
+    }
+
+    #[test]
+    fn kill_workspace_terminals_removes_all_for_that_workspace_only() {
+        let (_tmp, wt) = make_worktree();
+        let state = make_state("ws_a", &wt);
+        {
+            let mut st = state.lock().unwrap();
+            let mut ws_b = st.workspaces.get("ws_a").unwrap().clone();
+            ws_b.id = "ws_b".into();
+            st.workspaces.insert("ws_b".into(), ws_b);
+        }
+        let _a1 = spawn_term("ws_a", "term_a1", &state);
+        let _a2 = spawn_term("ws_a", "term_a2", &state);
+        let _b1 = spawn_term("ws_b", "term_b1", &state);
+        kill_workspace_terminals_inner("ws_a", Arc::clone(&state)).unwrap();
+        let st = state.lock().unwrap();
+        assert!(!st.terminals.contains_key("term_a1"));
+        assert!(!st.terminals.contains_key("term_a2"));
+        assert!(
+            st.terminals.contains_key("term_b1"),
+            "other workspace untouched"
+        );
+    }
 
     #[test]
     fn build_shell_command_uses_worktree_cwd() {

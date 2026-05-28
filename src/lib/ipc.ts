@@ -40,6 +40,19 @@ export const api = {
     getAppVersion: (): Promise<string> => invoke('get_app_version'),
   },
 
+  settings: {
+    /** Read the persisted `selected_repo_id` from `app_settings.json`.
+     *  Resolves with `null` when nothing has been selected yet (cold start
+     *  on first launch) or when the field was previously cleared. */
+    getSelectedRepo: (): Promise<string | null> => invoke('get_selected_repo'),
+
+    /** Persist the active repo selection. The backend writes
+     *  `app_settings.json` immediately (no debounce — selection is a single
+     *  user action and must survive a hard kill). Pass `null` to clear. */
+    setSelectedRepo: (repoId: string | null): Promise<void> =>
+      invoke('set_selected_repo', { repoId }),
+  },
+
   repo: {
     add: (path: string): Promise<Repo> => invoke('add_repo', { path }),
 
@@ -158,26 +171,27 @@ export const api = {
      *  raw bytes (xterm.js needs them ANSI-intact) over the channel. */
     spawn: (
       workspaceId: string,
+      terminalId: string,
       channel: Channel<TerminalChunk>,
       cols?: number,
       rows?: number
-    ): Promise<void> => invoke('terminal_spawn', { workspaceId, channel, cols, rows }),
+    ): Promise<void> => invoke('terminal_spawn', { workspaceId, terminalId, channel, cols, rows }),
 
     /** Push raw bytes (typically keystrokes) onto the terminal's stdin. */
-    write: (workspaceId: string, bytes: number[]): Promise<void> =>
-      invoke('terminal_write', { workspaceId, bytes }),
+    write: (terminalId: string, bytes: number[]): Promise<void> =>
+      invoke('terminal_write', { terminalId, bytes }),
 
     /** Reflow the PTY to new dimensions. Backend clamps to [1, 1000]. */
-    resize: (workspaceId: string, cols: number, rows: number): Promise<void> =>
-      invoke('terminal_resize', { workspaceId, cols, rows }),
+    resize: (terminalId: string, cols: number, rows: number): Promise<void> =>
+      invoke('terminal_resize', { terminalId, cols, rows }),
 
-    /** Kill the workspace's terminal. Idempotent. */
-    kill: (workspaceId: string): Promise<void> => invoke('terminal_kill', { workspaceId }),
+    /** Kill the terminal by its id. Idempotent. */
+    kill: (terminalId: string): Promise<void> => invoke('terminal_kill', { terminalId }),
 
     /** Subscribe a fresh channel to the existing broadcaster — used on
      *  workspace switch + back, the same shape as agent reattach. */
-    reattach: (workspaceId: string, channel: Channel<TerminalChunk>): Promise<void> =>
-      invoke('terminal_reattach', { workspaceId, channel }),
+    reattach: (terminalId: string, channel: Channel<TerminalChunk>): Promise<void> =>
+      invoke('terminal_reattach', { terminalId, channel }),
   },
 
   file: {

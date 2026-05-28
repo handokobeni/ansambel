@@ -8,6 +8,10 @@ vi.mock('$lib/ipc', () => ({
       remove: vi.fn(),
       updateGhProfile: vi.fn(),
     },
+    settings: {
+      getSelectedRepo: vi.fn(),
+      setSelectedRepo: vi.fn().mockResolvedValue(undefined),
+    },
   },
 }));
 
@@ -28,6 +32,9 @@ const makeRepo = (overrides: Partial<Repo> = {}): Repo => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Re-establish the default success resolution for setSelectedRepo since
+  // clearAllMocks wipes implementations along with call history.
+  vi.mocked(api.settings.setSelectedRepo).mockResolvedValue(undefined);
 });
 
 describe('ReposStore', () => {
@@ -120,5 +127,42 @@ describe('ReposStore', () => {
     await store.load();
     store.select('repo_abc123');
     expect(store.getSelected()).toEqual(repo);
+  });
+
+  it('select(id) persists the selection via api.settings.setSelectedRepo', () => {
+    const store = new ReposStore();
+    store.select('repo_kelola');
+    expect(api.settings.setSelectedRepo).toHaveBeenCalledWith('repo_kelola');
+  });
+
+  it('select(null) persists null', () => {
+    const store = new ReposStore();
+    store.select(null);
+    expect(api.settings.setSelectedRepo).toHaveBeenCalledWith(null);
+  });
+
+  it('select swallows persistence errors (never throws to caller)', async () => {
+    vi.mocked(api.settings.setSelectedRepo).mockRejectedValueOnce('disk full');
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const store = new ReposStore();
+    // Sync call must not throw even if the underlying promise rejects.
+    expect(() => store.select('repo_x')).not.toThrow();
+    // Flush microtasks so the .catch runs.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(errSpy).toHaveBeenCalledWith('settings.setSelectedRepo failed', 'disk full');
+    errSpy.mockRestore();
+  });
+
+  it('remove(activeId) clears persistence via select(null)', async () => {
+    const repo = makeRepo();
+    vi.mocked(api.repo.list).mockResolvedValue([repo]);
+    vi.mocked(api.repo.remove).mockResolvedValue(undefined);
+    const store = new ReposStore();
+    await store.load();
+    store.select('repo_abc123');
+    vi.mocked(api.settings.setSelectedRepo).mockClear();
+    await store.remove('repo_abc123');
+    expect(api.settings.setSelectedRepo).toHaveBeenLastCalledWith(null);
+    expect(store.selectedRepoId).toBeNull();
   });
 });

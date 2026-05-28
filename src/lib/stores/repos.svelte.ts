@@ -25,7 +25,10 @@ export class ReposStore {
     await api.repo.remove(id);
     this.repos.delete(id);
     if (this.selectedRepoId === id) {
-      this.selectedRepoId = null;
+      // Route through the single persistence choke point so the persisted
+      // selection is cleared too — otherwise the last-opened-repo restore
+      // would resurrect a deleted repo on next start.
+      this.select(null);
     }
   }
 
@@ -39,6 +42,12 @@ export class ReposStore {
 
   select(id: string | null): void {
     this.selectedRepoId = id;
+    // Fire-and-forget: selection persistence must NEVER throw to a caller of
+    // select(), which runs from synchronous click paths. A disk failure here
+    // only costs us last-selection restore on next launch.
+    api.settings.setSelectedRepo(id).catch((err) => {
+      console.error('settings.setSelectedRepo failed', err);
+    });
   }
 
   getSelected(): Repo | null {

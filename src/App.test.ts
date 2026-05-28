@@ -14,6 +14,11 @@ vi.mock('$lib/stores/toasts.svelte', () => ({
 // from tests without needing svelte-dnd-action in jsdom.
 vi.mock('$lib/components/kanban/KanbanBoard.svelte');
 
+// Stub WorkspaceView so xterm (which requires canvas) never instantiates in
+// jsdom. The manual mock at __mocks__/WorkspaceView.svelte renders a sentinel
+// div so mount-persistence tests can locate it.
+vi.mock('$lib/components/workspace/WorkspaceView.svelte');
+
 // Mock @tauri-apps/api/event so listen() calls in onMount don't fail without
 // a real Tauri runtime.
 vi.mock('@tauri-apps/api/event', () => ({
@@ -30,6 +35,12 @@ vi.mock('$lib/stores/lark-bindings.svelte', () => ({
   },
 }));
 
+// Module-scope handle for the persisted repo id the mocked `get_selected_repo`
+// command should resolve with. Each test sets this in its setup phase; the
+// shared beforeEach below resets it back to null so untouched tests preserve
+// the pre-existing "no persisted selection" baseline.
+let persistedRepoId: string | null = null;
+
 // Mock @tauri-apps/api/core so WorkspaceView (rendered in work mode) does not
 // break tests that run without a real Tauri runtime.
 vi.mock('@tauri-apps/api/core', () => {
@@ -41,6 +52,12 @@ vi.mock('@tauri-apps/api/core', () => {
     invoke: vi.fn((cmd: string) => {
       if (cmd === 'fetch_team_activity_rows') {
         return Promise.resolve({ kind: 'disabled' });
+      }
+      if (cmd === 'get_selected_repo') {
+        return Promise.resolve(persistedRepoId);
+      }
+      if (cmd === 'set_selected_repo') {
+        return Promise.resolve(undefined);
       }
       return Promise.resolve(undefined);
     }),
@@ -119,6 +136,7 @@ import { addToast } from '$lib/stores/toasts.svelte';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  persistedRepoId = null;
   vi.mocked(repos.getSelected).mockReturnValue(null);
   vi.mocked(workspaces.getSelected).mockReturnValue(null);
   (repos as { selectedRepoId: string | null }).selectedRepoId = null;
@@ -289,6 +307,142 @@ describe('App', () => {
     const workBtn = await screen.findByRole('button', { name: /^work$/i });
     await fireEvent.click(workBtn);
     expect(modeStore.set).toHaveBeenCalledWith('work');
+  });
+
+  it('on cold start restores the persisted selected_repo_id when it is present in the repos list', async () => {
+    // Two repos in deterministic insertion order: top first, kelola second.
+    // The persisted id is the second one — without restore logic the app
+    // would always pick the first.
+    (repos as { selectedRepoId: string | null }).selectedRepoId = null;
+    const repoMap = new Map<string, unknown>();
+    repoMap.set('repo_top', {
+      id: 'repo_top',
+      name: 'top-assessment',
+      path: '/top',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 1,
+      updated_at: 1,
+    });
+    repoMap.set('repo_kelola', {
+      id: 'repo_kelola',
+      name: 'kelola-app',
+      path: '/kelola',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 2,
+      updated_at: 2,
+    });
+    (repos as unknown as { repos: Map<string, unknown> }).repos = repoMap;
+    persistedRepoId = 'repo_kelola';
+    vi.mocked(repos.load).mockResolvedValue(undefined);
+    render(App);
+    await waitFor(() => {
+      expect(repos.select).toHaveBeenCalledWith('repo_kelola');
+    });
+    // And the fallback path was NOT taken (no extra call with repo_top).
+    expect(repos.select).not.toHaveBeenCalledWith('repo_top');
+  });
+
+  it('on cold start falls back to the first repo when no selection is persisted', async () => {
+    (repos as { selectedRepoId: string | null }).selectedRepoId = null;
+    const repoMap = new Map<string, unknown>();
+    repoMap.set('repo_top', {
+      id: 'repo_top',
+      name: 'top-assessment',
+      path: '/top',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 1,
+      updated_at: 1,
+    });
+    repoMap.set('repo_kelola', {
+      id: 'repo_kelola',
+      name: 'kelola-app',
+      path: '/kelola',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 2,
+      updated_at: 2,
+    });
+    (repos as unknown as { repos: Map<string, unknown> }).repos = repoMap;
+    persistedRepoId = null;
+    vi.mocked(repos.load).mockResolvedValue(undefined);
+    render(App);
+    await waitFor(() => {
+      expect(repos.select).toHaveBeenCalledWith('repo_top');
+    });
+  });
+
+  it('on cold start falls back to the first repo when the persisted id no longer exists', async () => {
+    // Stale persisted id: the repo was removed between sessions. The
+    // validity check (`repos.repos.has(persisted)`) keeps us from picking
+    // a ghost and the fallback fires.
+    (repos as { selectedRepoId: string | null }).selectedRepoId = null;
+    const repoMap = new Map<string, unknown>();
+    repoMap.set('repo_top', {
+      id: 'repo_top',
+      name: 'top-assessment',
+      path: '/top',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 1,
+      updated_at: 1,
+    });
+    repoMap.set('repo_kelola', {
+      id: 'repo_kelola',
+      name: 'kelola-app',
+      path: '/kelola',
+      gh_profile: null,
+      default_branch: 'main',
+      created_at: 2,
+      updated_at: 2,
+    });
+    (repos as unknown as { repos: Map<string, unknown> }).repos = repoMap;
+    persistedRepoId = 'repo_gone';
+    vi.mocked(repos.load).mockResolvedValue(undefined);
+    render(App);
+    await waitFor(() => {
+      expect(repos.select).toHaveBeenCalledWith('repo_top');
+    });
+    expect(repos.select).not.toHaveBeenCalledWith('repo_gone');
+  });
+});
+
+describe('WorkspaceView mount-persistence across mode toggle', () => {
+  // Regression test for: toggling Plan↔Work must NOT unmount WorkspaceView.
+  // The fix wraps WorkspaceView in a `class:hidden` div so it stays mounted
+  // in the DOM even when plan mode is active.
+  const WS_FIXTURE = {
+    id: 'ws_persist',
+    repo_id: 'repo_persist',
+    title: 'Persist WS',
+    description: '',
+    branch: 'feat/persist',
+    base_branch: 'main',
+    custom_branch: false,
+    status: 'running' as const,
+    column: 'in_progress' as const,
+    created_at: 0,
+    updated_at: 0,
+    worktree_dir: '/tmp/ws_persist',
+    task_id: null,
+  };
+
+  it('WorkspaceView stub stays in DOM (hidden wrapper) when mode switches to plan', async () => {
+    // Start in plan mode (beforeEach default) with a workspace already selected.
+    // With the old {:else if} structure the stub would NOT be in the DOM at all
+    // in plan mode — this test asserts it IS present (just hidden).
+    vi.mocked(workspaces.getSelected).mockReturnValue(WS_FIXTURE);
+    render(App);
+
+    // The workspace-view-stub must be in the DOM even in plan mode.
+    const stub = screen.getByTestId('workspace-view-stub');
+    expect(stub).toBeInTheDocument();
+
+    // Its host wrapper must carry the `hidden` class so it is not visible.
+    const hostWrapper = stub.parentElement!;
+    expect(hostWrapper).toHaveClass('hidden');
   });
 });
 

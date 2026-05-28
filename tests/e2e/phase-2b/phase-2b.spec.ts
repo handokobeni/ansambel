@@ -174,8 +174,11 @@ test('Phase 2b: Terminal tab spawns a session and renders bytes', async ({ page,
   await page.getByTestId('tab-terminal').click();
   await expect(page.getByTestId('tab-terminal')).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByTestId('terminal-view')).toBeVisible();
-  // Status flips to "live" once the spawn handler resolves.
-  await expect(page.getByTestId('terminal-status')).toHaveText(/live/i, { timeout: 5000 });
+  // First-open auto-creates a terminal tab; the pane host mounts as soon
+  // as spawn (or reattach) resolves. The multi-tab refactor dropped the
+  // old single-status header — detailed spawn lifecycle is covered by
+  // tests/e2e/phase-3c-terminal-multitab/terminal-tabs.spec.ts.
+  await expect(page.getByTestId('terminal-pane-host')).toHaveCount(1, { timeout: 5000 });
 });
 
 test('Phase 2b: ScriptPicker lists scripts and run streams output into the terminal', async ({

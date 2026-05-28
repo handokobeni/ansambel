@@ -472,6 +472,11 @@ pub(crate) async fn remove_workspace_inner(
         .current_dir(&repo_path)
         .output();
 
+    // Kill any terminals the workspace owned so their PTYs don't leak.
+    // Called OUTSIDE any held AppState lock — kill_workspace_terminals_inner
+    // locks internally, so calling it inside a lock scope would deadlock.
+    let _ = crate::commands::terminal::kill_workspace_terminals_inner(&ws_id, Arc::clone(&state));
+
     let mut st = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
     st.workspaces.remove(&ws_id);
     save_workspaces(&data_dir, &st.workspaces)?;
@@ -1423,6 +1428,51 @@ mod tests {
         };
         crate::persistence::messages::append_message(&data, &ws.id, &msg).unwrap();
         assert!(!is_workspace_empty(&data, &ws, false));
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_kills_its_terminals() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, _) = init_repo_with_remote(&tmp);
+        let data = tmp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let state: Arc<Mutex<AppState>> = Arc::new(Mutex::new(AppState::default()));
+        let repo = crate::commands::repo::add_repo_inner(
+            local.to_str().unwrap().to_string(),
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        let ws = create_workspace_inner(
+            repo.id,
+            "T".into(),
+            String::new(),
+            None,
+            data.clone(),
+            Arc::clone(&state),
+        )
+        .await
+        .unwrap();
+        let (mock, _h) = crate::platform::pty::MockPty::new(7);
+        crate::commands::terminal::spawn_terminal_inner_with_pty(
+            &ws.id,
+            "term_x",
+            Box::new(mock),
+            80,
+            24,
+            Arc::clone(&state),
+        )
+        .unwrap();
+        assert_eq!(state.lock().unwrap().terminals.len(), 1);
+        remove_workspace_inner(ws.id.clone(), data.clone(), Arc::clone(&state))
+            .await
+            .unwrap();
+        assert_eq!(
+            state.lock().unwrap().terminals.len(),
+            0,
+            "workspace removal killed its terminal"
+        );
     }
 
     #[tokio::test]
