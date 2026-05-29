@@ -1747,7 +1747,7 @@ mod tests {
                 updated_at: 0,
                 worktree_dir: std::path::PathBuf::new(),
                 team_activity_private: false,
-                task_id: None,
+                task_ids: Vec::new(),
             },
         );
         Arc::new(std::sync::Mutex::new(s))

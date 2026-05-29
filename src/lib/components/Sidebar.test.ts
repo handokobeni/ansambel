@@ -62,9 +62,18 @@ vi.mock('$lib/stores/workspaces.svelte', () => {
   };
 });
 
+vi.mock('$lib/stores/tasks.svelte', () => ({
+  tasks: {
+    byId: vi.fn(() => undefined),
+    highlight: vi.fn(),
+    highlightedTaskId: null as string | null,
+  },
+}));
+
 import { workspaces } from '$lib/stores/workspaces.svelte';
 import { repos } from '$lib/stores/repos.svelte';
 import { messages } from '$lib/stores/messages.svelte';
+import { tasks } from '$lib/stores/tasks.svelte';
 import { getToasts, removeToast } from '$lib/stores/toasts.svelte';
 import { teamActivity } from '$lib/stores/team-activity.svelte';
 
@@ -92,7 +101,7 @@ const defaultWorkspaceList = [
     created_at: 1776000001,
     updated_at: 1776000001,
     worktree_dir: '/tmp/ws_abc123',
-    task_id: null,
+    task_ids: [],
   },
   {
     id: 'ws_def456',
@@ -107,7 +116,7 @@ const defaultWorkspaceList = [
     created_at: 1776000002,
     updated_at: 1776000002,
     worktree_dir: '/tmp/ws_def456',
-    task_id: null,
+    task_ids: [],
   },
 ];
 
@@ -118,6 +127,7 @@ beforeEach(() => {
   (repos as { selectedRepoId: string | null }).selectedRepoId = 'repo_abc123';
   vi.mocked(workspaces.listForRepo).mockReturnValue(defaultWorkspaceList);
   (workspaces as { selectedWorkspaceId: string | null }).selectedWorkspaceId = null;
+  vi.mocked(tasks.byId).mockReturnValue(undefined);
 });
 
 describe('Sidebar', () => {
@@ -196,7 +206,7 @@ describe('Sidebar', () => {
       created_at: 1776000003,
       updated_at: 1776000003,
       worktree_dir: '/tmp/ws_new111',
-      task_id: null,
+      task_ids: [],
     });
     render(Sidebar);
     await fireEvent.click(screen.getByRole('button', { name: /new workspace/i }));
@@ -354,7 +364,7 @@ describe('Sidebar', () => {
         created_at: 1776000010,
         updated_at: 1776000010,
         worktree_dir: '/tmp/ws_xyz',
-        task_id: null,
+        task_ids: [],
       },
     ]);
     const { container } = render(Sidebar);
@@ -377,7 +387,7 @@ describe('Sidebar', () => {
         created_at: 1776000003,
         updated_at: 1776000003,
         worktree_dir: '/tmp/ws_done1',
-        task_id: null,
+        task_ids: [],
       },
     ];
     vi.mocked(workspaces.listForRepo).mockReturnValue(fallthroughList);
@@ -443,7 +453,7 @@ describe('Sidebar grouping', () => {
         created_at: 1,
         updated_at: 1,
         worktree_dir: '/tmp/a',
-        task_id: null,
+        task_ids: [],
       },
       {
         id: 'ws_b',
@@ -458,7 +468,7 @@ describe('Sidebar grouping', () => {
         created_at: 2,
         updated_at: 2,
         worktree_dir: '/tmp/b',
-        task_id: null,
+        task_ids: [],
       },
       {
         id: 'ws_c',
@@ -473,7 +483,7 @@ describe('Sidebar grouping', () => {
         created_at: 3,
         updated_at: 3,
         worktree_dir: '/tmp/c',
-        task_id: null,
+        task_ids: [],
       },
     ]);
     const { container } = render(Sidebar);
@@ -506,7 +516,7 @@ describe('Sidebar grouping', () => {
         created_at: 1,
         updated_at: 1,
         worktree_dir: '/tmp/a',
-        task_id: null,
+        task_ids: [],
       },
     ]);
     const { container } = render(Sidebar);
@@ -530,7 +540,7 @@ describe('Sidebar grouping', () => {
         created_at: 1,
         updated_at: 1,
         worktree_dir: '/tmp/d',
-        task_id: null,
+        task_ids: [],
       },
     ]);
     const { container } = render(Sidebar);
@@ -582,7 +592,7 @@ describe('Sidebar grouping', () => {
         created_at: 1,
         updated_at: 1,
         worktree_dir: '/tmp/r',
-        task_id: null,
+        task_ids: [],
       },
     ]);
     const { container } = render(Sidebar);
@@ -702,5 +712,120 @@ describe('Sidebar — Team Activity panel mount', () => {
     unmount();
     expect(stopSpy).toHaveBeenCalled();
     stopSpy.mockRestore();
+  });
+});
+
+describe('Sidebar — linked cards on workspace rows', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('renders linked-cards count for each workspace row', () => {
+    vi.mocked(workspaces.listForRepo).mockReturnValue([
+      {
+        id: 'ws_a',
+        repo_id: 'repo_abc123',
+        branch: 'feat/a',
+        base_branch: 'main',
+        custom_branch: false,
+        title: 'payment-refactor',
+        description: '',
+        status: 'running' as const,
+        column: 'in_progress' as const,
+        created_at: 1,
+        updated_at: 1,
+        worktree_dir: '/tmp/a',
+        task_ids: ['tk_a', 'tk_b', 'tk_c'],
+      },
+    ]);
+    const { getByTestId } = render(Sidebar);
+    expect(getByTestId('ws-row-card-count-ws_a').textContent).toMatch(/3 cards/);
+  });
+
+  it('expanding a workspace row reveals linked card titles', async () => {
+    vi.mocked(workspaces.listForRepo).mockReturnValue([
+      {
+        id: 'ws_a',
+        repo_id: 'repo_abc123',
+        branch: 'feat/a',
+        base_branch: 'main',
+        custom_branch: false,
+        title: 'W',
+        description: '',
+        status: 'running' as const,
+        column: 'in_progress' as const,
+        created_at: 1,
+        updated_at: 1,
+        worktree_dir: '/tmp/a',
+        task_ids: ['tk_a', 'tk_b'],
+      },
+    ]);
+    vi.mocked(tasks.byId).mockImplementation((id: string) => {
+      if (id === 'tk_a')
+        return {
+          id: 'tk_a',
+          repo_id: 'repo_abc123',
+          workspace_id: 'ws_a',
+          title: 'Fix login',
+          description: '',
+          column: 'in_progress' as const,
+          order: 0,
+          created_at: 1,
+          updated_at: 1,
+        };
+      if (id === 'tk_b')
+        return {
+          id: 'tk_b',
+          repo_id: 'repo_abc123',
+          workspace_id: 'ws_a',
+          title: 'Add reset',
+          description: '',
+          column: 'in_progress' as const,
+          order: 1,
+          created_at: 1,
+          updated_at: 1,
+        };
+      return undefined;
+    });
+    const { getByTestId, queryByTestId } = render(Sidebar);
+    expect(queryByTestId('ws-row-card-tk_a')).toBeNull();
+    await fireEvent.click(getByTestId('ws-row-expand-ws_a'));
+    expect(getByTestId('ws-row-card-tk_a').textContent).toMatch(/Fix login/);
+    expect(getByTestId('ws-row-card-tk_b').textContent).toMatch(/Add reset/);
+  });
+
+  it('clicking a linked card title selects that task in the kanban', async () => {
+    vi.mocked(workspaces.listForRepo).mockReturnValue([
+      {
+        id: 'ws_a',
+        repo_id: 'repo_abc123',
+        branch: 'feat/a',
+        base_branch: 'main',
+        custom_branch: false,
+        title: 'W',
+        description: '',
+        status: 'running' as const,
+        column: 'in_progress' as const,
+        created_at: 1,
+        updated_at: 1,
+        worktree_dir: '/tmp/a',
+        task_ids: ['tk_a'],
+      },
+    ]);
+    vi.mocked(tasks.byId).mockReturnValue({
+      id: 'tk_a',
+      repo_id: 'repo_abc123',
+      workspace_id: 'ws_a',
+      title: 'Fix',
+      description: '',
+      column: 'in_progress' as const,
+      order: 0,
+      created_at: 1,
+      updated_at: 1,
+    });
+    const { getByTestId } = render(Sidebar);
+    await fireEvent.click(getByTestId('ws-row-expand-ws_a'));
+    await fireEvent.click(getByTestId('ws-row-card-tk_a'));
+    expect(tasks.highlight).toHaveBeenCalledWith('tk_a');
   });
 });

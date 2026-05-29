@@ -588,6 +588,16 @@ export async function installTauriShim(page: Page, config: ShimConfig): Promise<
           case 'plugin:dialog|open':
             return dialogOpenPath ?? null;
 
+          // Slash-command discovery (Phase 3a/SLA): App.svelte fires
+          // `slashCommands.load()` on mount. Without an explicit case here,
+          // the default `undefined` return would poison the store (the
+          // picker's $effect dereferences `commands.length`), which in
+          // Svelte 5 silently aborts unrelated effects in the same flush
+          // batch — including Terminal.svelte's first-open auto-add.
+          // Return an empty list by default so every E2E spec is immune.
+          case 'list_slash_commands':
+            return [];
+
           default:
             // Unknown commands return undefined rather than throwing so the app
             // degrades gracefully

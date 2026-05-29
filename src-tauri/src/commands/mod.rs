@@ -11,6 +11,7 @@ pub mod repo;
 pub mod scripts;
 pub mod search;
 pub mod settings;
+pub mod slash_commands;
 pub mod system;
 pub mod task;
 pub mod team_activity;

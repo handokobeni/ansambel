@@ -106,4 +106,32 @@ describe('toasts store', () => {
     vi.advanceTimersByTime(10_000);
     expect(getToasts().has(id)).toBe(false);
   });
+
+  it('addToast accepts an opts object with actions + timeoutMs', async () => {
+    const { addToast, getToasts } = await fresh();
+    const onClick = vi.fn();
+    const id = addToast('hello', 'info', {
+      timeoutMs: 10_000,
+      actions: [{ label: 'Undo', onClick }],
+    });
+    const t = getToasts().get(id);
+    expect(t?.actions).toBeDefined();
+    expect(t?.actions?.length).toBe(1);
+    expect(t?.actions?.[0].label).toBe('Undo');
+    expect(t?.timeoutMs).toBe(10_000);
+    // Default 4s would have dismissed; 10s opts keeps it alive at 4s.
+    vi.advanceTimersByTime(4000);
+    expect(getToasts().has(id)).toBe(true);
+    vi.advanceTimersByTime(6000);
+    expect(getToasts().has(id)).toBe(false);
+  });
+
+  it('addToast preserves numeric duration backward-compat', async () => {
+    const { addToast, getToasts } = await fresh();
+    const id = addToast('quick', 'info', 250);
+    vi.advanceTimersByTime(249);
+    expect(getToasts().has(id)).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(getToasts().has(id)).toBe(false);
+  });
 });

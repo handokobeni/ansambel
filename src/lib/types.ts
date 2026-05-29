@@ -32,12 +32,18 @@ export type Workspace = {
    *  `private_lock` semantics on the Rust side). Optional so workspaces
    *  persisted before Task 18 deserialise without the field. */
   team_activity_private?: boolean;
-  /** Originating kanban task id when the workspace was auto-created by
-   *  moving a card into In Progress. `null` for workspaces created before
-   *  this field existed or created manually. Used to reattach a card to
-   *  its existing workspace instead of creating a duplicate. */
-  task_id: string | null;
+  /** IDs of the cards linked to this workspace. Refcount = task_ids.length. */
+  task_ids: string[];
 };
+
+/** Result of `api.task.unlinkFromWorkspace`. The backend returns `would_remove`
+ *  when called in preview mode (`force=false`) and the unlink would trigger
+ *  cleanup; the UI uses that to show the confirm modal before re-calling with
+ *  `force=true`. `removed`/`unlinked` are returned by the actual execution. */
+export type UnlinkResult =
+  | { kind: 'unlinked' }
+  | { kind: 'removed' }
+  | { kind: 'would_remove'; workspace_title: string };
 
 export type AppSettings = {
   schema_version: number;
@@ -419,3 +425,16 @@ export type FetchResult =
   | { kind: 'machine_label_empty' }
   | { kind: 'no_overlap_repos' }
   | { kind: 'rows'; rows: TeamActivityRow[] };
+
+// ── Slash command autocomplete (Task 3) ──────────────────────────────────
+
+export type SlashCommandSource =
+  | { kind: 'builtin' }
+  | { kind: 'user' }
+  | { kind: 'plugin'; plugin: string };
+
+export type SlashCommand = {
+  name: string;
+  description: string;
+  source: SlashCommandSource;
+};

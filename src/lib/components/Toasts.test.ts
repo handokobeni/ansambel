@@ -135,6 +135,39 @@ describe('Toasts component', () => {
     }
   });
 
+  it('renders an action button for each action on a toast', async () => {
+    addToast('Hello', 'info', {
+      actions: [
+        { label: 'Undo create', onClick: vi.fn() },
+        { label: 'Link to existing instead', onClick: vi.fn() },
+      ],
+    });
+    render(Toasts);
+    expect(await screen.findByTestId('toast-action-Undo create')).toBeInTheDocument();
+    expect(screen.getByTestId('toast-action-Link to existing instead')).toBeInTheDocument();
+  });
+
+  it('clicking an action button fires its onClick handler', async () => {
+    const onA = vi.fn().mockResolvedValue(undefined);
+    addToast('World', 'info', {
+      timeoutMs: 0,
+      actions: [{ label: 'Undo create', onClick: onA }],
+    });
+    render(Toasts);
+    const btn = await screen.findByTestId('toast-action-Undo create');
+    await fireEvent.click(btn);
+    expect(onA).toHaveBeenCalled();
+  });
+
+  it('does not render action buttons when toast has an empty actions array', async () => {
+    addToast('No actions here', 'info', { timeoutMs: 0, actions: [] });
+    render(Toasts);
+    const toast = await screen.findByText('No actions here');
+    expect(toast).toBeInTheDocument();
+    // The empty-array case must not produce any action buttons.
+    expect(screen.queryByTestId(/^toast-action-/)).toBeNull();
+  });
+
   it('silently swallows clipboard.writeText rejections', async () => {
     let rejectFn!: (e: Error) => void;
     const pending = new Promise<void>((_, reject) => {

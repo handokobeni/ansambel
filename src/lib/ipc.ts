@@ -28,6 +28,8 @@ import type {
   PersonOption,
   SingleSelectOption,
   TeamActivityConfig,
+  UnlinkResult,
+  SlashCommand,
 } from './types';
 
 export type ListMessagesOpts = {
@@ -127,6 +129,12 @@ export const api = {
      *  mirror, then return them. Used by the manual Refresh button
      *  and the window-focus listener. */
     refresh: (repoId?: string): Promise<Task[]> => invoke('refresh_tasks', { repoId }),
+
+    linkToWorkspace: (taskId: string, workspaceId: string): Promise<void> =>
+      invoke('link_task_to_workspace', { taskId, workspaceId }),
+
+    unlinkFromWorkspace: (taskId: string, force: boolean): Promise<UnlinkResult> =>
+      invoke('unlink_task_from_workspace', { taskId, force }),
   },
 
   agent: {
@@ -320,6 +328,10 @@ export const api = {
      *  `no_overlap_repos` / `rows`. See
      *  `commands/team_activity.rs::fetch_team_activity_rows`. */
     fetchRows: (): Promise<FetchResult> => invoke<FetchResult>('fetch_team_activity_rows'),
+  },
+
+  slashCommands: {
+    list: (): Promise<SlashCommand[]> => invoke('list_slash_commands'),
   },
 
   script: {

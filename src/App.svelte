@@ -5,6 +5,7 @@
   import Sidebar from '$lib/components/Sidebar.svelte';
   import Toasts from '$lib/components/Toasts.svelte';
   import KanbanBoard from '$lib/components/kanban/KanbanBoard.svelte';
+  import LinkWorkspacePicker from '$lib/components/kanban/LinkWorkspacePicker.svelte';
   import NewTaskDialog from '$lib/components/kanban/NewTaskDialog.svelte';
   import WorkspaceView from '$lib/components/workspace/WorkspaceView.svelte';
   import SearchModal from '$lib/components/workspace/SearchModal.svelte';
@@ -18,6 +19,7 @@
   import { workspaces } from '$lib/stores/workspaces.svelte';
   import { tasks } from '$lib/stores/tasks.svelte';
   import { larkBindings } from '$lib/stores/lark-bindings.svelte';
+  import { slashCommands } from '$lib/stores/slash-commands.svelte';
   import { modeStore } from '$lib/stores/mode.svelte';
   import { theme } from '$lib/stores/theme.svelte';
   import { addToast } from '$lib/stores/toasts.svelte';
@@ -30,6 +32,15 @@
   let searchOpen = $state(false);
   let searchMode = $state<SearchMode>('filename');
   let highlightedFile = $state<string | null>(null);
+
+  // State for the auto-create undo toast's "Link to existing instead" affordance.
+  // The picker is mounted at App level so the toast's onClick can flip it open
+  // even after the toast itself has been dismissed (the toast renderer calls
+  // removeToast after the action runs).
+  let linkPickerOpen = $state(false);
+  let linkPickerTaskId = $state<string | null>(null);
+  let linkPickerRepoId = $state<string | null>(null);
+  let linkPickerCleanupWsOnPick = $state<string | null>(null);
 
   const selectedRepo = $derived(repos.getSelected());
   const selectedWorkspace = $derived(workspaces.getSelected());
@@ -79,6 +90,7 @@
 
     await repos.load();
     await larkBindings.load();
+    void slashCommands.load(); // fire-and-forget; failure logs + leaves list empty
     // Cold-start auto-select: selectedRepoId is in-memory only, so on every
     // restart it lands as null. Prefer the persisted choice from
     // app_settings.json so reopening Ansambel returns to whatever repo the
@@ -162,6 +174,39 @@
     // Workspaces may have been auto-created / removed; re-sync the sidebar.
     if (selectedRepo) {
       await workspaces.loadForRepo(selectedRepo.id);
+    }
+
+    // Auto-create undo toast: when a card without a workspace moves to
+    // in_progress and the backend assigned a fresh workspace, give the user
+    // a 10s window to either undo the create or pivot to an existing
+    // workspace. Per spec §1 ("Drag Todo → InProgress").
+    if (!hadWorkspace && column === 'in_progress' && updated.workspace_id !== null) {
+      const newWsId = updated.workspace_id;
+      const wsTitle = workspaces.byId(newWsId)?.title ?? newWsId;
+      addToast(`Created workspace «${wsTitle}»`, 'info', {
+        timeoutMs: 10_000,
+        actions: [
+          {
+            label: 'Link to existing instead',
+            onClick: () => {
+              linkPickerTaskId = taskId;
+              linkPickerRepoId = updated.repo_id;
+              // The picker reads this flag and, when a row is selected,
+              // first unlinks the just-auto-created workspace (force=true
+              // so refcount cleanup runs) and then links to the chosen one.
+              linkPickerCleanupWsOnPick = newWsId;
+              linkPickerOpen = true;
+            },
+          },
+          {
+            label: 'Undo create',
+            onClick: async () => {
+              await tasks.unlink(taskId, true, updated.repo_id);
+              await tasks.move(taskId, 'todo', 0);
+            },
+          },
+        ],
+      });
     }
   }
 
@@ -257,6 +302,19 @@
       }
     }}
   />
+
+  {#if linkPickerOpen && linkPickerTaskId && linkPickerRepoId}
+    <LinkWorkspacePicker
+      taskId={linkPickerTaskId}
+      repoId={linkPickerRepoId}
+      cleanupWorkspaceOnPick={linkPickerCleanupWsOnPick}
+      open={true}
+      onClose={() => {
+        linkPickerOpen = false;
+        linkPickerCleanupWsOnPick = null;
+      }}
+    />
+  {/if}
 
   <Toasts />
 </div>

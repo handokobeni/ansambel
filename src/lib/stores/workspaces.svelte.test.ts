@@ -33,7 +33,7 @@ const makeWorkspace = (overrides: Partial<WorkspaceInfo> = {}): WorkspaceInfo =>
   created_at: 1776000000,
   updated_at: 1776000000,
   worktree_dir: '/tmp/ws_abc123',
-  task_id: null,
+  task_ids: [],
   ...overrides,
 });
 
@@ -201,5 +201,27 @@ describe('WorkspacesStore', () => {
       expect(ok).toBe(true);
       expect(api.workspace.setTeamActivityPrivate).toHaveBeenCalledWith('ws_unseen', true);
     });
+  });
+});
+
+describe('WorkspacesStore.byId', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns the workspace when found across all repos', async () => {
+    const ws = makeWorkspace();
+    vi.mocked(api.workspace.list).mockResolvedValue([ws]);
+    const store = new WorkspacesStore();
+    await store.loadForRepo('repo_abc123');
+    expect(store.byId('ws_abc123')).toEqual(ws);
+  });
+
+  it('returns undefined when the id does not exist in any repo', async () => {
+    const ws = makeWorkspace();
+    vi.mocked(api.workspace.list).mockResolvedValue([ws]);
+    const store = new WorkspacesStore();
+    await store.loadForRepo('repo_abc123');
+    expect(store.byId('ws_nonexistent')).toBeUndefined();
   });
 });

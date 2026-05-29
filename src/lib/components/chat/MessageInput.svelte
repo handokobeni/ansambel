@@ -5,6 +5,7 @@
   import { api } from '$lib/ipc';
   import { parseMention, rankFiles } from '$lib/mentions';
   import MentionAutocomplete from './MentionAutocomplete.svelte';
+  import SlashCommandPicker from './SlashCommandPicker.svelte';
   import type { AttachmentDraft } from '$lib/types';
 
   interface Props {
@@ -19,7 +20,50 @@
 
   let value = $state('');
   let attachments = $state<AttachmentDraft[]>([]);
-  let textareaEl: HTMLTextAreaElement | undefined;
+  let textareaEl: HTMLTextAreaElement | undefined = $state();
+
+  // ── Slash-command picker state ─────────────────────────────────────
+  // Mirrors MentionAutocomplete: trigger regex on the current line, no
+  // overlay backdrop, picker owns its own keyboard nav. Coexists with
+  // the @-mention machinery — both triggers are mutually exclusive in
+  // practice (one starts with `/`, the other with `@`).
+  let pickerOpen = $state(false);
+  let pickerFilter = $state('');
+
+  function updateSlashPickerState(): void {
+    if (!textareaEl) return;
+    const v = textareaEl.value;
+    const cursor = textareaEl.selectionStart ?? v.length;
+    // Walk back from the cursor to the start of the current line.
+    const lineStart = v.lastIndexOf('\n', cursor - 1) + 1;
+    const currentLine = v.slice(lineStart, cursor);
+    const m = currentLine.match(/^\/([\w-]*)$/);
+    if (m) {
+      pickerFilter = m[1];
+      pickerOpen = true;
+    } else {
+      pickerOpen = false;
+    }
+  }
+
+  function replaceSlashToken(commandName: string): void {
+    if (!textareaEl) return;
+    const v = textareaEl.value;
+    const cursor = textareaEl.selectionStart ?? v.length;
+    const lineStart = v.lastIndexOf('\n', cursor - 1) + 1;
+    const before = v.slice(0, lineStart);
+    const after = v.slice(cursor);
+    const inserted = `/${commandName} `;
+    const next = `${before}${inserted}${after}`;
+    textareaEl.value = next;
+    value = next;
+    const newCursor = before.length + inserted.length;
+    textareaEl.setSelectionRange(newCursor, newCursor);
+    caretPos = newCursor;
+    pickerOpen = false;
+    // Notify any bind:value listener so external state stays in sync.
+    textareaEl.dispatchEvent(new Event('input', { bubbles: true }));
+  }
 
   // Cap auto-grow at ~12 lines so a runaway paste doesn't swallow the
   // chat history. Beyond this the textarea scrolls internally.
@@ -101,6 +145,11 @@
 
   function syncCaret(): void {
     if (textareaEl) caretPos = textareaEl.selectionStart;
+  }
+
+  function handleInput(): void {
+    syncCaret();
+    updateSlashPickerState();
   }
 
   function selectMention(path: string): void {
@@ -269,12 +318,13 @@
     <textarea
       bind:this={textareaEl}
       id="message-input"
+      data-testid="chat-textarea"
       rows="1"
       class="w-full px-3 py-2 text-sm rounded bg-[var(--bg-card)] border border-[var(--border-light)] text-[var(--text-primary)] placeholder-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] resize-none min-h-[40px] leading-relaxed"
       placeholder="Ask Claude…"
       bind:value
       onkeydown={handleKeydown}
-      oninput={syncCaret}
+      oninput={handleInput}
       onclick={syncCaret}
       onkeyup={syncCaret}
       {disabled}
@@ -290,6 +340,12 @@
         onDismiss={dismissMention}
       />
     {/if}
+    <SlashCommandPicker
+      open={pickerOpen}
+      filterText={pickerFilter}
+      onSelect={replaceSlashToken}
+      onClose={() => (pickerOpen = false)}
+    />
   </div>
   <div class="flex items-center justify-between">
     <button

@@ -305,7 +305,7 @@ mod tests {
                 updated_at: 0,
                 worktree_dir: worktree.to_path_buf(),
                 team_activity_private: false,
-                task_id: None,
+                task_ids: Vec::new(),
             },
         );
         Arc::new(Mutex::new(state))

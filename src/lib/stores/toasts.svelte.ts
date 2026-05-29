@@ -2,11 +2,28 @@ import { SvelteMap } from 'svelte/reactivity';
 
 export type ToastType = 'error' | 'info' | 'success';
 
+export interface ToastAction {
+  label: string;
+  onClick: () => void | Promise<void>;
+}
+
 export interface Toast {
   id: string;
   message: string;
   type: ToastType;
   createdAt: number;
+  /** Optional inline action buttons (rendered next to the dismiss control). */
+  actions?: ToastAction[];
+  /** Effective auto-dismiss duration in ms (0 = sticky). Stored for tests
+   *  and rendering; the timer is set up immediately on add. */
+  timeoutMs?: number;
+}
+
+export interface ToastOptions {
+  /** Inline action buttons. */
+  actions?: ToastAction[];
+  /** Override the default auto-dismiss for this toast (ms). 0 = sticky. */
+  timeoutMs?: number;
 }
 
 const toasts = new SvelteMap<string, Toast>();
@@ -25,15 +42,47 @@ const DURATIONS: Record<ToastType, number> = {
   success: 3000,
 };
 
-export function addToast(message: string, type: ToastType = 'error', duration?: number): string {
+/**
+ * Add a toast.
+ *
+ * The third argument is overloaded for backward-compat:
+ *   - `number` — explicit auto-dismiss in ms (0 = sticky).
+ *   - `ToastOptions` — `{ actions?, timeoutMs? }` for richer toasts (e.g. the
+ *     auto-create undo toast in `App.svelte:handleMove`).
+ *   - `undefined` — use `DURATIONS[type]` as the default.
+ */
+export function addToast(
+  message: string,
+  type: ToastType = 'error',
+  opts?: number | ToastOptions
+): string {
   const id = `toast-${++counter}`;
-  toasts.set(id, { id, message, type, createdAt: Date.now() });
 
-  const ms = duration ?? DURATIONS[type];
-  if (ms > 0) {
+  let durationMs: number;
+  let actions: ToastAction[] | undefined;
+
+  if (typeof opts === 'number') {
+    durationMs = opts;
+  } else if (opts) {
+    durationMs = opts.timeoutMs ?? DURATIONS[type];
+    actions = opts.actions;
+  } else {
+    durationMs = DURATIONS[type];
+  }
+
+  toasts.set(id, {
+    id,
+    message,
+    type,
+    createdAt: Date.now(),
+    actions,
+    timeoutMs: durationMs,
+  });
+
+  if (durationMs > 0) {
     timers.set(
       id,
-      setTimeout(() => removeToast(id), ms)
+      setTimeout(() => removeToast(id), durationMs)
     );
   }
 

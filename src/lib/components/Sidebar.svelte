@@ -3,6 +3,7 @@
   import { SvelteSet } from 'svelte/reactivity';
   import { repos } from '$lib/stores/repos.svelte';
   import { workspaces } from '$lib/stores/workspaces.svelte';
+  import { tasks } from '$lib/stores/tasks.svelte';
   import { messages } from '$lib/stores/messages.svelte';
   import { addToast } from '$lib/stores/toasts.svelte';
   import { tooltip } from '$lib/actions';
@@ -96,6 +97,18 @@
   function toggleGroup(key: GroupKey): void {
     if (collapsed.has(key)) collapsed.delete(key);
     else collapsed.add(key);
+  }
+
+  // ── Per-row expand state for linked cards ─────────────────────────
+  // Each workspace row hides its linked cards by default — surfacing every
+  // card title up-front would crowd the sidebar once a workspace has more
+  // than a couple of cards. Clicking the chevron toggles visibility for
+  // that single row.
+  const expandedWorkspaceIds = new SvelteSet<string>();
+
+  function toggleExpand(id: string): void {
+    if (expandedWorkspaceIds.has(id)) expandedWorkspaceIds.delete(id);
+    else expandedWorkspaceIds.add(id);
   }
 
   // ── Status dots ────────────────────────────────────────────────────
@@ -279,10 +292,13 @@
                 <ul id="sidebar-group-{group.key}" data-sidebar-group-list={group.key}>
                   {#each group.items as ws (ws.id)}
                     {@const dotStatus = effectiveStatus(ws)}
+                    {@const taskIds = ws.task_ids ?? []}
+                    {@const cardCount = taskIds.length}
+                    {@const expanded = expandedWorkspaceIds.has(ws.id)}
                     <!-- svelte-ignore a11y_click_events_have_key_events -->
                     <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
                     <li
-                      class="group flex items-center gap-2 px-3 py-1.5 cursor-pointer hover:bg-[var(--bg-hover)] transition-colors border-l-2"
+                      class="group flex flex-col gap-1 px-3 py-1.5 cursor-pointer hover:bg-[var(--bg-hover)] transition-colors border-l-2"
                       class:bg-[var(--bg-active)]={workspaces.selectedWorkspaceId === ws.id}
                       class:border-[var(--accent)]={workspaces.selectedWorkspaceId === ws.id}
                       class:border-transparent={workspaces.selectedWorkspaceId !== ws.id}
@@ -290,30 +306,90 @@
                       data-selected={workspaces.selectedWorkspaceId === ws.id}
                       onclick={() => handleSelectWorkspace(ws.id)}
                     >
-                      <!-- Status dot -->
-                      <span
-                        class="w-2 h-2 rounded-full flex-shrink-0 {statusDotClass(dotStatus)}"
-                        data-status-dot
-                        data-status={dotStatus}
-                        aria-label="Status: {dotStatus}"
-                      ></span>
+                      <div class="flex items-center gap-2 w-full">
+                        <!-- Status dot -->
+                        <span
+                          class="w-2 h-2 rounded-full flex-shrink-0 {statusDotClass(dotStatus)}"
+                          data-status-dot
+                          data-status={dotStatus}
+                          aria-label="Status: {dotStatus}"
+                        ></span>
 
-                      <!-- Title -->
-                      <span
-                        class="flex-1 text-xs text-[var(--text-secondary)] overflow-hidden text-ellipsis whitespace-nowrap group-hover:text-[var(--text-primary)] transition-colors"
-                      >
-                        {ws.title}
-                      </span>
+                        <!-- Title -->
+                        <span
+                          class="flex-1 text-xs text-[var(--text-secondary)] overflow-hidden text-ellipsis whitespace-nowrap group-hover:text-[var(--text-primary)] transition-colors"
+                        >
+                          {ws.title}
+                        </span>
 
-                      <!-- Remove button -->
-                      <button
-                        class="opacity-0 group-hover:opacity-100 flex items-center justify-center w-4 h-4 rounded text-[var(--text-muted)] hover:text-[var(--error)] hover:bg-[var(--error-bg)] transition-all cursor-pointer"
-                        onclick={(e) => handleRemoveWorkspace(e, ws.id, ws.repo_id)}
-                        aria-label="Remove workspace"
-                        use:tooltip={{ text: 'Remove workspace' }}
-                      >
-                        ×
-                      </button>
+                        <!-- Linked-cards count badge -->
+                        <span
+                          class="text-[10px] text-[var(--text-muted)] whitespace-nowrap flex-shrink-0"
+                          data-testid="ws-row-card-count-{ws.id}"
+                          >· {cardCount} card{cardCount === 1 ? '' : 's'}</span
+                        >
+
+                        <!-- Expand chevron -->
+                        <button
+                          type="button"
+                          class="flex items-center justify-center w-4 h-4 rounded text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-hover)] transition-colors cursor-pointer flex-shrink-0"
+                          data-testid="ws-row-expand-{ws.id}"
+                          aria-expanded={expanded}
+                          aria-label={expanded ? 'Collapse linked cards' : 'Expand linked cards'}
+                          onclick={(e) => {
+                            e.stopPropagation();
+                            toggleExpand(ws.id);
+                          }}
+                        >
+                          <svg
+                            viewBox="0 0 24 24"
+                            width="9"
+                            height="9"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="3"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                            aria-hidden="true"
+                            class="transition-transform {expanded ? '' : '-rotate-90'}"
+                          >
+                            <polyline points="6 9 12 15 18 9" />
+                          </svg>
+                        </button>
+
+                        <!-- Remove button -->
+                        <button
+                          class="opacity-0 group-hover:opacity-100 flex items-center justify-center w-4 h-4 rounded text-[var(--text-muted)] hover:text-[var(--error)] hover:bg-[var(--error-bg)] transition-all cursor-pointer flex-shrink-0"
+                          onclick={(e) => handleRemoveWorkspace(e, ws.id, ws.repo_id)}
+                          aria-label="Remove workspace"
+                          use:tooltip={{ text: 'Remove workspace' }}
+                        >
+                          ×
+                        </button>
+                      </div>
+
+                      {#if expanded && cardCount > 0}
+                        <ul class="pl-4 pt-0.5 pb-0.5 space-y-0.5" data-ws-cards={ws.id}>
+                          {#each taskIds as taskId (taskId)}
+                            {@const t = tasks.byId(taskId)}
+                            {#if t}
+                              <li>
+                                <button
+                                  type="button"
+                                  class="block w-full text-left text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors truncate"
+                                  data-testid="ws-row-card-{taskId}"
+                                  onclick={(e) => {
+                                    e.stopPropagation();
+                                    tasks.highlight(taskId);
+                                  }}
+                                >
+                                  {t.title}
+                                </button>
+                              </li>
+                            {/if}
+                          {/each}
+                        </ul>
+                      {/if}
                     </li>
                   {/each}
                 </ul>

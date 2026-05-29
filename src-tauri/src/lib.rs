@@ -309,6 +309,8 @@ pub fn run() {
             crate::commands::task::move_task,
             crate::commands::task::remove_task,
             crate::commands::task::refresh_tasks,
+            crate::commands::task::unlink_task_from_workspace,
+            crate::commands::task::link_task_to_workspace,
             crate::commands::agent::spawn_agent,
             crate::commands::agent::send_message,
             crate::commands::agent::stop_agent,
@@ -346,6 +348,7 @@ pub fn run() {
             crate::commands::team_activity::fetch_team_activity_rows,
             crate::commands::settings::set_selected_repo,
             crate::commands::settings::get_selected_repo,
+            crate::commands::slash_commands::list_slash_commands,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -393,6 +396,20 @@ mod tests {
         let _ = crate::commands::task::update_task as *const () as usize;
         let _ = crate::commands::task::move_task as *const () as usize;
         let _ = crate::commands::task::remove_task as *const () as usize;
+    }
+
+    #[test]
+    fn unlink_task_from_workspace_command_is_registered() {
+        // Symbol existence check — ensures the command is wired in
+        // `tauri::generate_handler!` and not silently dropped.
+        let _ = crate::commands::task::unlink_task_from_workspace as *const () as usize;
+    }
+
+    #[test]
+    fn link_task_to_workspace_command_is_registered() {
+        // Symbol existence check — ensures the command is wired in
+        // `tauri::generate_handler!` and not silently dropped.
+        let _ = crate::commands::task::link_task_to_workspace as *const () as usize;
     }
 
     #[test]
@@ -509,6 +526,11 @@ mod tests {
         // the linker pulling in the function symbol; if the macro
         // forgot to include it, this test would fail to compile.
         let _ = crate::commands::team_activity::fetch_team_activity_rows;
+    }
+
+    #[test]
+    fn list_slash_commands_command_is_registered() {
+        let _ = crate::commands::slash_commands::list_slash_commands as *const () as usize;
     }
 
     #[test]

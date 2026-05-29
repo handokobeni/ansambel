@@ -359,7 +359,7 @@ pub(crate) async fn create_workspace_inner_with_publisher(
         updated_at: now,
         worktree_dir: worktree_path.clone(),
         team_activity_private: false,
-        task_id: None,
+        task_ids: Vec::new(),
     };
 
     {
