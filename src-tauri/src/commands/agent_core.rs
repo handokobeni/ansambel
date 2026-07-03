@@ -3029,48 +3029,62 @@ mod tests {
         // First spawn (normal, fresh=false) records --continue in argv[0].
         // restart_agent_inner should stop that agent and spawn a NEW one
         // (fresh=true) whose argv does NOT include --continue.
+        //
+        // Two-script pattern (not env var): std::env::set_var is process-
+        // global and NOT thread-safe, and cargo test runs tests in parallel;
+        // the sibling `restart_agent_inner_with_event_tx_...` test would
+        // race on ANSAMBEL_FAKE_ARGV_DUMP and clobber this test's dump path
+        // (fails on ubuntu / windows CI). Two scripts with hardcoded dump
+        // paths eliminate the race entirely.
         let tmp = tempfile::tempdir().unwrap();
-        // Rotating dump paths so we can distinguish the two spawns.
         let dump1 = tmp.path().join("argv1.txt");
         let dump2 = tmp.path().join("argv2.txt");
-        let script = tmp.path().join("fake-claude.sh");
-        // The script writes to whichever path is passed via env var
-        // ANSAMBEL_FAKE_ARGV_DUMP so we can control it per-spawn.
+        let script1 = tmp.path().join("fake-claude-1.sh");
+        let script2 = tmp.path().join("fake-claude-2.sh");
         std::fs::write(
-            &script,
-            r#"#!/bin/sh
-printf '%s\n' "$@" > "$ANSAMBEL_FAKE_ARGV_DUMP"
-sleep 2
-"#,
+            &script1,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 2\n",
+                dump1.display()
+            ),
         )
         .unwrap();
-        std::process::Command::new("chmod")
-            .args(["+x", script.to_str().unwrap()])
-            .status()
-            .unwrap();
+        std::fs::write(
+            &script2,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 2\n",
+                dump2.display()
+            ),
+        )
+        .unwrap();
+        for s in [&script1, &script2] {
+            std::process::Command::new("chmod")
+                .args(["+x", s.to_str().unwrap()])
+                .status()
+                .unwrap();
+        }
 
         let state = make_state_with_workspace(tmp.path(), "ws_r");
 
-        // First spawn — normal path (fresh=false).
-        std::env::set_var("ANSAMBEL_FAKE_ARGV_DUMP", &dump1);
+        // First spawn — normal path (fresh=false) via script1 → dump1.
         let _ = spawn_agent_inner(
             state.clone(),
             tmp.path(),
             "ws_r",
-            Some(script.clone()),
+            Some(script1.clone()),
             None,
             false,
         )
         .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(150));
 
-        // Restart — must stop the current agent AND respawn with fresh=true.
-        std::env::set_var("ANSAMBEL_FAKE_ARGV_DUMP", &dump2);
+        // Restart — must stop the current agent AND respawn with fresh=true
+        // via script2 → dump2.
         restart_agent_inner(
             state.clone(),
             tmp.path(),
             "ws_r",
-            Some(script.clone()),
+            Some(script2.clone()),
             None,
         )
         .unwrap();
@@ -3129,32 +3143,47 @@ sleep 2
         // stop_agent_inner_with_publisher(...)` branch — not the plain
         // stop_agent_inner(...) else-branch — must be exercised and proven
         // to emit the StatusChanged event, on top of respawning fresh.
+        //
+        // Two-script pattern (not env var): see the sibling test for the
+        // rationale — std::env::set_var is not thread-safe and cargo test
+        // runs tests in parallel; hardcoded per-script dump paths avoid
+        // the race that ANSAMBEL_FAKE_ARGV_DUMP would introduce.
         let tmp = tempfile::tempdir().unwrap();
         let dump1 = tmp.path().join("argv1.txt");
         let dump2 = tmp.path().join("argv2.txt");
-        let script = tmp.path().join("fake-claude.sh");
+        let script1 = tmp.path().join("fake-claude-1.sh");
+        let script2 = tmp.path().join("fake-claude-2.sh");
         std::fs::write(
-            &script,
-            r#"#!/bin/sh
-printf '%s\n' "$@" > "$ANSAMBEL_FAKE_ARGV_DUMP"
-sleep 2
-"#,
+            &script1,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 2\n",
+                dump1.display()
+            ),
         )
         .unwrap();
-        std::process::Command::new("chmod")
-            .args(["+x", script.to_str().unwrap()])
-            .status()
-            .unwrap();
+        std::fs::write(
+            &script2,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 2\n",
+                dump2.display()
+            ),
+        )
+        .unwrap();
+        for s in [&script1, &script2] {
+            std::process::Command::new("chmod")
+                .args(["+x", s.to_str().unwrap()])
+                .status()
+                .unwrap();
+        }
 
         let state = make_state_with_workspace(tmp.path(), "ws_r3");
 
-        // First spawn — normal path (fresh=false).
-        std::env::set_var("ANSAMBEL_FAKE_ARGV_DUMP", &dump1);
+        // First spawn — normal path (fresh=false) via script1 → dump1.
         let _ = spawn_agent_inner(
             state.clone(),
             tmp.path(),
             "ws_r3",
-            Some(script.clone()),
+            Some(script1.clone()),
             None,
             false,
         )
@@ -3164,12 +3193,11 @@ sleep 2
         // Subscribe BEFORE restarting so we can observe the publisher branch.
         let (tx, mut rx) = make_publisher_tx();
 
-        std::env::set_var("ANSAMBEL_FAKE_ARGV_DUMP", &dump2);
         restart_agent_inner(
             state.clone(),
             tmp.path(),
             "ws_r3",
-            Some(script.clone()),
+            Some(script2.clone()),
             Some(&tx),
         )
         .unwrap();
