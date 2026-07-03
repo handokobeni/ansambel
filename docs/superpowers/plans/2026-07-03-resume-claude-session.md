@@ -21,12 +21,12 @@ vitest, cargo test. TDD strict (red → green → commit). No
 `.unwrap()`/`.expect()` outside `#[cfg(test)]`. No `console.log`
 (`console.error` / `console.warn` allowed).
 
-**Spec:** `docs/superpowers/specs/2026-05-28-resume-claude-session-design.md` —
+**Spec:** `docs/superpowers/specs/2026-07-03-resume-claude-session-design.md` —
 read once before starting.
 
 **Empirical simplification vs. spec:** The spec's "fallback retry on
 exit-before-init when `--continue` was passed" was defensive coverage. Empirical
-test on 2026-05-28 (`timeout 15 claude --continue --print "reply with just OK"`
+test on 2026-07-03 (`timeout 15 claude --continue --print "reply with just OK"`
 in a fresh tempdir) confirmed claude CLI returns exit=0 and produces normal
 output even with no prior session in the CWD — `--continue` gracefully degrades
 to a fresh session on its own. **The plan therefore drops the fallback-retry
@@ -734,7 +734,7 @@ parent wiring path depends on where `<ChatPanel>` is rendered — likely
 
 **Files:**
 
-- Create: `journal/2026-05-28-resume-claude-session.md`.
+- Create: `journal/2026-07-03-resume-claude-session.md`.
 
 - [ ] **Step 1: Full-suite gates**
 
@@ -754,7 +754,7 @@ Record the numbers for the journal.
 
 - [ ] **Step 2: Write the journal**
 
-Create `journal/2026-05-28-resume-claude-session.md` following the shape of
+Create `journal/2026-07-03-resume-claude-session.md` following the shape of
 previous entries (see `journal/2026-05-28-multi-card-workspace.md` for a
 template — sections: What shipped / Backend / Frontend / Decisions / Tests /
 Aftermath). Key points to record:
@@ -787,7 +787,7 @@ Aftermath). Key points to record:
 - [ ] **Step 3: Commit**
 
 ```bash
-git add journal/2026-05-28-resume-claude-session.md
+git add journal/2026-07-03-resume-claude-session.md
 git commit -m "docs(journal): resume claude session across restart"
 ```
 
