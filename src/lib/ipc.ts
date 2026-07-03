@@ -161,6 +161,13 @@ export const api = {
 
     reattach: (workspaceId: string, onEvent: Channel<AgentEvent>): Promise<void> =>
       invoke('reattach_agent', { workspaceId, onEvent }),
+
+    /** Stop the current agent for the workspace (silent no-op if none) and
+     *  spawn a fresh one with `--continue` omitted. Escape hatch for stuck
+     *  sessions — pass a fresh `Channel<AgentEvent>` so the new agent's
+     *  events reach the UI. */
+    restartFresh: (workspaceId: string, onEvent: Channel<AgentEvent>): Promise<void> =>
+      invoke('restart_agent', { workspaceId, onEvent }),
   },
 
   messages: {

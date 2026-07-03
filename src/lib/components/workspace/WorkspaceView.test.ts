@@ -755,6 +755,79 @@ describe('WorkspaceView', () => {
     });
   });
 
+  // ── Task 3: restart agent (fresh session) kebab wiring ─────────────
+  describe('restart agent', () => {
+    it('clicking the kebab menu "Restart agent" item invokes restart_agent with a fresh channel', async () => {
+      const { getByTestId } = render(WorkspaceView, { props: { workspace: ws() } });
+      await waitFor(() => expect(invoke).toHaveBeenCalled());
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(getByTestId('chat-menu-trigger'));
+      await fireEvent.click(getByTestId('chat-menu-restart-agent'));
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith(
+          'restart_agent',
+          expect.objectContaining({ workspaceId: 'ws_a' })
+        );
+      });
+    });
+
+    it('shows a success toast after restart_agent resolves', async () => {
+      const { getByTestId } = render(WorkspaceView, { props: { workspace: ws() } });
+      await waitFor(() => expect(invoke).toHaveBeenCalled());
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(getByTestId('chat-menu-trigger'));
+      await fireEvent.click(getByTestId('chat-menu-restart-agent'));
+      await waitFor(() => {
+        const toasts = Array.from(getToasts().values());
+        expect(toasts.some((t) => t.message === 'Agent restarted (fresh session)')).toBe(true);
+      });
+    });
+
+    it('shows an error toast when restart_agent rejects', async () => {
+      vi.mocked(invoke).mockImplementation(async (cmd) => {
+        if (cmd === 'restart_agent') throw 'restart failed';
+        return undefined;
+      });
+      const { getByTestId } = render(WorkspaceView, { props: { workspace: ws() } });
+      await waitFor(() => expect(invoke).toHaveBeenCalled());
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(getByTestId('chat-menu-trigger'));
+      await fireEvent.click(getByTestId('chat-menu-restart-agent'));
+      await waitFor(() => {
+        const toasts = Array.from(getToasts().values());
+        expect(toasts.some((t) => t.message.includes('restart failed'))).toBe(true);
+      });
+    });
+
+    it('routes restart channel events through messages.apply', async () => {
+      let captured: { onmessage?: (ev: unknown) => void } | undefined;
+      vi.mocked(invoke).mockImplementation(async (cmd, args) => {
+        if (cmd === 'restart_agent') {
+          captured = (args as { onEvent: { onmessage?: (ev: unknown) => void } }).onEvent;
+        }
+        return undefined;
+      });
+      const { getByTestId } = render(WorkspaceView, { props: { workspace: ws() } });
+      await waitFor(() => expect(invoke).toHaveBeenCalled());
+      const { fireEvent } = await import('@testing-library/svelte');
+      await fireEvent.click(getByTestId('chat-menu-trigger'));
+      await fireEvent.click(getByTestId('chat-menu-restart-agent'));
+      await waitFor(() => expect(captured).toBeDefined());
+      captured?.onmessage?.({
+        type: 'message',
+        id: 'msg_restart',
+        role: 'assistant',
+        text: 'fresh reply',
+        is_partial: false,
+      });
+      await waitFor(() => {
+        expect(messages.listForWorkspace('ws_a').find((m) => m.id === 'msg_restart')?.text).toBe(
+          'fresh reply'
+        );
+      });
+    });
+  });
+
   // ── Phase 2a: tab integration ─────────────────────────────────────
 
   describe('tab strip integration', () => {

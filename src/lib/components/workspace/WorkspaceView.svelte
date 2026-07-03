@@ -30,6 +30,13 @@
 
   let channel: ReturnType<typeof agentChannel> | undefined;
 
+  /** Shared handler for every Channel<AgentEvent> this view opens (initial
+   *  spawn/reattach, re-spawn-on-send, and restart) — keeps event routing
+   *  identical no matter which path (re)creates the channel. */
+  function handleAgentEvent(ev: AgentEvent): void {
+    messages.apply(ev, workspace.id);
+  }
+
   onMount(async () => {
     // Hydrate persisted history first so previous turns appear immediately
     // on workspace open. Failures here are non-fatal — we still want to
@@ -42,9 +49,7 @@
     }
 
     channel = agentChannel();
-    channel.onmessage = (ev: AgentEvent) => {
-      messages.apply(ev, workspace.id);
-    };
+    channel.onmessage = handleAgentEvent;
     // Read from the messages store first — it persists across tab-switch
     // remounts within the same app session, while `workspace.status` (the
     // prop) reflects the value at first open and can be stale.
@@ -143,14 +148,31 @@
           channel.onmessage = () => {};
         }
         channel = agentChannel();
-        channel.onmessage = (ev: AgentEvent) => {
-          messages.apply(ev, workspace.id);
-        };
+        channel.onmessage = handleAgentEvent;
         await api.agent.spawn(workspace.id, channel);
       }
       await api.agent.send(workspace.id, text, drafts);
     } catch (err) {
       messages.apply({ type: 'error', message: String(err) }, workspace.id);
+    }
+  }
+
+  async function handleRestartAgent(): Promise<void> {
+    try {
+      // Detach the old channel first — restart's PTY reader can still emit
+      // a trailing Status::Stopped through the old broadcaster, and routing
+      // that to a dead channel keeps the new agent's status from flapping
+      // back to "stopped" right after it goes running (same rationale as
+      // the re-spawn-on-send channel swap above).
+      if (channel) {
+        channel.onmessage = () => {};
+      }
+      channel = agentChannel();
+      channel.onmessage = handleAgentEvent;
+      await api.agent.restartFresh(workspace.id, channel);
+      addToast('Agent restarted (fresh session)', 'success');
+    } catch (err) {
+      addToast(`Restart failed: ${err}`, 'error');
     }
   }
 
@@ -258,7 +280,12 @@
       aria-labelledby="tab-chat"
       class="absolute inset-0"
     >
-      <ChatPanel workspaceId={workspace.id} onSend={handleSend} onLoadEarlier={loadEarlier} />
+      <ChatPanel
+        workspaceId={workspace.id}
+        onSend={handleSend}
+        onLoadEarlier={loadEarlier}
+        onRestartAgent={handleRestartAgent}
+      />
     </div>
     <div
       id="tabpanel-diff"
