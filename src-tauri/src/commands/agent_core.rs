@@ -3121,4 +3121,81 @@ sleep 2
             "restart with no prior agent must still spawn fresh: {dump_content:?}"
         );
     }
+
+    #[test]
+    fn restart_agent_inner_with_event_tx_uses_publisher_variant_and_respawns_fresh() {
+        // Production's restart_agent Tauri wrapper always passes
+        // Some(&publisher_tx), so restart_agent_inner's `Some(tx) =>
+        // stop_agent_inner_with_publisher(...)` branch — not the plain
+        // stop_agent_inner(...) else-branch — must be exercised and proven
+        // to emit the StatusChanged event, on top of respawning fresh.
+        let tmp = tempfile::tempdir().unwrap();
+        let dump1 = tmp.path().join("argv1.txt");
+        let dump2 = tmp.path().join("argv2.txt");
+        let script = tmp.path().join("fake-claude.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "$ANSAMBEL_FAKE_ARGV_DUMP"
+sleep 2
+"#,
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .args(["+x", script.to_str().unwrap()])
+            .status()
+            .unwrap();
+
+        let state = make_state_with_workspace(tmp.path(), "ws_r3");
+
+        // First spawn — normal path (fresh=false).
+        std::env::set_var("ANSAMBEL_FAKE_ARGV_DUMP", &dump1);
+        let _ = spawn_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_r3",
+            Some(script.clone()),
+            None,
+            false,
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // Subscribe BEFORE restarting so we can observe the publisher branch.
+        let (tx, mut rx) = make_publisher_tx();
+
+        std::env::set_var("ANSAMBEL_FAKE_ARGV_DUMP", &dump2);
+        restart_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_r3",
+            Some(script.clone()),
+            Some(&tx),
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // Restart succeeded: second spawn's argv omits --continue.
+        let dump2_content = std::fs::read_to_string(&dump2).unwrap();
+        assert!(
+            !dump2_content.lines().any(|l| l == "--continue"),
+            "restart must respawn with --continue omitted: {dump2_content:?}"
+        );
+        assert!(state.lock().unwrap().agents.contains_key("ws_r3"));
+
+        // The publisher branch (stop_agent_inner_with_publisher) was taken:
+        // it must have emitted StatusChanged { Waiting } for the stop half
+        // of the restart, before spawn_agent_inner's own Running event.
+        let stop_ev = rx.try_recv().expect("StatusChanged should be emitted");
+        match stop_ev {
+            crate::state::WorkspaceEvent::StatusChanged {
+                workspace_id,
+                new_status,
+            } => {
+                assert_eq!(workspace_id, "ws_r3");
+                assert_eq!(new_status, crate::state::WorkspaceStatus::Waiting);
+            }
+            other => panic!("expected StatusChanged Waiting, got {other:?}"),
+        }
+    }
 }
