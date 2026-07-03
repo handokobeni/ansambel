@@ -62,6 +62,7 @@ pub async fn spawn_agent(
         &workspace_id,
         claude_path,
         Some(&publisher_tx),
+        false, // fresh: resume previous conversation by default
     )
     .map_err(|e| e.to_string())?;
     spawn_reader_thread(
@@ -88,6 +89,50 @@ pub struct AttachmentInput {
     pub media_type: String,
     /// Original basename, optional. Falls back to source_path's basename.
     pub filename: Option<String>,
+}
+
+/// Stops the current agent for the workspace (silent no-op if none), then
+/// spawns a fresh one with `--continue` omitted. Escape hatch for stuck
+/// sessions — the frontend passes a fresh `Channel<AgentEvent>` so the new
+/// agent's events reach the UI.
+#[tauri::command]
+pub async fn restart_agent(
+    workspace_id: String,
+    on_event: Channel<AgentEvent>,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+    writer: tauri::State<'_, MessageWriter>,
+    event_tx: tauri::State<'_, WorkspaceEventTx>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("resolve app data dir: {e}"))?;
+    let claude_path = state
+        .lock()
+        .map_err(|e| format!("state lock poisoned: {e}"))?
+        .settings
+        .claude_binary_override
+        .clone();
+    let publisher_tx: WorkspaceEventTx = event_tx.inner().clone();
+    let session = crate::commands::agent_core::restart_agent_inner(
+        state.inner().clone(),
+        &data_dir,
+        &workspace_id,
+        claude_path,
+        Some(&publisher_tx),
+    )
+    .map_err(|e| e.to_string())?;
+    spawn_reader_thread(
+        session,
+        on_event,
+        state.inner().clone(),
+        writer.inner().clone(),
+        workspace_id,
+        data_dir,
+        publisher_tx,
+    );
+    Ok(())
 }
 
 #[tauri::command]

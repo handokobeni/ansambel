@@ -316,6 +316,7 @@ pub fn run() {
             crate::commands::agent::stop_agent,
             crate::commands::agent::list_messages,
             crate::commands::agent::reattach_agent,
+            crate::commands::agent::restart_agent,
             crate::commands::diff::workspace_diff,
             crate::commands::files::workspace_files,
             crate::commands::files::workspace_files_recursive,
@@ -495,6 +496,11 @@ mod tests {
         let _ = std::any::type_name_of_val(&stop_agent);
         let _ = std::any::type_name_of_val(&list_messages);
         let _ = std::any::type_name_of_val(&reattach_agent);
+    }
+
+    #[test]
+    fn restart_agent_command_is_registered() {
+        let _ = crate::commands::agent::restart_agent as *const () as usize;
     }
 
     #[test]

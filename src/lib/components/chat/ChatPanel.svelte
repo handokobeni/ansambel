@@ -26,6 +26,9 @@
     /** Pixels from the bottom within which auto-scroll stays active.
      * One bubble of slack feels natural for chat. */
     pinnedBottomThreshold?: number;
+    /** Fired when the user picks "Restart agent (fresh session)" from the
+     *  chat-panel kebab menu. When omitted the kebab is hidden entirely. */
+    onRestartAgent?: () => void | Promise<void>;
   }
 
   const {
@@ -35,7 +38,14 @@
     loadEarlierThreshold = 80,
     initialRenderCount = 100,
     pinnedBottomThreshold = 50,
+    onRestartAgent,
   }: Props = $props();
+
+  let menuOpen = $state(false);
+  async function handleRestartClick() {
+    menuOpen = false;
+    await onRestartAgent?.();
+  }
 
   const list = $derived(messages.listForWorkspace(workspaceId));
   const status = $derived(messages.statusFor(workspaceId));
@@ -160,6 +170,38 @@
 </script>
 
 <section class="flex flex-col h-full bg-[var(--bg-base)]">
+  {#if onRestartAgent}
+    <header
+      class="flex justify-end items-center px-2 py-1 border-b border-[var(--border)] relative"
+    >
+      <button
+        type="button"
+        class="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] rounded"
+        data-testid="chat-menu-trigger"
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+        onclick={() => (menuOpen = !menuOpen)}
+      >
+        <span aria-hidden="true">⋮</span>
+        <span class="sr-only">Chat menu</span>
+      </button>
+      {#if menuOpen}
+        <div
+          role="menu"
+          class="absolute right-2 top-full mt-1 z-40 min-w-[220px] bg-[var(--bg-sidebar)] border border-[var(--border)] rounded shadow-lg py-1"
+        >
+          <button
+            type="button"
+            class="w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--bg-hover)]"
+            data-testid="chat-menu-restart-agent"
+            onclick={handleRestartClick}
+          >
+            Restart agent (fresh session)
+          </button>
+        </div>
+      {/if}
+    </header>
+  {/if}
   {#if errorVisible}
     <div
       role="alert"

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render } from '@testing-library/svelte';
+import { render, fireEvent } from '@testing-library/svelte';
 import ChatPanel from './ChatPanel.svelte';
 import { messages } from '$lib/stores/messages.svelte';
 import type { Message } from '$lib/types';
@@ -482,6 +482,32 @@ describe('ChatPanel', () => {
       });
       // Run lengths are <3 either side → no grouping.
       expect(container.querySelector('[data-tool-group]')).toBeNull();
+    });
+  });
+
+  describe('kebab menu / restart agent', () => {
+    it('renders the kebab menu trigger when onRestartAgent is provided', () => {
+      const { getByTestId } = render(ChatPanel, {
+        props: { workspaceId: 'ws1', onSend: vi.fn(), onRestartAgent: vi.fn() },
+      });
+      expect(getByTestId('chat-menu-trigger')).toBeTruthy();
+    });
+
+    it('does NOT render the kebab menu when onRestartAgent is undefined', () => {
+      const { queryByTestId } = render(ChatPanel, {
+        props: { workspaceId: 'ws1', onSend: vi.fn() },
+      });
+      expect(queryByTestId('chat-menu-trigger')).toBeNull();
+    });
+
+    it('clicking "Restart agent" menu item invokes onRestartAgent', async () => {
+      const onRestartAgent = vi.fn();
+      const { getByTestId } = render(ChatPanel, {
+        props: { workspaceId: 'ws1', onSend: vi.fn(), onRestartAgent },
+      });
+      await fireEvent.click(getByTestId('chat-menu-trigger'));
+      await fireEvent.click(getByTestId('chat-menu-restart-agent'));
+      expect(onRestartAgent).toHaveBeenCalledTimes(1);
     });
   });
 });

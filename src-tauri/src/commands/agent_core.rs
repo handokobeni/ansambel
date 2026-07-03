@@ -195,6 +195,7 @@ pub fn spawn_agent_inner(
     workspace_id: &str,
     claude_path: Option<PathBuf>,
     publisher_tx: Option<&WorkspaceEventTx>,
+    fresh: bool,
 ) -> AppResult<AgentProcess> {
     let (worktree_dir, repo_id, ws_title, ws_description) = {
         let s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
@@ -237,6 +238,9 @@ pub fn spawn_agent_inner(
         "--disallowedTools",
         "EnterWorktree,ExitWorktree",
     ]);
+    if !fresh {
+        cmd.arg("--continue");
+    }
     cmd.current_dir(&worktree_dir);
 
     let prefix = build_system_prompt_prefix_with_task(
@@ -826,6 +830,35 @@ pub fn stop_agent_inner_with_publisher(
     Ok(())
 }
 
+/// Kill the current agent for `workspace_id` (silent no-op if none),
+/// then respawn a new agent WITHOUT `--continue` so Claude starts a
+/// fresh conversation. Used by the "Restart agent (fresh session)"
+/// escape hatch in the chat panel.
+pub(crate) fn restart_agent_inner(
+    state: Arc<Mutex<AppState>>,
+    data_dir: &Path,
+    workspace_id: &str,
+    claude_path: Option<PathBuf>,
+    event_tx: Option<&WorkspaceEventTx>,
+) -> AppResult<AgentProcess> {
+    // Stop first — silent if no agent exists. Uses the with_publisher
+    // variant only if event_tx is present, so a plain stop is a no-op
+    // observability-wise.
+    if let Some(tx) = event_tx {
+        stop_agent_inner_with_publisher(state.clone(), workspace_id, Some(tx))?;
+    } else {
+        stop_agent_inner(state.clone(), workspace_id)?;
+    }
+    spawn_agent_inner(
+        state,
+        data_dir,
+        workspace_id,
+        claude_path,
+        event_tx,
+        /* fresh */ true,
+    )
+}
+
 /// Subscribes to a running agent's event broadcaster. Returns an error if no
 /// agent is registered for the workspace. Called when the user navigates back
 /// to a workspace that's still running and we need a fresh receiver to pump
@@ -992,7 +1025,7 @@ mod tests {
     fn spawn_agent_unknown_workspace_returns_err() {
         let state = make_state();
         let tmp = make_data_dir();
-        let result = spawn_agent_inner(state.clone(), tmp.path(), "ws_missing", None, None);
+        let result = spawn_agent_inner(state.clone(), tmp.path(), "ws_missing", None, None, false);
         assert!(result.is_err());
         let msg = result.err().unwrap().to_string();
         assert!(
@@ -1020,7 +1053,7 @@ mod tests {
                 cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
-        let result = spawn_agent_inner(state, tmp.path(), "ws_a", None, None);
+        let result = spawn_agent_inner(state, tmp.path(), "ws_a", None, None, false);
         assert!(result.is_err());
         assert!(result
             .err()
@@ -1041,7 +1074,7 @@ mod tests {
         } else {
             std::path::PathBuf::from("/bin/echo")
         };
-        let result = spawn_agent_inner(state, tmp.path(), "ws_b", Some(echo_path), None);
+        let result = spawn_agent_inner(state, tmp.path(), "ws_b", Some(echo_path), None, false);
         assert!(result.is_ok(), "got err: {:?}", result.err());
     }
 
@@ -1058,7 +1091,15 @@ mod tests {
         } else {
             std::path::PathBuf::from("/bin/echo")
         };
-        spawn_agent_inner(state.clone(), tmp.path(), "ws_c", Some(echo_path), None).unwrap();
+        spawn_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_c",
+            Some(echo_path),
+            None,
+            false,
+        )
+        .unwrap();
         let s = state.lock().unwrap();
         let ws = s.workspaces.get("ws_c").unwrap();
         assert_eq!(ws.status, WorkspaceStatus::Running);
@@ -1076,7 +1117,15 @@ mod tests {
         } else {
             std::path::PathBuf::from("/bin/echo")
         };
-        spawn_agent_inner(state.clone(), tmp.path(), "ws_d", Some(echo_path), None).unwrap();
+        spawn_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_d",
+            Some(echo_path),
+            None,
+            false,
+        )
+        .unwrap();
         let s = state.lock().unwrap();
         assert!(s.agents.contains_key("ws_d"));
     }
@@ -1848,7 +1897,7 @@ mod tests {
         write_workspace(&state, "ws_nobin", "repo_nobin", worktree);
         // Use a path that definitely doesn't exist.
         let bad_path = std::path::PathBuf::from("/tmp/definitely-does-not-exist-binary-xyz");
-        let result = spawn_agent_inner(state, tmp.path(), "ws_nobin", Some(bad_path), None);
+        let result = spawn_agent_inner(state, tmp.path(), "ws_nobin", Some(bad_path), None, false);
         // Should fail because the PTY can't spawn a non-existent binary.
         assert!(result.is_err());
     }
@@ -1937,7 +1986,14 @@ mod tests {
         } else {
             std::path::PathBuf::from("/bin/echo")
         };
-        let result = spawn_agent_inner(state.clone(), tmp.path(), "ws_ctx", Some(echo_path), None);
+        let result = spawn_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_ctx",
+            Some(echo_path),
+            None,
+            false,
+        );
         assert!(result.is_ok(), "got err: {:?}", result.err());
         assert_eq!(
             state
@@ -1975,7 +2031,7 @@ mod tests {
         } else {
             std::path::PathBuf::from("/bin/echo")
         };
-        let result = spawn_agent_inner(state, tmp.path(), "ws_race", Some(echo_path), None);
+        let result = spawn_agent_inner(state, tmp.path(), "ws_race", Some(echo_path), None, false);
         assert!(result.is_err());
         let err_msg = result.err().unwrap().to_string();
         assert!(err_msg.contains("already running"), "got: {err_msg}");
@@ -2475,7 +2531,15 @@ mod tests {
             std::path::PathBuf::from("/bin/echo")
         };
         let (tx, mut rx) = make_publisher_tx();
-        spawn_agent_inner(state, tmp.path(), "ws_emit_run", Some(echo_path), Some(&tx)).unwrap();
+        spawn_agent_inner(
+            state,
+            tmp.path(),
+            "ws_emit_run",
+            Some(echo_path),
+            Some(&tx),
+            false,
+        )
+        .unwrap();
         let ev = rx.try_recv().expect("StatusChanged should be emitted");
         match ev {
             crate::state::WorkspaceEvent::StatusChanged {
@@ -2868,6 +2932,307 @@ mod tests {
                 new_status,
             } => {
                 assert_eq!(workspace_id, "ws_emit_eof");
+                assert_eq!(new_status, crate::state::WorkspaceStatus::Waiting);
+            }
+            other => panic!("expected StatusChanged Waiting, got {other:?}"),
+        }
+    }
+
+    // ── fresh / --continue tests ────────────────────────────────────────────
+
+    fn make_state_with_workspace(data_dir: &Path, ws_id: &str) -> Arc<Mutex<AppState>> {
+        let state = make_state();
+        let worktree = data_dir.join("workspaces").join(ws_id);
+        std::fs::create_dir_all(&worktree).unwrap();
+        write_workspace(&state, ws_id, "repo_x", worktree);
+        state
+    }
+
+    // The five spawn-argv-dump tests below spawn a `#!/bin/sh` fake-claude
+    // script and read its argv dump from disk. Windows can't execute POSIX
+    // shell scripts natively, and `chmod +x` is a no-op there — so they are
+    // gated to unix. The `--continue` behaviour under test is
+    // platform-independent runtime logic; ubuntu + macos CI runs are enough
+    // to exercise it, mirroring how other unix-heavy tests (portable-pty)
+    // are handled in this file.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_agent_inner_with_fresh_false_passes_continue_flag() {
+        // Mock claude as a shell script that dumps its argv to a file so we
+        // can assert the exact args after spawn returns.
+        let tmp = tempfile::tempdir().unwrap();
+        let argv_dump = tmp.path().join("argv.txt");
+        let script = tmp.path().join("fake-claude.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 1\n",
+                argv_dump.display()
+            ),
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .args(["+x", script.to_str().unwrap()])
+            .status()
+            .unwrap();
+        let state = make_state_with_workspace(tmp.path(), "ws_c");
+        let _ = spawn_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_c",
+            Some(script.clone()),
+            None,
+            false, // fresh
+        )
+        .unwrap();
+        // Give the script a moment to dump argv before we read it.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let dump = std::fs::read_to_string(&argv_dump).unwrap();
+        assert!(
+            dump.lines().any(|l| l == "--continue"),
+            "argv should include --continue when fresh=false: {dump:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_agent_inner_with_fresh_true_omits_continue_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let argv_dump = tmp.path().join("argv.txt");
+        let script = tmp.path().join("fake-claude.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 1\n",
+                argv_dump.display()
+            ),
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .args(["+x", script.to_str().unwrap()])
+            .status()
+            .unwrap();
+        let state = make_state_with_workspace(tmp.path(), "ws_f");
+        let _ = spawn_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_f",
+            Some(script.clone()),
+            None,
+            true, // fresh
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let dump = std::fs::read_to_string(&argv_dump).unwrap();
+        assert!(
+            !dump.lines().any(|l| l == "--continue"),
+            "argv must NOT include --continue when fresh=true: {dump:?}"
+        );
+    }
+
+    // ── restart_agent_inner ─────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_agent_inner_stops_running_agent_and_respawns_fresh() {
+        // Setup: use the fake-claude script that dumps argv on each spawn.
+        // First spawn (normal, fresh=false) records --continue in argv[0].
+        // restart_agent_inner should stop that agent and spawn a NEW one
+        // (fresh=true) whose argv does NOT include --continue.
+        //
+        // Two-script pattern (not env var): std::env::set_var is process-
+        // global and NOT thread-safe, and cargo test runs tests in parallel;
+        // the sibling `restart_agent_inner_with_event_tx_...` test would
+        // race on ANSAMBEL_FAKE_ARGV_DUMP and clobber this test's dump path
+        // (fails on ubuntu / windows CI). Two scripts with hardcoded dump
+        // paths eliminate the race entirely.
+        let tmp = tempfile::tempdir().unwrap();
+        let dump1 = tmp.path().join("argv1.txt");
+        let dump2 = tmp.path().join("argv2.txt");
+        let script1 = tmp.path().join("fake-claude-1.sh");
+        let script2 = tmp.path().join("fake-claude-2.sh");
+        std::fs::write(
+            &script1,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 2\n",
+                dump1.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &script2,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 2\n",
+                dump2.display()
+            ),
+        )
+        .unwrap();
+        for s in [&script1, &script2] {
+            std::process::Command::new("chmod")
+                .args(["+x", s.to_str().unwrap()])
+                .status()
+                .unwrap();
+        }
+
+        let state = make_state_with_workspace(tmp.path(), "ws_r");
+
+        // First spawn — normal path (fresh=false) via script1 → dump1.
+        let _ = spawn_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_r",
+            Some(script1.clone()),
+            None,
+            false,
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // Restart — must stop the current agent AND respawn with fresh=true
+        // via script2 → dump2.
+        restart_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_r",
+            Some(script2.clone()),
+            None,
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // Assert: dump2 (second spawn's argv) MUST NOT contain --continue.
+        let dump2_content = std::fs::read_to_string(&dump2).unwrap();
+        assert!(
+            !dump2_content.lines().any(|l| l == "--continue"),
+            "restart must respawn with --continue omitted: {dump2_content:?}"
+        );
+        // Assert: the state now has an agent for ws_r (the new one, not the old).
+        assert!(state.lock().unwrap().agents.contains_key("ws_r"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_agent_inner_with_no_existing_agent_is_ok_and_spawns_fresh() {
+        // No prior spawn — restart still works (stop is a silent no-op),
+        // and the spawn side goes fresh.
+        let tmp = tempfile::tempdir().unwrap();
+        let dump = tmp.path().join("argv.txt");
+        let script = tmp.path().join("fake-claude.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 1\n",
+                dump.display()
+            ),
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .args(["+x", script.to_str().unwrap()])
+            .status()
+            .unwrap();
+        let state = make_state_with_workspace(tmp.path(), "ws_r2");
+        restart_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_r2",
+            Some(script.clone()),
+            None,
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let dump_content = std::fs::read_to_string(&dump).unwrap();
+        assert!(
+            !dump_content.lines().any(|l| l == "--continue"),
+            "restart with no prior agent must still spawn fresh: {dump_content:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restart_agent_inner_with_event_tx_uses_publisher_variant_and_respawns_fresh() {
+        // Production's restart_agent Tauri wrapper always passes
+        // Some(&publisher_tx), so restart_agent_inner's `Some(tx) =>
+        // stop_agent_inner_with_publisher(...)` branch — not the plain
+        // stop_agent_inner(...) else-branch — must be exercised and proven
+        // to emit the StatusChanged event, on top of respawning fresh.
+        //
+        // Two-script pattern (not env var): see the sibling test for the
+        // rationale — std::env::set_var is not thread-safe and cargo test
+        // runs tests in parallel; hardcoded per-script dump paths avoid
+        // the race that ANSAMBEL_FAKE_ARGV_DUMP would introduce.
+        let tmp = tempfile::tempdir().unwrap();
+        let dump1 = tmp.path().join("argv1.txt");
+        let dump2 = tmp.path().join("argv2.txt");
+        let script1 = tmp.path().join("fake-claude-1.sh");
+        let script2 = tmp.path().join("fake-claude-2.sh");
+        std::fs::write(
+            &script1,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 2\n",
+                dump1.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &script2,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 2\n",
+                dump2.display()
+            ),
+        )
+        .unwrap();
+        for s in [&script1, &script2] {
+            std::process::Command::new("chmod")
+                .args(["+x", s.to_str().unwrap()])
+                .status()
+                .unwrap();
+        }
+
+        let state = make_state_with_workspace(tmp.path(), "ws_r3");
+
+        // First spawn — normal path (fresh=false) via script1 → dump1.
+        let _ = spawn_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_r3",
+            Some(script1.clone()),
+            None,
+            false,
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // Subscribe BEFORE restarting so we can observe the publisher branch.
+        let (tx, mut rx) = make_publisher_tx();
+
+        restart_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_r3",
+            Some(script2.clone()),
+            Some(&tx),
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // Restart succeeded: second spawn's argv omits --continue.
+        let dump2_content = std::fs::read_to_string(&dump2).unwrap();
+        assert!(
+            !dump2_content.lines().any(|l| l == "--continue"),
+            "restart must respawn with --continue omitted: {dump2_content:?}"
+        );
+        assert!(state.lock().unwrap().agents.contains_key("ws_r3"));
+
+        // The publisher branch (stop_agent_inner_with_publisher) was taken:
+        // it must have emitted StatusChanged { Waiting } for the stop half
+        // of the restart, before spawn_agent_inner's own Running event.
+        let stop_ev = rx.try_recv().expect("StatusChanged should be emitted");
+        match stop_ev {
+            crate::state::WorkspaceEvent::StatusChanged {
+                workspace_id,
+                new_status,
+            } => {
+                assert_eq!(workspace_id, "ws_r3");
                 assert_eq!(new_status, crate::state::WorkspaceStatus::Waiting);
             }
             other => panic!("expected StatusChanged Waiting, got {other:?}"),

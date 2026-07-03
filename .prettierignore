@@ -10,3 +10,4 @@ bun.lock
 package-lock.json
 Cargo.lock
 *.min.js
+.superpowers
