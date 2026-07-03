@@ -2948,6 +2948,14 @@ mod tests {
         state
     }
 
+    // The five spawn-argv-dump tests below spawn a `#!/bin/sh` fake-claude
+    // script and read its argv dump from disk. Windows can't execute POSIX
+    // shell scripts natively, and `chmod +x` is a no-op there — so they are
+    // gated to unix. The `--continue` behaviour under test is
+    // platform-independent runtime logic; ubuntu + macos CI runs are enough
+    // to exercise it, mirroring how other unix-heavy tests (portable-pty)
+    // are handled in this file.
+    #[cfg(unix)]
     #[test]
     fn spawn_agent_inner_with_fresh_false_passes_continue_flag() {
         // Mock claude as a shell script that dumps its argv to a file so we
@@ -2986,6 +2994,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn spawn_agent_inner_with_fresh_true_omits_continue_flag() {
         let tmp = tempfile::tempdir().unwrap();
@@ -3023,6 +3032,7 @@ mod tests {
 
     // ── restart_agent_inner ─────────────────────────────────────────────────
 
+    #[cfg(unix)]
     #[test]
     fn restart_agent_inner_stops_running_agent_and_respawns_fresh() {
         // Setup: use the fake-claude script that dumps argv on each spawn.
@@ -3100,6 +3110,7 @@ mod tests {
         assert!(state.lock().unwrap().agents.contains_key("ws_r"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn restart_agent_inner_with_no_existing_agent_is_ok_and_spawns_fresh() {
         // No prior spawn — restart still works (stop is a silent no-op),
@@ -3136,6 +3147,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn restart_agent_inner_with_event_tx_uses_publisher_variant_and_respawns_fresh() {
         // Production's restart_agent Tauri wrapper always passes
