@@ -830,6 +830,35 @@ pub fn stop_agent_inner_with_publisher(
     Ok(())
 }
 
+/// Kill the current agent for `workspace_id` (silent no-op if none),
+/// then respawn a new agent WITHOUT `--continue` so Claude starts a
+/// fresh conversation. Used by the "Restart agent (fresh session)"
+/// escape hatch in the chat panel.
+pub(crate) fn restart_agent_inner(
+    state: Arc<Mutex<AppState>>,
+    data_dir: &Path,
+    workspace_id: &str,
+    claude_path: Option<PathBuf>,
+    event_tx: Option<&WorkspaceEventTx>,
+) -> AppResult<AgentProcess> {
+    // Stop first — silent if no agent exists. Uses the with_publisher
+    // variant only if event_tx is present, so a plain stop is a no-op
+    // observability-wise.
+    if let Some(tx) = event_tx {
+        stop_agent_inner_with_publisher(state.clone(), workspace_id, Some(tx))?;
+    } else {
+        stop_agent_inner(state.clone(), workspace_id)?;
+    }
+    spawn_agent_inner(
+        state,
+        data_dir,
+        workspace_id,
+        claude_path,
+        event_tx,
+        /* fresh */ true,
+    )
+}
+
 /// Subscribes to a running agent's event broadcaster. Returns an error if no
 /// agent is registered for the workspace. Called when the user navigates back
 /// to a workspace that's still running and we need a fresh receiver to pump
@@ -2989,6 +3018,107 @@ mod tests {
         assert!(
             !dump.lines().any(|l| l == "--continue"),
             "argv must NOT include --continue when fresh=true: {dump:?}"
+        );
+    }
+
+    // ── restart_agent_inner ─────────────────────────────────────────────────
+
+    #[test]
+    fn restart_agent_inner_stops_running_agent_and_respawns_fresh() {
+        // Setup: use the fake-claude script that dumps argv on each spawn.
+        // First spawn (normal, fresh=false) records --continue in argv[0].
+        // restart_agent_inner should stop that agent and spawn a NEW one
+        // (fresh=true) whose argv does NOT include --continue.
+        let tmp = tempfile::tempdir().unwrap();
+        // Rotating dump paths so we can distinguish the two spawns.
+        let dump1 = tmp.path().join("argv1.txt");
+        let dump2 = tmp.path().join("argv2.txt");
+        let script = tmp.path().join("fake-claude.sh");
+        // The script writes to whichever path is passed via env var
+        // ANSAMBEL_FAKE_ARGV_DUMP so we can control it per-spawn.
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "$ANSAMBEL_FAKE_ARGV_DUMP"
+sleep 2
+"#,
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .args(["+x", script.to_str().unwrap()])
+            .status()
+            .unwrap();
+
+        let state = make_state_with_workspace(tmp.path(), "ws_r");
+
+        // First spawn — normal path (fresh=false).
+        std::env::set_var("ANSAMBEL_FAKE_ARGV_DUMP", &dump1);
+        let _ = spawn_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_r",
+            Some(script.clone()),
+            None,
+            false,
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // Restart — must stop the current agent AND respawn with fresh=true.
+        std::env::set_var("ANSAMBEL_FAKE_ARGV_DUMP", &dump2);
+        restart_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_r",
+            Some(script.clone()),
+            None,
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // Assert: dump2 (second spawn's argv) MUST NOT contain --continue.
+        let dump2_content = std::fs::read_to_string(&dump2).unwrap();
+        assert!(
+            !dump2_content.lines().any(|l| l == "--continue"),
+            "restart must respawn with --continue omitted: {dump2_content:?}"
+        );
+        // Assert: the state now has an agent for ws_r (the new one, not the old).
+        assert!(state.lock().unwrap().agents.contains_key("ws_r"));
+    }
+
+    #[test]
+    fn restart_agent_inner_with_no_existing_agent_is_ok_and_spawns_fresh() {
+        // No prior spawn — restart still works (stop is a silent no-op),
+        // and the spawn side goes fresh.
+        let tmp = tempfile::tempdir().unwrap();
+        let dump = tmp.path().join("argv.txt");
+        let script = tmp.path().join("fake-claude.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 1\n",
+                dump.display()
+            ),
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .args(["+x", script.to_str().unwrap()])
+            .status()
+            .unwrap();
+        let state = make_state_with_workspace(tmp.path(), "ws_r2");
+        restart_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_r2",
+            Some(script.clone()),
+            None,
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let dump_content = std::fs::read_to_string(&dump).unwrap();
+        assert!(
+            !dump_content.lines().any(|l| l == "--continue"),
+            "restart with no prior agent must still spawn fresh: {dump_content:?}"
         );
     }
 }
