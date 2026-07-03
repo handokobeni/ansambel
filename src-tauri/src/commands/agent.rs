@@ -62,6 +62,7 @@ pub async fn spawn_agent(
         &workspace_id,
         claude_path,
         Some(&publisher_tx),
+        false, // fresh: resume previous conversation by default
     )
     .map_err(|e| e.to_string())?;
     spawn_reader_thread(

@@ -195,6 +195,7 @@ pub fn spawn_agent_inner(
     workspace_id: &str,
     claude_path: Option<PathBuf>,
     publisher_tx: Option<&WorkspaceEventTx>,
+    fresh: bool,
 ) -> AppResult<AgentProcess> {
     let (worktree_dir, repo_id, ws_title, ws_description) = {
         let s = state.lock().map_err(|e| AppError::Other(e.to_string()))?;
@@ -237,6 +238,9 @@ pub fn spawn_agent_inner(
         "--disallowedTools",
         "EnterWorktree,ExitWorktree",
     ]);
+    if !fresh {
+        cmd.arg("--continue");
+    }
     cmd.current_dir(&worktree_dir);
 
     let prefix = build_system_prompt_prefix_with_task(
@@ -992,7 +996,7 @@ mod tests {
     fn spawn_agent_unknown_workspace_returns_err() {
         let state = make_state();
         let tmp = make_data_dir();
-        let result = spawn_agent_inner(state.clone(), tmp.path(), "ws_missing", None, None);
+        let result = spawn_agent_inner(state.clone(), tmp.path(), "ws_missing", None, None, false);
         assert!(result.is_err());
         let msg = result.err().unwrap().to_string();
         assert!(
@@ -1020,7 +1024,7 @@ mod tests {
                 cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             },
         );
-        let result = spawn_agent_inner(state, tmp.path(), "ws_a", None, None);
+        let result = spawn_agent_inner(state, tmp.path(), "ws_a", None, None, false);
         assert!(result.is_err());
         assert!(result
             .err()
@@ -1041,7 +1045,7 @@ mod tests {
         } else {
             std::path::PathBuf::from("/bin/echo")
         };
-        let result = spawn_agent_inner(state, tmp.path(), "ws_b", Some(echo_path), None);
+        let result = spawn_agent_inner(state, tmp.path(), "ws_b", Some(echo_path), None, false);
         assert!(result.is_ok(), "got err: {:?}", result.err());
     }
 
@@ -1058,7 +1062,15 @@ mod tests {
         } else {
             std::path::PathBuf::from("/bin/echo")
         };
-        spawn_agent_inner(state.clone(), tmp.path(), "ws_c", Some(echo_path), None).unwrap();
+        spawn_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_c",
+            Some(echo_path),
+            None,
+            false,
+        )
+        .unwrap();
         let s = state.lock().unwrap();
         let ws = s.workspaces.get("ws_c").unwrap();
         assert_eq!(ws.status, WorkspaceStatus::Running);
@@ -1076,7 +1088,15 @@ mod tests {
         } else {
             std::path::PathBuf::from("/bin/echo")
         };
-        spawn_agent_inner(state.clone(), tmp.path(), "ws_d", Some(echo_path), None).unwrap();
+        spawn_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_d",
+            Some(echo_path),
+            None,
+            false,
+        )
+        .unwrap();
         let s = state.lock().unwrap();
         assert!(s.agents.contains_key("ws_d"));
     }
@@ -1848,7 +1868,7 @@ mod tests {
         write_workspace(&state, "ws_nobin", "repo_nobin", worktree);
         // Use a path that definitely doesn't exist.
         let bad_path = std::path::PathBuf::from("/tmp/definitely-does-not-exist-binary-xyz");
-        let result = spawn_agent_inner(state, tmp.path(), "ws_nobin", Some(bad_path), None);
+        let result = spawn_agent_inner(state, tmp.path(), "ws_nobin", Some(bad_path), None, false);
         // Should fail because the PTY can't spawn a non-existent binary.
         assert!(result.is_err());
     }
@@ -1937,7 +1957,14 @@ mod tests {
         } else {
             std::path::PathBuf::from("/bin/echo")
         };
-        let result = spawn_agent_inner(state.clone(), tmp.path(), "ws_ctx", Some(echo_path), None);
+        let result = spawn_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_ctx",
+            Some(echo_path),
+            None,
+            false,
+        );
         assert!(result.is_ok(), "got err: {:?}", result.err());
         assert_eq!(
             state
@@ -1975,7 +2002,7 @@ mod tests {
         } else {
             std::path::PathBuf::from("/bin/echo")
         };
-        let result = spawn_agent_inner(state, tmp.path(), "ws_race", Some(echo_path), None);
+        let result = spawn_agent_inner(state, tmp.path(), "ws_race", Some(echo_path), None, false);
         assert!(result.is_err());
         let err_msg = result.err().unwrap().to_string();
         assert!(err_msg.contains("already running"), "got: {err_msg}");
@@ -2475,7 +2502,15 @@ mod tests {
             std::path::PathBuf::from("/bin/echo")
         };
         let (tx, mut rx) = make_publisher_tx();
-        spawn_agent_inner(state, tmp.path(), "ws_emit_run", Some(echo_path), Some(&tx)).unwrap();
+        spawn_agent_inner(
+            state,
+            tmp.path(),
+            "ws_emit_run",
+            Some(echo_path),
+            Some(&tx),
+            false,
+        )
+        .unwrap();
         let ev = rx.try_recv().expect("StatusChanged should be emitted");
         match ev {
             crate::state::WorkspaceEvent::StatusChanged {
@@ -2872,5 +2907,88 @@ mod tests {
             }
             other => panic!("expected StatusChanged Waiting, got {other:?}"),
         }
+    }
+
+    // ── fresh / --continue tests ────────────────────────────────────────────
+
+    fn make_state_with_workspace(data_dir: &Path, ws_id: &str) -> Arc<Mutex<AppState>> {
+        let state = make_state();
+        let worktree = data_dir.join("workspaces").join(ws_id);
+        std::fs::create_dir_all(&worktree).unwrap();
+        write_workspace(&state, ws_id, "repo_x", worktree);
+        state
+    }
+
+    #[test]
+    fn spawn_agent_inner_with_fresh_false_passes_continue_flag() {
+        // Mock claude as a shell script that dumps its argv to a file so we
+        // can assert the exact args after spawn returns.
+        let tmp = tempfile::tempdir().unwrap();
+        let argv_dump = tmp.path().join("argv.txt");
+        let script = tmp.path().join("fake-claude.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 1\n",
+                argv_dump.display()
+            ),
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .args(["+x", script.to_str().unwrap()])
+            .status()
+            .unwrap();
+        let state = make_state_with_workspace(tmp.path(), "ws_c");
+        let _ = spawn_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_c",
+            Some(script.clone()),
+            None,
+            false, // fresh
+        )
+        .unwrap();
+        // Give the script a moment to dump argv before we read it.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let dump = std::fs::read_to_string(&argv_dump).unwrap();
+        assert!(
+            dump.lines().any(|l| l == "--continue"),
+            "argv should include --continue when fresh=false: {dump:?}"
+        );
+    }
+
+    #[test]
+    fn spawn_agent_inner_with_fresh_true_omits_continue_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let argv_dump = tmp.path().join("argv.txt");
+        let script = tmp.path().join("fake-claude.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nsleep 1\n",
+                argv_dump.display()
+            ),
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .args(["+x", script.to_str().unwrap()])
+            .status()
+            .unwrap();
+        let state = make_state_with_workspace(tmp.path(), "ws_f");
+        let _ = spawn_agent_inner(
+            state.clone(),
+            tmp.path(),
+            "ws_f",
+            Some(script.clone()),
+            None,
+            true, // fresh
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let dump = std::fs::read_to_string(&argv_dump).unwrap();
+        assert!(
+            !dump.lines().any(|l| l == "--continue"),
+            "argv must NOT include --continue when fresh=true: {dump:?}"
+        );
     }
 }
